@@ -38,7 +38,9 @@ Result: PASS, with a roll-date mismatch that plan 03 must handle (see below)
 - **LSE rolls later than `instruments.yaml`.** For 14 of the 15 quarterly rolls from 2023-03 to 2026-09, the basis jump falls at the start of expiry week: the Sunday 18:00 ET open (trading day Monday), or for a few rolls a day later (ES 2026-09, NQ 2024-12, 2025-03, 2026-06, 2026-09). The exception, ES 2023-03, is ambiguous: its largest jump (16 points) is at the Friday cash close, inside spot-only RTH data. Our calendar rolls on the Thursday 8 days before expiry. So for about 3 trading days each quarter (Thu, Fri, Mon and sometimes Tue), `ES.F`/`NQ.F` prices come from the expiring contract while `front_month()` names the next one. The price gap is the roll spread: about 15–80 ES points and 60–330 NQ points in 2023–2026 (larger when rates are higher).
 - Before 2023 the roll date can't be checked this way (spot history starts 2023-02).
 
-## Roll mismatch — options for plan 03 (needs a decision)
+## Roll mismatch — options for plan 03
+
+**Chosen (2026-10-10): option 2, with a fixed calendar window.** The skipped days are every trading day from the `instruments.yaml` roll day (the Thursday 8 days before expiry) through the Tuesday of expiry week, inclusive: Thu, Fri, Mon, Tue, so 4 trading days per quarterly roll, 16 a year. That window covers every observed LSE roll (Monday or Tuesday trading day) without detecting rolls in the data, which before 2023 would be guesswork (no spot history to measure the basis against). Backtests skip those days and live trading takes no entries on them, so both treat them the same.
 
 1. **Follow LSE's roll.** Find each roll in the data (the basis jump against spot from 2023, or a detected price jump earlier) and label bars with what LSE actually holds. Backtests stay right. Live trading then needs a rule for which contract NinjaTrader trades during those ~3 days.
 2. **Keep the CME calendar and drop the mismatch days.** Bars between our roll and LSE's are marked unusable: skipped in backtests, no trading live. About 12 trading days a year.
@@ -75,4 +77,4 @@ Deferred to plan 22 (needs the add-on and a sim account).
 - Items 1–2: PASS → plan 03 may run. FAIL → stop; revisit the data source (Databento is the known alternative) before plan 03.
 - Items 3–4: PASS → plans 04, 21 may run. FAIL → live trading blocked until the user picks another live source; plans 03, 05–18 continue.
 
-Decision: Items 1–2 PASS → plan 03 may run once a roll-mismatch option is chosen. Items 3–4 pending (weekday run needed; the live tier may not include futures).
+Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Items 3–4 pending (weekday run needed; the live tier may not include futures).

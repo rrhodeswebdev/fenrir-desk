@@ -1,5 +1,6 @@
 # From Lucid's help center (LucidFlex collection, articles updated 2026-07-28 to 2026-08-31).
-# daily_loss_limit: null is the "DLL off" purchase option; Lucid does not publish the DLL-on amounts.
+# daily_loss_limit is the amount when the optional DLL is on; null until Lucid's amount is known.
+# Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
 firm: lucid
 account: flex-100k
 verified_on: 2026-10-10

@@ -1,5 +1,7 @@
 """Reject a bracket whose stop-out would breach a limit. Shared by backtest and live."""
 
+import math
+
 from fenrir.core.actions import Bracket
 from fenrir.core.instruments import ContractSpec
 from fenrir.rules.account import phase_rules
@@ -18,6 +20,11 @@ def check(
 ) -> str | None:
     if bracket.qty <= 0:
         return f"qty must be positive, got {bracket.qty}"
+    if not all(map(math.isfinite, (entry_price, bracket.stop, bracket.target))):
+        return (
+            f"prices must be finite: entry {entry_price}, stop {bracket.stop},"
+            f" target {bracket.target}"
+        )
     sign = 1 if bracket.side == "long" else -1
     if sign * (entry_price - bracket.stop) <= 0:
         return (

@@ -103,3 +103,11 @@ def test_stop_out_exactly_at_daily_loss_rejected(base, make_state):
     base["evaluation"]["daily_loss_limit"] = 500
     assert "daily loss" in run(make_state(), base, short(20024.75))  # (24.75 + 0.25) x 20 = 500
     assert run(make_state(), base, short(20024.5)) is None  # 495
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_non_finite_prices_rejected(base, make_state, bad):
+    assert "finite" in run(make_state(), base, long(bad))
+    assert "finite" in run(make_state(), base, long(19980.0, target=bad))
+    rules = AccountRules.model_validate(base)
+    assert "finite" in check(make_state(), rules, long(19980.0), NQ, bad, 0.0)

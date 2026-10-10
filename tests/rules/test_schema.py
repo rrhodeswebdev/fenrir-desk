@@ -203,3 +203,9 @@ def test_payout_max_amount_must_be_positive(base):
     base["funded"]["payout"]["max_amount"] = 0
     with pytest.raises(ValidationError, match="max_amount"):
         AccountRules.model_validate(base)
+
+
+def test_eval_fee_is_not_a_rule(base):
+    base["costs"]["eval_fee"] = 100  # what you paid is a report input, not a firm rule
+    with pytest.raises(ValidationError, match="eval_fee"):
+        AccountRules.model_validate(base)

@@ -1,5 +1,4 @@
 # From Lucid's help center (LucidFlex collection, articles updated 2026-07-28 to 2026-08-31).
-# NOT VERIFIED: eval_fee (only on lucidtrading.com, which blocks scripts). Enter it from your receipt.
 # daily_loss_limit: null is the "DLL off" purchase option; Lucid does not publish the DLL-on amounts.
 firm: lucid
 account: flex-25k
@@ -33,6 +32,5 @@ prohibited:
   microscalp: { max_profit_pct: 50, hold_seconds: 5 }
   hft: true
 costs:
-  eval_fee: 0  # NOT VERIFIED, see header
   activation_fee: 0
   commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

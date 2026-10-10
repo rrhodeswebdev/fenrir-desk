@@ -108,7 +108,7 @@ class Commission(_Model):
 
 
 class Costs(_Model):
-    eval_fee: Money
+    # no eval_fee: the price paid varies with coupons, so it is an attempts-report input
     activation_fee: Money
     commission_per_side: Commission
 

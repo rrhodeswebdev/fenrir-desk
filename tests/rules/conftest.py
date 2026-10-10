@@ -25,7 +25,6 @@ BASE = {
     "contracts": {"max_minis": 4, "micros_per_mini": 10},
     "prohibited": {"microscalp": {"max_profit_pct": 50, "hold_seconds": 5}, "hft": True},
     "costs": {
-        "eval_fee": 0,
         "activation_fee": 0,
         "commission_per_side": {"ES": 0, "MES": 0, "NQ": 0, "MNQ": 0},
     },

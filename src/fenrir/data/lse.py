@@ -10,6 +10,7 @@ from fenrir.data.store import SCHEMA
 from fenrir.settings import Settings
 
 PAGE = 5000  # max rows per candles() call
+TICK = 0.25  # ES and NQ price increment
 
 
 def lse_symbol(contract: str) -> str:
@@ -46,8 +47,11 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
         {
             # timestamps are bar open, UTC (verified by the gate)
             "ts": [datetime.fromisoformat(r["timestamp"]).astimezone(UTC) for r in rows],
-            # the vault returns float noise (7827.250000000001); ES/NQ prices sit on 0.25 ticks
-            **{c: [round(r[c], 2) for r in rows] for c in ("open", "high", "low", "close")},
+            # vault returns float noise and off-tick values; snap to 0.25 tick
+            **{
+                c: [round(r[c] / TICK) * TICK for r in rows]
+                for c in ("open", "high", "low", "close")
+            },
             "volume": [round(r["volume"]) for r in rows],
         },
         schema=SCHEMA,

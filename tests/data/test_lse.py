@@ -18,7 +18,7 @@ def test_fetch_contract_pages_and_cleans(monkeypatch):
         {
             "timestamp": "2025-12-01T14:30:00Z",
             "open": 7827.250000000001,
-            "high": 7828.0,
+            "high": 7829.2,
             "low": 7827.0,
             "close": 7827.5,
             "volume": 3.0,
@@ -56,6 +56,7 @@ def test_fetch_contract_pages_and_cleans(monkeypatch):
     df = fetch_contract(Settings(lse_api_key="k"), w)
     assert df["ts"].to_list() == [datetime(2025, 12, 1, 14, m, tzinfo=UTC) for m in (30, 31, 32)]
     assert df["open"].to_list() == [7827.25, 7827.5, 7828.75]
+    assert df["high"].to_list() == [7829.25, 7829.0, 7829.0]  # 7829.2 snaps to 7829.25
     assert df["volume"].to_list() == [3, 2, 1]
     assert [c[0] for c in calls] == ["NQ.F", "NQ.F"]
     assert calls[0][2] == "2025-11-30T23:00:00"  # 18:00 New York (EST) the evening before

@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,6 +11,11 @@ def test_base_parses(base):
     assert rules.funded.payout.split_pct == 90
     assert rules.evaluation.max_drawdown.trailing == "end_of_day"
     assert rules.evaluation.profit_target == 3000.0
+
+
+def test_verified_on_accepts_iso_string(base):
+    base["verified_on"] = "2026-10-10"  # what JSON and the rules form send
+    assert AccountRules.model_validate(base).verified_on == date(2026, 10, 10)
 
 
 def test_locks_at_defaults_to_none(base):
@@ -65,13 +72,13 @@ def test_unknown_time_zone_rejected(base):
 
 def test_evaluation_with_payout_rejected(base):
     base["evaluation"]["payout"] = base["funded"]["payout"]
-    with pytest.raises(ValidationError, match="evaluation needs"):
+    with pytest.raises(ValidationError, match=r"evaluation\.payout\n  Extra inputs"):
         AccountRules.model_validate(base)
 
 
 def test_funded_with_profit_target_rejected(base):
     base["funded"]["profit_target"] = 3000
-    with pytest.raises(ValidationError, match="funded needs"):
+    with pytest.raises(ValidationError, match=r"funded\.profit_target\n  Extra inputs"):
         AccountRules.model_validate(base)
 
 

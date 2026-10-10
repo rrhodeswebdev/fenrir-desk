@@ -4,7 +4,7 @@ from datetime import date
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Pct = Annotated[float, Field(gt=0, le=100)]
 Money = Annotated[float, Field(ge=0)]
@@ -35,12 +35,20 @@ class Payout(_Model):
 
 
 class Phase(_Model):
+    """What both phases share; plan 06 judges either phase through this."""
+
     max_drawdown: Drawdown
     daily_loss_limit: float | None = Field(default=None, gt=0)
     consistency: Consistency | None = None
     min_trading_days: int = Field(default=0, ge=0)
-    profit_target: float | None = Field(default=None, gt=0)  # evaluation only
-    payout: Payout | None = None  # funded only
+
+
+class Evaluation(Phase):
+    profit_target: float = Field(gt=0)
+
+
+class Funded(Phase):
+    payout: Payout
 
 
 class Session(_Model):
@@ -88,21 +96,13 @@ class Costs(_Model):
 class AccountRules(_Model):
     firm: str = Field(pattern=r"^[a-z0-9]+$")
     account: str = Field(pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
-    verified_on: date | None  # None = not yet verified against the firm's site
+    # None = not yet verified; lax so JSON/form "2026-10-10" strings parse
+    verified_on: date | None = Field(strict=False)
     source_url: str
     automation_allowed: bool
-    evaluation: Phase | None  # None for accounts with no evaluation (Lucid Direct)
-    funded: Phase
+    evaluation: Evaluation | None  # None for accounts with no evaluation (Lucid Direct)
+    funded: Funded
     session: Session
     contracts: Contracts
     prohibited: Prohibited
     costs: Costs
-
-    @model_validator(mode="after")
-    def _phase_shapes(self) -> "AccountRules":
-        e, f = self.evaluation, self.funded
-        if e is not None and (e.profit_target is None or e.payout is not None):
-            raise ValueError("evaluation needs profit_target and no payout")
-        if f.payout is None or f.profit_target is not None:
-            raise ValueError("funded needs payout and no profit_target")
-        return self

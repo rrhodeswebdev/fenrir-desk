@@ -67,3 +67,36 @@ def test_compare_bars_no_overlap_is_not_a_pass():
 
 def test_lag_stats():
     assert gate.lag_stats([0.25, 0.75, 0.5, 9.0]) == (0.625, 9.0)
+
+
+def test_bucket_ticks_skips_ticks_without_volume():
+    ticks = [
+        {"ts": utc(2026, 10, 8, 14, 30, 1), "price": 100.0, "size": 2, "symbol": "NQZ6"},
+        {"ts": utc(2026, 10, 8, 14, 30, 2), "price": 120.0, "size": None, "symbol": "NQZ6"},
+        {"ts": utc(2026, 10, 8, 14, 30, 3), "price": 80.0, "size": 0, "symbol": "NQZ6"},
+    ]
+    assert gate.bucket_ticks(ticks) == {
+        ("NQZ6", utc(2026, 10, 8, 14, 30)): (100.0, 100.0, 100.0, 100.0, 2),
+    }
+
+
+def test_coverage_problems_needs_every_symbol_and_enough_minutes():
+    shared = {("NQ.F", utc(2026, 10, 8, 14, m)) for m in range(3)}
+    assert gate.coverage_problems(shared, ["NQ.F"], 3) == []
+    assert gate.coverage_problems(shared, ["NQ.F", "ES.F"], 3) == [
+        "ES.F: 0 minutes compared, need 3"
+    ]
+    assert gate.coverage_problems(shared, ["NQ.F"], 4) == ["NQ.F: 3 minutes compared, need 4"]
+
+
+def test_until_deadline_stops_when_the_stream_is_quiet():
+    import asyncio
+
+    async def silent():
+        await asyncio.sleep(3600)
+        yield {}
+
+    async def drain():
+        return [t async for t in gate.until_deadline(silent(), 0.05)]
+
+    assert asyncio.run(drain()) == []

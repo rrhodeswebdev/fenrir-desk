@@ -2,7 +2,8 @@
 
 Run: uv run --with lse-data python scripts/lse_gate.py history ES.F --start 2010-01-01
      uv run --with lse-data python scripts/lse_gate.py live NQ.F ES.F --minutes 10
-     uv run --with lse-data python scripts/lse_gate.py compare data/gate/ticks-2026-10-12.jsonl
+     uv run --with lse-data python scripts/lse_gate.py compare data/gate/ticks-<run>.jsonl \
+         --symbols NQ.F ES.F
 """
 
 import argparse
@@ -10,6 +11,7 @@ import asyncio
 import json
 import statistics
 import time
+from collections import Counter
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -59,7 +61,7 @@ def fetch_history(api_key: str, symbol: str, start: datetime, end: datetime) -> 
 
 
 async def stream_trades(api_key: str, symbols: list[str]) -> AsyncIterator[dict]:
-    """Trades as dicts: ts (aware UTC), price, size, symbol."""
+    """Ticks as dicts: ts (aware UTC), price, size (None = no volume), bid, ask, symbol."""
     from lse import LSE
 
     async for t in LSE(api_key=api_key).stream_async(symbols):
@@ -68,7 +70,9 @@ async def stream_trades(api_key: str, symbols: list[str]) -> AsyncIterator[dict]
         yield {
             "ts": t.datetime.astimezone(UTC),
             "price": t.price,
-            "size": t.volume or 0,
+            "size": t.volume,
+            "bid": t.bid,
+            "ask": t.ask,
             "symbol": t.symbol,
         }
 
@@ -97,6 +101,10 @@ def bucket_ticks(
 ) -> dict[tuple[str, datetime], tuple[float, float, float, float, int]]:
     bars: dict[tuple[str, datetime], tuple[float, float, float, float, int]] = {}
     for t in sorted(ticks, key=lambda t: t["ts"]):
+        # shortcut: lse-data 0.14 Tick has no trade/quote flag, so a tick with no volume is
+        # taken as a quote; confirm with the feed's docs if item 4 shows OHLC mismatches
+        if not t["size"]:
+            continue
         key = (t["symbol"], t["ts"].replace(second=0, microsecond=0))
         p, s = float(t["price"]), int(t["size"])
         o, h, lo, _, v = bars.get(key, (p, p, p, p, 0))
@@ -120,6 +128,15 @@ def compare_bars(live: dict, hist: dict, tick: float) -> tuple[int, list[str]]:
         if abs(a - b) > tick + 1e-9
     ]
     return len(shared), problems
+
+
+def coverage_problems(shared: set, symbols: list[str], min_minutes: int) -> list[str]:
+    counts = Counter(sym for sym, _ in shared)
+    return [
+        f"{s}: {counts[s]} minutes compared, need {min_minutes}"
+        for s in symbols
+        if counts[s] < min_minutes
+    ]
 
 
 def lag_stats(lags: list[float]) -> tuple[float, float]:
@@ -153,29 +170,44 @@ def cmd_history(args: argparse.Namespace) -> None:
     print(f"saved {out}")
 
 
-async def _record(symbols: list[str], minutes: float, out: Path) -> list[float]:
+async def until_deadline(stream: AsyncIterator[dict], seconds: float) -> AsyncIterator[dict]:
+    """Items from `stream` until `seconds` pass, even if the stream goes quiet."""
+    stop = time.monotonic() + seconds
+    try:
+        while (left := stop - time.monotonic()) > 0:
+            try:
+                yield await asyncio.wait_for(anext(stream), left)
+            except (TimeoutError, StopAsyncIteration):
+                return
+    finally:
+        await stream.aclose()
+
+
+async def _record(symbols: list[str], minutes: float, out: Path) -> tuple[list[float], int]:
     key = load_settings().lse_api_key
-    stop = time.monotonic() + minutes * 60
     lags: list[float] = []
-    with out.open("a") as f:
-        async for t in stream_trades(key, symbols):
+    quotes = 0
+    with out.open("w") as f:
+        async for t in until_deadline(stream_trades(key, symbols), minutes * 60):
             lags.append((datetime.now(UTC) - t["ts"]).total_seconds())
+            quotes += not t["size"]
             f.write(json.dumps(t, default=str) + "\n")
-            if time.monotonic() >= stop:
-                break
-    return lags
+    return lags, quotes
 
 
 def cmd_live(args: argparse.Namespace) -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    out = OUT / f"ticks-{datetime.now(UTC).date()}.jsonl"
-    lags = asyncio.run(_record(args.symbols, args.minutes, out))
+    out = OUT / f"ticks-{datetime.now(UTC):%Y-%m-%dT%H%M%S}.jsonl"  # one file per run
+    lags, quotes = asyncio.run(_record(args.symbols, args.minutes, out))
     if not lags:
         print("NO TICKS RECEIVED")
         return
     median, p95 = lag_stats(lags)
     verdict = "PASS" if median <= 5 else "FAIL"
-    print(f"ticks={len(lags)} lag median={median:.2f}s p95={p95:.2f}s -> {verdict}")
+    print(
+        f"ticks={len(lags)} (no volume: {quotes})"
+        f" lag median={median:.2f}s p95={p95:.2f}s -> {verdict}"
+    )
     print(f"saved {out}")
 
 
@@ -200,10 +232,11 @@ def cmd_compare(args: argparse.Namespace) -> None:
         for r in fetch_history(key, sym, start, end):
             hist[(sym, r["ts"])] = (r["open"], r["high"], r["low"], r["close"], r["volume"])
     compared, problems = compare_bars(live, hist, tick=args.tick)
+    short = coverage_problems(set(live) & set(hist), args.symbols, args.min_minutes)
     print(f"compared={compared} mismatches={len(problems)}")
-    for p in problems[:50]:
+    for p in [*short, *problems[:50]]:
         print("  ", p)
-    print("PASS" if compared and not problems else "FAIL")
+    print("PASS" if compared and not problems and not short else "FAIL")
 
 
 def main() -> None:
@@ -223,6 +256,9 @@ def main() -> None:
     c = sub.add_parser("compare", help="item 4: live-built bars vs historical bars")
     c.add_argument("ticks")
     c.add_argument("--tick", type=float, default=0.25)
+    c.add_argument("--symbols", nargs="+", required=True, help="every symbol recorded")
+    # item 4 needs >= 90% of a 23-hour session (1380 minutes) per symbol
+    c.add_argument("--min-minutes", type=int, default=1242)
     c.set_defaults(func=cmd_compare)
     args = p.parse_args()
     args.func(args)

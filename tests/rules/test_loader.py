@@ -1,0 +1,81 @@
+from pathlib import Path
+
+import pytest
+import yaml
+
+from fenrir.rules.loader import account_id, dump_account, list_accounts, load_account, rules_path
+
+
+def write(rules_dir: Path, data: dict, rel: str = "lucid/flex-50k.yaml") -> Path:
+    path = rules_dir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(data, sort_keys=False))
+    return path
+
+
+def test_rules_path(tmp_path):
+    assert rules_path("lucid-flex-50k", tmp_path) == tmp_path / "lucid" / "flex-50k.yaml"
+
+
+@pytest.mark.parametrize("bad", ["lucid-../x", "../lucid-flex", "Lucid-Flex-50k", "lucid"])
+def test_rules_path_rejects_bad_ids(tmp_path, bad):
+    with pytest.raises(ValueError, match="invalid account id"):
+        rules_path(bad, tmp_path)
+
+
+def test_load_account(tmp_path, base):
+    write(tmp_path, base)
+    rules = load_account("lucid-flex-50k", tmp_path)
+    assert rules.contracts.max_minis == 4
+
+
+def test_account_id(tmp_path, base):
+    write(tmp_path, base)
+    assert account_id(load_account("lucid-flex-50k", tmp_path)) == "lucid-flex-50k"
+
+
+def test_unknown_account(tmp_path):
+    with pytest.raises(ValueError, match="unknown account 'lucid-pro-50k'"):
+        load_account("lucid-pro-50k", tmp_path)
+
+
+def test_empty_file_names_path(tmp_path):
+    path = tmp_path / "lucid" / "flex-50k.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("")
+    with pytest.raises(ValueError, match="flex-50k.yaml"):
+        load_account("lucid-flex-50k", tmp_path)
+
+
+def test_malformed_yaml_names_path(tmp_path):
+    path = tmp_path / "lucid" / "flex-50k.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("firm: lucid\n\taccount: [flex")
+    with pytest.raises(ValueError, match="flex-50k.yaml"):
+        load_account("lucid-flex-50k", tmp_path)
+
+
+def test_unquoted_flat_by_rejected(tmp_path, base):
+    path = write(tmp_path, base)
+    path.write_text(path.read_text().replace("'16:45'", "16:45"))  # YAML 1.1 reads 16:45 as 1005
+    with pytest.raises(ValueError, match="flat_by"):
+        load_account("lucid-flex-50k", tmp_path)
+
+
+def test_mismatched_id_rejected(tmp_path, base):
+    write(tmp_path, base, rel="lucid/pro-50k.yaml")
+    with pytest.raises(ValueError, match="says lucid-flex-50k"):
+        load_account("lucid-pro-50k", tmp_path)
+
+
+def test_list_accounts_sorted(tmp_path, base):
+    write(tmp_path, base, rel="lucid/pro-50k.yaml")
+    write(tmp_path, base, rel="lucid/flex-50k.yaml")
+    assert list_accounts(tmp_path) == ("lucid-flex-50k", "lucid-pro-50k")
+
+
+def test_dump_round_trip(tmp_path, base):
+    write(tmp_path, base)
+    rules = load_account("lucid-flex-50k", tmp_path)
+    (tmp_path / "lucid" / "flex-50k.yaml").write_text(dump_account(rules))
+    assert load_account("lucid-flex-50k", tmp_path) == rules

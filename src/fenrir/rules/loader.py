@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import ValidationError
 
 from fenrir.rules.schema import AccountRules
 
@@ -28,7 +27,8 @@ def load_account(account_id: str, rules_dir: Path) -> AccountRules:
         rules = AccountRules.model_validate(yaml.safe_load(path.read_text()))
     except FileNotFoundError:
         raise ValueError(f"unknown account {account_id!r}: {path} not found") from None
-    except (yaml.YAMLError, ValidationError) as e:
+    # ValueError also covers ValidationError, bad YAML dates and non-UTF-8 files
+    except (yaml.YAMLError, ValueError, OSError) as e:
         raise ValueError(f"{path}: {e}") from e
     found = f"{rules.firm}-{rules.account}"
     if found != account_id:

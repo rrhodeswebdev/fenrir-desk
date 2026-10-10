@@ -55,6 +55,19 @@ def test_malformed_yaml_names_path(tmp_path):
         load_account("lucid-flex-50k", tmp_path)
 
 
+def test_bad_date_names_path(tmp_path, base):
+    path = write(tmp_path, base)
+    path.write_text(path.read_text().replace("verified_on: null", "verified_on: 2026-13-01"))
+    with pytest.raises(ValueError, match="flex-50k.yaml"):  # PyYAML raises a bare ValueError
+        load_account("lucid-flex-50k", tmp_path)
+
+
+def test_unreadable_path_is_value_error(tmp_path):
+    (tmp_path / "lucid" / "flex-50k.yaml").mkdir(parents=True)  # a directory, not a file
+    with pytest.raises(ValueError, match="flex-50k.yaml"):
+        load_account("lucid-flex-50k", tmp_path)
+
+
 def test_unquoted_flat_by_rejected(tmp_path, base):
     path = write(tmp_path, base)
     path.write_text(path.read_text().replace("'16:45'", "16:45"))  # YAML 1.1 reads 16:45 as 1005

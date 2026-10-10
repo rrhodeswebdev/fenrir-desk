@@ -1,8 +1,14 @@
 # src/fenrir/rules/
 
-Prop-firm account rules: the YAML schema, loading account files, and (plan 06) the pure rule functions that judge an account's state.
+Prop-firm account rules: the YAML schema and loader, account state, one pure function per rule kind, pass/payout gates and the pre-trade check.
 
-- Entry points: `schema.py` (`AccountRules` and its sub-models), `loader.py` (`load_account`, `list_accounts`, `rules_path`, `dump_account`, `account_id`).
-- Pure vs shell: `schema.py` is pure; `loader.py` reads files (shell).
-- Not here: the YAML files themselves (`rules/lucid/`), contract specs (`src/fenrir/core/instruments.py`).
-- Tests: `tests/rules/` (`conftest.py` has the `base` rules-dict fixture).
+- Entry points: `account.py` (`initial_state`, `build_rules`, `apply`, `passed`, `payout`, `view`, `with_dll`), `pretrade.py` (`check`), `state.py` (`AccountState`, events, `Breach`, `AccountView`), `loader.py` (`load_account`, `list_accounts`, `rules_path`, `dump_account`), `schema.py` (`AccountRules`).
+- One rule kind per module: `drawdown.py`, `daily_loss.py`, `flat_by.py`, `consistency.py`, `microscalp.py`, `contracts.py`; `ledger.book` does the accounting and runs first.
+- Pure vs shell: everything is pure except `loader.py` (reads files).
+- Lucid mechanics this code assumes are listed in `docs/superpowers/plans/2026-10-10-06-rule-functions.md` ("Lucid mechanics to confirm"). Change one module per wrong assumption.
+- Money limits compare to the cent through `state.at_or_below`; float sums of commissions drift, so never compare balances with bare `<=`.
+- Funded contract limit follows the `funded.scaling` tiers, chosen from the balance at the last session end (`contracts.max_minis`).
+- `payout` models the first payout only: closed days at or above `min_day_profit` count toward `min_days`, consistency must hold, the request is capped at `max_amount` and must be at least `min_profit`, then `split_pct` applies.
+- A `flat_by` breach means an engine failed to flatten before the cutoff (an engine-bug signal; Lucid itself auto-closes at 16:45 without failing the account).
+- Not here: the YAML files (`rules/lucid/`), fills and the attempt fold (`src/fenrir/backtest/`), the live safety margin (`src/fenrir/live/`).
+- Tests: `tests/rules/` (`conftest.py` has `base`, `make_state`, `et`).

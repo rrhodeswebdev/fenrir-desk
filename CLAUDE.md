@@ -94,6 +94,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `tests/` | pytest suite mirroring `src/fenrir/`; `fixtures/` holds shared test data. |
 | `src/fenrir/rules/` | Rules schema, loader, account state and pure rule functions. |
 | `rules/` | Prop-firm rule YAML files, one per account type and size, entered from the firm's own site. |
+| `src/fenrir/strategy/` | Strategy contract (`Ctx`, `Position`, `Strategy`) and the loader that imports and validates strategy files. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

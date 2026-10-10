@@ -77,10 +77,10 @@ def test_merge_key_can_override(tmp_path, base):
     eval_dd = "evaluation:\n  profit_target: 3000\n  max_drawdown:"
     funded_dd = "funded:\n  max_drawdown:\n    amount: 2000\n"
     assert eval_dd in text and funded_dd in text
-    merged = "funded:\n  max_drawdown:\n    <<: *dd\n    amount: 2500\n"
+    merged = "funded:\n  max_drawdown:\n    <<: *dd\n    amount: 1500\n"
     path.write_text(text.replace(eval_dd, eval_dd + " &dd").replace(funded_dd, merged))
     rules = load_account("lucid-flex-50k", tmp_path)
-    assert rules.funded.max_drawdown.amount == 2500
+    assert rules.funded.max_drawdown.amount == 1500
     assert rules.funded.max_drawdown.locks_at == 2100
 
 

@@ -1,10 +1,13 @@
 """Pydantic models for one prop-firm account type's rules (spec §4). Pure: no I/O."""
 
 from datetime import date
+from functools import cache
 from typing import Annotated, Literal
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import available_timezones
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+_zones = cache(available_timezones)  # scans tzdata on every call otherwise
 
 Pct = Annotated[float, Field(gt=0, le=100)]
 Money = Annotated[float, Field(ge=0)]
@@ -21,6 +24,12 @@ class Drawdown(_Model):
     locks_at: float | None = Field(
         default=None, gt=0
     )  # profit above start where the floor stops trailing
+
+    @model_validator(mode="after")
+    def _locks_at_or_above_start(self) -> "Drawdown":
+        if self.locks_at is not None and self.locks_at < self.amount:  # e.g. 210 for 2100
+            raise ValueError(f"locks_at {self.locks_at} is below amount {self.amount}")
+        return self
 
 
 class Consistency(_Model):
@@ -68,6 +77,9 @@ class Funded(Phase):
         starts = [t.from_profit for t in tiers]
         if starts[:1] != [0] or starts != sorted(set(starts)):
             raise ValueError("tiers must start at from_profit 0 and strictly increase")
+        minis = [t.max_minis for t in tiers]
+        if minis != sorted(minis):
+            raise ValueError("tier max_minis must not shrink as profit grows")
         return tiers
 
 
@@ -78,10 +90,9 @@ class Session(_Model):
     @field_validator("tz")
     @classmethod
     def _known_tz(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except (ZoneInfoNotFoundError, ValueError):
-            raise ValueError(f"unknown time zone {value!r}") from None
+        # not ZoneInfo(value): macOS finds "america/new_york", Linux (Docker) does not
+        if value not in _zones():
+            raise ValueError(f"unknown time zone {value!r}")
         return value
 
 
@@ -126,3 +137,13 @@ class AccountRules(_Model):
     contracts: Contracts
     prohibited: Prohibited
     costs: Costs
+
+    @model_validator(mode="after")
+    def _scaling_reaches_max_minis(self) -> "AccountRules":
+        tiers = self.funded.scaling
+        if tiers is not None and tiers[-1].max_minis != self.contracts.max_minis:
+            raise ValueError(
+                f"funded.scaling top tier allows {tiers[-1].max_minis} minis,"
+                f" contracts.max_minis is {self.contracts.max_minis}"
+            )
+        return self

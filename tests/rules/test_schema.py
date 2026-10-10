@@ -173,10 +173,10 @@ def test_scaling_and_payout_extras_default_off(base):
 def test_scaling_parses_from_yaml_list(base):
     base["funded"]["scaling"] = [
         {"from_profit": 0, "max_minis": 2},
-        {"from_profit": 1000, "max_minis": 3},
+        {"from_profit": 1000, "max_minis": 4},
     ]
     tiers = AccountRules.model_validate(base).funded.scaling
-    assert [(t.from_profit, t.max_minis) for t in tiers] == [(0, 2), (1000, 3)]
+    assert [(t.from_profit, t.max_minis) for t in tiers] == [(0, 2), (1000, 4)]
 
 
 @pytest.mark.parametrize(
@@ -208,4 +208,44 @@ def test_payout_max_amount_must_be_positive(base):
 def test_eval_fee_is_not_a_rule(base):
     base["costs"]["eval_fee"] = 100  # what you paid is a report input, not a firm rule
     with pytest.raises(ValidationError, match="eval_fee"):
+        AccountRules.model_validate(base)
+
+
+TIERS = [{"from_profit": 0, "max_minis": 2}, {"from_profit": 2000, "max_minis": 4}]
+
+
+@pytest.mark.parametrize(
+    "tiers",
+    [
+        [TIERS[0], {**TIERS[1], "max_minis": 40}],  # typo above contracts.max_minis
+        [TIERS[0], {**TIERS[1], "max_minis": 3}],  # never reaches the account's max size
+        [{**TIERS[0], "max_minis": 5}, TIERS[1]],  # shrinks as profit grows
+    ],
+)
+def test_scaling_must_climb_to_max_minis(base, tiers):
+    base["funded"]["scaling"] = tiers
+    with pytest.raises(ValidationError, match="scaling"):
+        AccountRules.model_validate(base)
+
+
+def test_scaling_reaching_max_minis_ok(base):
+    base["funded"]["scaling"] = TIERS
+    assert AccountRules.model_validate(base).funded.scaling[-1].max_minis == 4
+
+
+@pytest.mark.parametrize("phase", ["evaluation", "funded"])
+def test_locks_at_below_amount_rejected(base, phase):
+    base[phase]["max_drawdown"]["locks_at"] = 210  # slip for 2100; amount is 2000
+    with pytest.raises(ValidationError, match="locks_at"):
+        AccountRules.model_validate(base)
+
+
+def test_locks_at_equal_to_amount_ok(base):
+    base["funded"]["max_drawdown"]["locks_at"] = 2000  # floor locks at the starting balance
+    AccountRules.model_validate(base)
+
+
+def test_time_zone_is_case_sensitive(base):
+    base["session"]["tz"] = "america/new_york"  # loads on macOS, fails on Linux
+    with pytest.raises(ValidationError, match="time zone"):
         AccountRules.model_validate(base)

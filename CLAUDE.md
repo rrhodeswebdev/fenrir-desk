@@ -92,6 +92,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/cli/` | Typer CLI, one module per command group. Thin shell over the core. |
 | `src/fenrir/core/` | Pure shared domain types: `Bar`, actions, contract specs, rollover, trading days. |
 | `tests/` | pytest suite mirroring `src/fenrir/`; `fixtures/` holds shared test data. |
+| `scripts/` | One-off scripts run by hand (LSE data gate). Never imported by the app. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

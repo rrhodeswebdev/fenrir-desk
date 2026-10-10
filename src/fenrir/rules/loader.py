@@ -41,7 +41,9 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
 def load_account(aid: str, rules_dir: Path) -> AccountRules:
     path = rules_path(aid, rules_dir)
     try:
-        rules = AccountRules.model_validate(yaml.load(path.read_text(), _UniqueKeyLoader))
+        rules = AccountRules.model_validate(
+            yaml.load(path.read_text(encoding="utf-8"), _UniqueKeyLoader)
+        )
     except FileNotFoundError:
         raise ValueError(f"unknown account {aid!r}: {path} not found") from None
     # ValueError also covers ValidationError, bad YAML dates and non-UTF-8 files

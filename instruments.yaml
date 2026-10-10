@@ -1,0 +1,15 @@
+# Contract specs and rollover calendar. Backtests and live trading both read this file.
+# MES and MNQ use the ES and NQ price series; only the contract specs differ.
+contracts:
+  - { symbol: ES,  series: ES, point_value: 50, tick: 0.25, minis: 1 }
+  - { symbol: MES, series: ES, point_value: 5,  tick: 0.25, minis: 0.1 }
+  - { symbol: NQ,  series: NQ, point_value: 20, tick: 0.25, minis: 1 }
+  - { symbol: MNQ, series: NQ, point_value: 2,  tick: 0.25, minis: 0.1 }
+
+# Quarterly contracts (H M U Z). The front month moves to the next quarter on the
+# CME roll date: 8 days before expiry (the third Friday), always a Thursday.
+# Raise last_year before it runs out; first_year must not be after the oldest history pulled.
+rollover:
+  series: [ES, NQ]
+  first_year: 2008
+  last_year: 2030

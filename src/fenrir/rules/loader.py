@@ -38,18 +38,17 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
     return rules_dir / match[1] / f"{match[2]}.yaml"
 
 
-def load_account(account_id: str, rules_dir: Path) -> AccountRules:
-    path = rules_path(account_id, rules_dir)
+def load_account(aid: str, rules_dir: Path) -> AccountRules:
+    path = rules_path(aid, rules_dir)
     try:
         rules = AccountRules.model_validate(yaml.load(path.read_text(), _UniqueKeyLoader))
     except FileNotFoundError:
-        raise ValueError(f"unknown account {account_id!r}: {path} not found") from None
+        raise ValueError(f"unknown account {aid!r}: {path} not found") from None
     # ValueError also covers ValidationError, bad YAML dates and non-UTF-8 files
     except (yaml.YAMLError, ValueError, OSError) as e:
         raise ValueError(f"{path}: {e}") from e
-    found = f"{rules.firm}-{rules.account}"
-    if found != account_id:
-        raise ValueError(f"{path}: file says {found}, path says {account_id}")
+    if account_id(rules) != aid:
+        raise ValueError(f"{path}: file says {account_id(rules)}, path says {aid}")
     return rules
 
 

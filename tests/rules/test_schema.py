@@ -161,3 +161,45 @@ def test_model_is_frozen(base):
     with pytest.raises(ValidationError):
         rules.costs.commission_per_side.ES = -9
     hash(rules)  # usable as a cache key
+
+
+def test_scaling_and_payout_extras_default_off(base):
+    funded = AccountRules.model_validate(base).funded
+    assert funded.scaling is None
+    assert (funded.payout.min_day_profit, funded.payout.max_amount) == (0, None)
+    assert funded.payout.max_payouts is None
+
+
+def test_scaling_parses_from_yaml_list(base):
+    base["funded"]["scaling"] = [
+        {"from_profit": 0, "max_minis": 2},
+        {"from_profit": 1000, "max_minis": 3},
+    ]
+    tiers = AccountRules.model_validate(base).funded.scaling
+    assert [(t.from_profit, t.max_minis) for t in tiers] == [(0, 2), (1000, 3)]
+
+
+@pytest.mark.parametrize(
+    "tiers",
+    [
+        [],
+        [{"from_profit": 500, "max_minis": 2}],  # must start at 0 profit
+        [{"from_profit": 0, "max_minis": 2}, {"from_profit": 0, "max_minis": 3}],
+        [
+            {"from_profit": 0, "max_minis": 2},
+            {"from_profit": 2000, "max_minis": 3},
+            {"from_profit": 1000, "max_minis": 4},
+        ],
+        [{"from_profit": 0, "max_minis": 0}],
+    ],
+)
+def test_bad_scaling_rejected(base, tiers):
+    base["funded"]["scaling"] = tiers
+    with pytest.raises(ValidationError, match="scaling"):
+        AccountRules.model_validate(base)
+
+
+def test_payout_max_amount_must_be_positive(base):
+    base["funded"]["payout"]["max_amount"] = 0
+    with pytest.raises(ValidationError, match="max_amount"):
+        AccountRules.model_validate(base)

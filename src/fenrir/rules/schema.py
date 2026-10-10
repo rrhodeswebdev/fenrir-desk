@@ -31,7 +31,10 @@ class Payout(_Model):
     max_pct_of_profit: Pct
     split_pct: Pct
     min_days: int = Field(ge=0)
-    min_profit: Money
+    min_profit: Money  # smallest payout request
+    min_day_profit: Money = 0  # a day counts toward min_days only at or above this
+    max_amount: float | None = Field(default=None, gt=0)  # cap per payout
+    max_payouts: int | None = Field(default=None, gt=0)  # then the account moves on (e.g. live)
 
 
 class Phase(_Model):
@@ -47,8 +50,25 @@ class Evaluation(Phase):
     profit_target: float = Field(gt=0)
 
 
+class Tier(_Model):
+    from_profit: Money
+    max_minis: int = Field(gt=0)
+
+
 class Funded(Phase):
     payout: Payout
+    # max size by profit, recalculated at session end; None = contracts.max_minis throughout
+    scaling: tuple[Tier, ...] | None = Field(default=None, strict=False)  # lax: YAML gives a list
+
+    @field_validator("scaling")
+    @classmethod
+    def _tiers_ascend_from_zero(cls, tiers: tuple[Tier, ...] | None) -> tuple[Tier, ...] | None:
+        if tiers is None:
+            return None
+        starts = [t.from_profit for t in tiers]
+        if starts[:1] != [0] or starts != sorted(set(starts)):
+            raise ValueError("tiers must start at from_profit 0 and strictly increase")
+        return tiers
 
 
 class Session(_Model):

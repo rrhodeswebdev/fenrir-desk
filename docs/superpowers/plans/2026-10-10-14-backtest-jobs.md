@@ -6,7 +6,7 @@
 
 **Architecture:** Job state is pure (`fenrir.server.jobs`: frozen `Job`/`JobItem` plus transition functions). A thin shell (`fenrir.server.jobs_runner.JobRunner`) persists jobs to `data/jobs/<id>.json`, runs items one at a time on a worker thread through plan 10's `cached_run` (which already uses every CPU core per item), and pushes job changes to WebSocket listeners. Ranking for the comparison table is a pure function in `fenrir.backtest.compare` that sorts by tuning results only. The React side renders the server's grouped rows, the report JSON, and equity curves with Lightweight Charts.
 
-**Tech Stack:** Python 3.12, FastAPI, pydantic v2, pytest; React 19, TanStack Router + Query, `lightweight-charts` v5, Playwright.
+**Tech Stack:** Python 3.12, FastAPI, pydantic v2, pytest; React 19, TanStack Router + Query, `lightweight-charts` v5, Playwright. UI: Tailwind CSS v4 utility classes + shadcn/ui components (`@/components/ui/*`, set up in plan 12; add missing ones with `npx shadcn@latest add`); no custom CSS classes or inline styles except runtime-computed values.
 
 **Spec:** `docs/superpowers/specs/2026-10-10-fenrir-desk-v1-design.md` (§6 Grids and cache, §6 Report, §10 Backtests and Workbench rows)
 
@@ -980,6 +980,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Create: `web/src/backtests/types.ts`, `web/src/backtests/format.ts`, `web/src/backtests/useJobsSocket.ts`
 - Create: `web/src/backtests/RunForm.tsx`, `web/src/backtests/JobList.tsx`, `web/src/backtests/CompareTable.tsx`
 - Create: `web/src/backtests/CLAUDE.md`
+- Create (by shadcn CLI): `web/src/components/ui/{table,checkbox,label,tabs,badge}.tsx`
 - Modify: `web/src/routes/backtests.tsx`
 - Modify: `CLAUDE.md` (Directory Map table)
 
@@ -987,7 +988,12 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: `apiFetch`, `wsUrl`, `ApiError` (`web/src/api.ts`, plan 12); Task 4 API.
 - Produces: TS types `PeriodResult`, `Report`, `Job`, `JobItem`, `CompareGroup`, `Options`; `pct(x)`, `money(x)`, `num(x)` in `format.ts`; `errorText(e: unknown): string` in `web/src/errorText.ts`; `useJobsSocket()`; components `RunForm`, `JobList`, `CompareTable`. Query keys: `['backtests','options']`, `['backtests','jobs']`, `['backtests','results']`, `['backtests','compare',view]`, `['backtests','result',key]`.
 
-- [ ] **Step 1: Write the types and formatters**
+- [ ] **Step 1: Add the shadcn components this page needs**
+
+Run: `cd web && npx shadcn@latest add table checkbox label tabs badge && cd ..`
+Expected: `table.tsx`, `checkbox.tsx`, `label.tsx`, `tabs.tsx`, `badge.tsx` created in `web/src/components/ui/`. (`button` and `alert` exist from plan 12.)
+
+- [ ] **Step 1b: Write the types and formatters**
 
 `web/src/backtests/types.ts`:
 
@@ -1106,19 +1112,25 @@ export function useJobsSocket(): void {
 
 ```tsx
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useId, useState } from 'react'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
 import { apiFetch } from '../api'
 import { errorText } from '../errorText'
 import type { Options } from './types'
 
 function Picks({ legend, values, picked, toggle }: { legend: string; values: string[]; picked: Set<string>; toggle: (v: string) => void }) {
+  const base = useId()
   return (
-    <fieldset>
-      <legend>{legend}</legend>
-      {values.map((v) => (
-        <label key={v}>
-          <input type="checkbox" checked={picked.has(v)} onChange={() => toggle(v)} /> {v}
-        </label>
+    <fieldset className="space-y-2">
+      <legend className="mb-2 text-sm font-medium text-muted-foreground">{legend}</legend>
+      {values.map((v, i) => (
+        <div key={v} className="flex items-center gap-2">
+          <Checkbox id={`${base}-${i}`} checked={picked.has(v)} onCheckedChange={() => toggle(v)} />
+          <Label htmlFor={`${base}-${i}`}>{v}</Label>
+        </div>
       ))}
     </fieldset>
   )
@@ -1155,21 +1167,29 @@ export function RunForm() {
       }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['backtests', 'jobs'] }),
   })
-  if (!options.data) return <p>{options.error ? errorText(options.error) : 'Loading…'}</p>
+  if (!options.data)
+    return <p className="text-muted-foreground">{options.error ? errorText(options.error) : 'Loading…'}</p>
   return (
     <form
+      className="mb-6 space-y-4"
       onSubmit={(e) => {
         e.preventDefault()
         run.mutate()
       }}
     >
-      <Picks legend="Strategies" values={options.data.strategies} picked={strategies} toggle={toggleStrategy} />
-      <Picks legend="Accounts" values={options.data.accounts} picked={accounts} toggle={toggleAccount} />
-      <Picks legend="Contracts (none = both for the strategy's market)" values={options.data.contracts} picked={contracts} toggle={toggleContract} />
-      <button type="submit" disabled={!strategies.size || !accounts.size || run.isPending}>
+      <div className="grid gap-6 md:grid-cols-3">
+        <Picks legend="Strategies" values={options.data.strategies} picked={strategies} toggle={toggleStrategy} />
+        <Picks legend="Accounts" values={options.data.accounts} picked={accounts} toggle={toggleAccount} />
+        <Picks legend="Contracts (none = both for the strategy's market)" values={options.data.contracts} picked={contracts} toggle={toggleContract} />
+      </div>
+      <Button type="submit" disabled={!strategies.size || !accounts.size || run.isPending}>
         Run
-      </button>
-      {run.error && <p className="error" role="alert">{errorText(run.error)}</p>}
+      </Button>
+      {run.error && (
+        <Alert variant="destructive">
+          <AlertDescription>{errorText(run.error)}</AlertDescription>
+        </Alert>
+      )}
     </form>
   )
 }
@@ -1182,8 +1202,15 @@ export function RunForm() {
 ```tsx
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
+import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { apiFetch } from '../api'
-import type { Job } from './types'
+import type { Job, JobItem } from './types'
+
+const VARIANT = { pending: 'outline', running: 'secondary', done: 'default', error: 'destructive' } as const satisfies Record<
+  JobItem['status'],
+  'outline' | 'secondary' | 'default' | 'destructive'
+>
 
 export function JobList() {
   // No polling: useJobsSocket keeps this query current.
@@ -1191,33 +1218,35 @@ export function JobList() {
   const recent = (jobs.data ?? []).slice(0, 5)
   if (!recent.length) return null
   return (
-    <table>
-      <caption>Recent jobs</caption>
-      <thead>
-        <tr>
-          <th>Strategy</th>
-          <th>Account</th>
-          <th>Contract</th>
-          <th>Status</th>
-          <th>Progress</th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table className="mb-6">
+      <TableCaption className="caption-top text-left">Recent jobs</TableCaption>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Strategy</TableHead>
+          <TableHead>Account</TableHead>
+          <TableHead>Contract</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Progress</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {recent.flatMap((job) =>
           job.items.map((it, i) => (
-            <tr key={`${job.id}-${i}`}>
-              <td>{it.strategy}</td>
-              <td>{it.account}</td>
-              <td>{it.contract}</td>
-              <td title={it.error ?? undefined}>
-                {it.key ? <Link to="/backtests/$key" params={{ key: it.key }}>{it.status}</Link> : it.status}
-              </td>
-              <td>{it.progress[1] ? `${Math.floor((it.progress[0] * 100) / it.progress[1])}%` : ''}</td>
-            </tr>
+            <TableRow key={`${job.id}-${i}`}>
+              <TableCell>{it.strategy}</TableCell>
+              <TableCell>{it.account}</TableCell>
+              <TableCell>{it.contract}</TableCell>
+              <TableCell title={it.error ?? undefined}>
+                <Badge variant={VARIANT[it.status]} asChild={!!it.key}>
+                  {it.key ? <Link to="/backtests/$key" params={{ key: it.key }}>{it.status}</Link> : <span>{it.status}</span>}
+                </Badge>
+              </TableCell>
+              <TableCell>{it.progress[1] ? `${Math.floor((it.progress[0] * 100) / it.progress[1])}%` : ''}</TableCell>
+            </TableRow>
           )),
         )}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   )
 }
 ```
@@ -1230,6 +1259,9 @@ export function JobList() {
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
 import { useState } from 'react'
+import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { apiFetch } from '../api'
 import { money, pct } from './format'
 import type { CompareGroup } from './types'
@@ -1245,54 +1277,55 @@ export function CompareTable() {
   return (
     <section>
       <h2>Comparison</h2>
-      <div role="group" aria-label="View">
-        <button type="button" aria-pressed={view === 'account'} onClick={() => setView('account')}>
-          By account
-        </button>
-        <button type="button" aria-pressed={view === 'strategy'} onClick={() => setView('strategy')}>
-          By strategy
-        </button>
-      </div>
-      <p>Ranked by tuning-period results. Hold-out columns are shown for checking, never for sorting.</p>
-      {(groups.data ?? []).map((g) => (
-        <table key={g.group}>
-          <caption>{g.group}</caption>
-          <thead>
-            <tr>
-              <th>{view === 'account' ? 'Strategy' : 'Account'}</th>
-              <th>Contract</th>
-              <th>Tuning P(pass &amp; payout)</th>
-              <th>Tuning net / attempt</th>
-              <th>Tuning pass rate</th>
-              <th>Hold-out P(pass &amp; payout)</th>
-              <th>Hold-out net / attempt</th>
-              <th>Flags</th>
-            </tr>
-          </thead>
-          <tbody>
-            {g.rows.map((r) => (
-              <tr key={r.key}>
-                <td>
-                  <Link to="/backtests/$key" params={{ key: r.key }}>
-                    {view === 'account' ? r.strategy : r.account}
-                  </Link>
-                </td>
-                <td>{r.contract}</td>
-                <td>{pct(r.periods.tuning.p_pass_and_payout)}</td>
-                <td>{money(r.periods.tuning.expected_net_per_attempt)}</td>
-                <td>{pct(r.periods.tuning.pass_rate)}</td>
-                <td>{pct(r.periods.holdout?.p_pass_and_payout)}</td>
-                <td>{money(r.periods.holdout?.expected_net_per_attempt)}</td>
-                <td>
-                  {[r.holdout_gap && 'hold-out gap', r.periods.tuning.microscalp_flags > 0 && 'microscalp']
-                    .filter(Boolean)
-                    .join(', ')}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ))}
+      <Tabs value={view} onValueChange={(v) => setView(v as View)}>
+        <TabsList aria-label="View">
+          <TabsTrigger value="account">By account</TabsTrigger>
+          <TabsTrigger value="strategy">By strategy</TabsTrigger>
+        </TabsList>
+        <TabsContent value={view} className="space-y-6">
+          <p className="text-sm text-muted-foreground">
+            Ranked by tuning-period results. Hold-out columns are shown for checking, never for sorting.
+          </p>
+          {(groups.data ?? []).map((g) => (
+            <Table key={g.group}>
+              <TableCaption className="caption-top text-left">{g.group}</TableCaption>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{view === 'account' ? 'Strategy' : 'Account'}</TableHead>
+                  <TableHead>Contract</TableHead>
+                  <TableHead>Tuning P(pass &amp; payout)</TableHead>
+                  <TableHead>Tuning net / attempt</TableHead>
+                  <TableHead>Tuning pass rate</TableHead>
+                  <TableHead>Hold-out P(pass &amp; payout)</TableHead>
+                  <TableHead>Hold-out net / attempt</TableHead>
+                  <TableHead>Flags</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {g.rows.map((r) => (
+                  <TableRow key={r.key}>
+                    <TableCell>
+                      <Link className="text-primary underline-offset-4 hover:underline" to="/backtests/$key" params={{ key: r.key }}>
+                        {view === 'account' ? r.strategy : r.account}
+                      </Link>
+                    </TableCell>
+                    <TableCell>{r.contract}</TableCell>
+                    <TableCell>{pct(r.periods.tuning.p_pass_and_payout)}</TableCell>
+                    <TableCell>{money(r.periods.tuning.expected_net_per_attempt)}</TableCell>
+                    <TableCell>{pct(r.periods.tuning.pass_rate)}</TableCell>
+                    <TableCell className="text-muted-foreground">{pct(r.periods.holdout?.p_pass_and_payout)}</TableCell>
+                    <TableCell className="text-muted-foreground">{money(r.periods.holdout?.expected_net_per_attempt)}</TableCell>
+                    <TableCell className="space-x-1">
+                      {r.holdout_gap && <Badge variant="destructive">hold-out gap</Badge>}
+                      {r.periods.tuning.microscalp_flags > 0 && <Badge variant="outline">microscalp</Badge>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          ))}
+        </TabsContent>
+      </Tabs>
     </section>
   )
 }
@@ -1332,6 +1365,7 @@ Backtest UI pieces: run form, live job list, comparison table, report view, equi
 
 - Entry points: `types.ts` (Report/Job JSON types, mirror `fenrir.backtest.report` and `fenrir.server.jobs`), `useJobsSocket.ts` (`/ws/jobs` → query cache), `CompareTable.tsx`, `ReportView.tsx`, `LatestReport.tsx`.
 - Pure vs shell: `format.ts` is pure; components read server state only through TanStack Query (`['backtests', ...]` keys).
+- UI: shadcn components (`@/components/ui/*`) + Tailwind classes; charts are `lightweight-charts` colored from the `--chart-*` CSS variables.
 - Not here: ranking logic (server-side, `src/fenrir/backtest/compare.py`); page routes (`web/src/routes/backtests.tsx`, `backtest-report.tsx`).
 - Tests: Playwright `web/e2e/backtest.spec.ts`.
 ```
@@ -1350,7 +1384,7 @@ Expected: exits 0 with no errors.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add web/src/errorText.ts web/src/backtests web/src/routes/backtests.tsx CLAUDE.md
+git add web/src/errorText.ts web/src/backtests web/src/components/ui web/package.json web/package-lock.json web/src/routes/backtests.tsx CLAUDE.md
 git commit -m "feat(web): add backtest run form, live jobs and comparison table
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -1382,25 +1416,28 @@ Expected: `added 2 packages` (or similar), `web/package.json` lists `"lightweigh
 import { createChart, LineSeries, type UTCTimestamp } from 'lightweight-charts'
 import { useEffect, useRef } from 'react'
 
+// The chart draws on a canvas, so it reads theme tokens instead of Tailwind classes.
+const cssVar = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+
 export function EquityChart({ title, points }: { title: string; points: [string, number][] }) {
   const box = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!box.current) return
     const chart = createChart(box.current, {
       autoSize: true,
-      layout: { background: { color: '#0e1116' }, textColor: '#8fa0b2' },
-      grid: { vertLines: { color: '#232a34' }, horzLines: { color: '#232a34' } },
+      layout: { background: { color: cssVar('--card') }, textColor: cssVar('--muted-foreground') },
+      grid: { vertLines: { color: cssVar('--border') }, horzLines: { color: cssVar('--border') } },
     })
     chart
-      .addSeries(LineSeries, { color: '#e0a33a', lineWidth: 2 })
+      .addSeries(LineSeries, { color: cssVar('--chart-1'), lineWidth: 2 })
       .setData(points.map(([ts, value]) => ({ time: (Date.parse(ts) / 1000) as UTCTimestamp, value })))
     chart.timeScale().fitContent()
     return () => chart.remove()
   }, [points])
   return (
-    <figure>
-      <figcaption>{title}</figcaption>
-      <div ref={box} style={{ height: 180 }} role="img" aria-label={`Equity curve: ${title}`} />
+    <figure className="mb-4">
+      <figcaption className="mb-1 text-sm text-muted-foreground">{title}</figcaption>
+      <div ref={box} className="h-44 rounded-md border" role="img" aria-label={`Equity curve: ${title}`} />
     </figure>
   )
 }
@@ -1411,6 +1448,8 @@ export function EquityChart({ title, points }: { title: string; points: [string,
 `web/src/backtests/ReportView.tsx`:
 
 ```tsx
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { EquityChart } from './EquityChart'
 import { money, num, pct } from './format'
 import type { PeriodResult, Report } from './types'
@@ -1430,64 +1469,69 @@ const ROWS: [string, (p: PeriodResult) => string][] = [
 
 export function PeriodTable({ periods }: { periods: Report['periods'] }) {
   return (
-    <table>
-      <thead>
-        <tr>
-          <th scope="col">Metric</th>
-          <th scope="col">Tuning</th>
-          <th scope="col">Hold-out</th>
-        </tr>
-      </thead>
-      <tbody>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead scope="col">Metric</TableHead>
+          <TableHead scope="col">Tuning</TableHead>
+          <TableHead scope="col">Hold-out</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
         {ROWS.map(([label, cell]) => (
-          <tr key={label}>
-            <th scope="row">{label}</th>
-            <td>{cell(periods.tuning)}</td>
-            <td>{periods.holdout ? cell(periods.holdout) : '—'}</td>
-          </tr>
+          <TableRow key={label}>
+            <TableHead scope="row">{label}</TableHead>
+            <TableCell>{cell(periods.tuning)}</TableCell>
+            <TableCell className="text-muted-foreground">{periods.holdout ? cell(periods.holdout) : '—'}</TableCell>
+          </TableRow>
         ))}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   )
 }
 
 function Histogram({ data }: { data: [number, number][] }) {
   const max = Math.max(1, ...data.map(([, n]) => n))
   return (
-    <table aria-label="Days to pass">
-      <tbody>
+    <Table aria-label="Days to pass">
+      <TableBody>
         {data.map(([days, n]) => (
-          <tr key={days}>
-            <th scope="row">{days}d</th>
-            <td style={{ width: '100%' }}>
-              <div style={{ background: 'var(--ember)', height: '0.8em', width: `${(n * 100) / max}%` }} />
-            </td>
-            <td>{n}</td>
-          </tr>
+          <TableRow key={days}>
+            <TableHead scope="row" className="w-12">{days}d</TableHead>
+            <TableCell className="w-full">
+              {/* width is data, so it stays an inline style */}
+              <div className="h-3 rounded-sm bg-chart-1" style={{ width: `${(n * 100) / max}%` }} />
+            </TableCell>
+            <TableCell className="text-right">{n}</TableCell>
+          </TableRow>
         ))}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   )
 }
 
 function PeriodDetail({ name, period }: { name: string; period: PeriodResult }) {
   return (
-    <section>
+    <section className="mt-8 space-y-3">
       <h2>{name}</h2>
-      <h3>Days to pass</h3>
-      {period.days_to_pass.histogram.length ? <Histogram data={period.days_to_pass.histogram} /> : <p>No passes.</p>}
-      <h3>Failure reasons</h3>
-      <table>
-        <tbody>
+      <h3 className="font-medium">Days to pass</h3>
+      {period.days_to_pass.histogram.length ? (
+        <Histogram data={period.days_to_pass.histogram} />
+      ) : (
+        <p className="text-muted-foreground">No passes.</p>
+      )}
+      <h3 className="font-medium">Failure reasons</h3>
+      <Table>
+        <TableBody>
           {Object.entries(period.failure_reasons).map(([reason, n]) => (
-            <tr key={reason}>
-              <th scope="row">{reason}</th>
-              <td>{n}</td>
-            </tr>
+            <TableRow key={reason}>
+              <TableHead scope="row">{reason}</TableHead>
+              <TableCell className="text-right">{n}</TableCell>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
-      <h3>Sample equity curves</h3>
+        </TableBody>
+      </Table>
+      <h3 className="font-medium">Sample equity curves</h3>
       {(period.sample_equity ?? []).map((s) => (
         <EquityChart key={`${s.start}-${s.outcome}`} title={`${s.start} · ${s.outcome}`} points={s.points} />
       ))}
@@ -1502,12 +1546,12 @@ export function ReportView({ report }: { report: Report }) {
         {report.strategy} · {report.account} · {report.contract}
       </h1>
       {report.holdout_gap && (
-        <p className="error" role="alert">
-          Hold-out P(pass and payout) is far below tuning: likely overfit.
-        </p>
+        <Alert variant="destructive" className="mb-4">
+          <AlertDescription>Hold-out P(pass and payout) is far below tuning: likely overfit.</AlertDescription>
+        </Alert>
       )}
       <PeriodTable periods={report.periods} />
-      <p>{report.note}</p>
+      <p className="mt-2 text-sm text-muted-foreground">{report.note}</p>
       <PeriodDetail name="Tuning" period={report.periods.tuning} />
       {report.periods.holdout && <PeriodDetail name="Hold-out" period={report.periods.holdout} />}
     </>
@@ -1532,8 +1576,8 @@ function BacktestReport() {
     queryKey: ['backtests', 'result', key],
     queryFn: () => apiFetch<Report>(`/api/backtests/results/${encodeURIComponent(key)}`),
   })
-  if (report.error) return <p className="error">{errorText(report.error)}</p>
-  if (!report.data) return <p>Loading…</p>
+  if (report.error) return <p className="text-destructive">{errorText(report.error)}</p>
+  if (!report.data) return <p className="text-muted-foreground">Loading…</p>
   return <ReportView report={report.data} />
 }
 ```
@@ -1583,15 +1627,15 @@ export function LatestReport() {
     refetchInterval: 5000,
   })
   const latest = results.data?.[0]
-  if (!latest) return <p>No backtests yet. Ask Claude to run `fenrir backtest`.</p>
+  if (!latest) return <p className="text-muted-foreground">No backtests yet. Ask Claude to run `fenrir backtest`.</p>
   return (
     <div>
       <h2>
-        <Link to="/backtests/$key" params={{ key: latest.key }}>
+        <Link className="text-primary underline-offset-4 hover:underline" to="/backtests/$key" params={{ key: latest.key }}>
           {latest.strategy} · {latest.account} · {latest.contract}
         </Link>
       </h2>
-      <p>{new Date(latest.created_at).toLocaleString()}</p>
+      <p className="mb-2 text-sm text-muted-foreground">{new Date(latest.created_at).toLocaleString()}</p>
       <PeriodTable periods={latest.periods} />
     </div>
   )
@@ -1600,10 +1644,11 @@ export function LatestReport() {
 
 - [ ] **Step 2: Put it in the Workbench's right column**
 
-Replace `web/src/routes/workbench.tsx` (plan 13's version) with; only the import and the right pane's content change:
+Replace `web/src/routes/workbench.tsx` (plan 13's version) with; only the `LatestReport` import and the right card's content change:
 
 ```tsx
 import { createRoute } from '@tanstack/react-router'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { LatestReport } from '../backtests/LatestReport'
 import { Terminal } from '../terminal'
 import { rootRoute } from './root'
@@ -1618,11 +1663,18 @@ function Workbench() {
   return (
     <>
       <h1>Workbench</h1>
-      <div className="workbench">
-        <Terminal />
-        <section aria-label="Latest backtest">
-          <LatestReport />
-        </section>
+      <div className="grid h-[calc(100vh-9rem)] grid-cols-[minmax(0,3fr)_minmax(0,2fr)] gap-5">
+        <Card className="min-h-0 p-1">
+          <Terminal />
+        </Card>
+        <Card role="region" aria-label="Latest backtest" className="min-h-0 overflow-auto">
+          <CardHeader>
+            <CardTitle>Latest backtest</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <LatestReport />
+          </CardContent>
+        </Card>
       </div>
     </>
   )

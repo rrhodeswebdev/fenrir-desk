@@ -6,7 +6,7 @@
 
 **Architecture:** The Live page is UI only over the plan 21/22 endpoints, polling `/api/live/status` with TanStack Query `refetchInterval`; the kill switch is a separate component that never waits on status, so it works when status fails. Settings adds two pure functions to `fenrir.settings` (`mask`, `update_env_text`) and a thin `/api/settings` router that validates the update with pydantic, rewrites `.env` in place, and returns the masked view. Saved settings apply on restart.
 
-**Tech Stack:** Python 3.12, FastAPI, pydantic v2, pytest; React 19 + TypeScript, TanStack Query, Playwright.
+**Tech Stack:** Python 3.12, FastAPI, pydantic v2, pytest; React 19 + TypeScript, TanStack Query, Playwright. UI: Tailwind CSS v4 utility classes + shadcn/ui components (`@/components/ui/*`, set up in plan 12; add missing ones with `npx shadcn@latest add`); no custom CSS classes or inline styles except runtime-computed values.
 
 **Spec:** `docs/superpowers/specs/2026-10-10-fenrir-desk-v1-design.md` (§8 failure handling and kill switch, §10 Live and Settings pages)
 
@@ -318,10 +318,16 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `web/src/routes/settings.tsx` (replace the empty page component from plan 12)
+- Create (by shadcn CLI, skipped if another plan already added them): `web/src/components/ui/{input,label,select}.tsx`
 
 **Interfaces:**
-- Consumes: `apiFetch<T>` (plan 12); `settingsRoute` in `web/src/routes/settings.tsx` (plan 12); Task 2 endpoints.
+- Consumes: `apiFetch<T>` (plan 12); `settingsRoute` in `web/src/routes/settings.tsx` (plan 12); Task 2 endpoints; shadcn `Button`, `Alert` (plan 12).
 - Produces: the Settings page at `/settings`. Secret fields start empty and are only sent when typed into; other fields are sent when changed.
+
+- [ ] **Step 0: Add the shadcn components this page needs**
+
+Run: `cd web && npx shadcn@latest add input label select && cd ..`
+Expected: the files exist in `web/src/components/ui/`. If the CLI says a file already exists (another plan added it), answer **No** to overwriting.
 
 - [ ] **Step 1: Write the page**
 
@@ -329,9 +335,13 @@ Replace the contents of `web/src/routes/settings.tsx`, keeping plan 12's `create
 
 ```tsx
 // web/src/routes/settings.tsx
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { createRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { apiFetch } from '../api'
 import { rootRoute } from './root'
 
@@ -339,6 +349,24 @@ type SettingsView = {
   lse_api_key: string; nt_url: string; nt_token: string
   holdout_months: number; safety_margin_pct: number; stale_seconds: number
   heartbeat_policy: 'keep' | 'flatten'
+}
+
+function Section({ legend, children }: { legend: string; children: ReactNode }) {
+  return (
+    <fieldset className="grid gap-4 rounded-lg border p-4">
+      <legend className="px-1 font-display font-semibold">{legend}</legend>
+      {children}
+    </fieldset>
+  )
+}
+
+function Field({ id, label, children }: { id: string; label: string; children: ReactNode }) {
+  return (
+    <div className="grid gap-1.5">
+      <Label htmlFor={id}>{label}</Label>
+      {children}
+    </div>
+  )
 }
 
 function SettingsForm({ current }: { current: SettingsView }) {
@@ -357,36 +385,50 @@ function SettingsForm({ current }: { current: SettingsView }) {
   ) as Partial<SettingsView>
 
   return (
-    <form onSubmit={(e) => { e.preventDefault(); save.mutate(changes) }}>
-      <fieldset>
-        <legend>NinjaTrader</legend>
-        <label>Address <input value={draft.nt_url} onChange={(e) => set('nt_url', e.target.value)} /></label>
-        <label>Token <input type="password" autoComplete="off" placeholder={current.nt_token || 'not set'}
-          value={draft.nt_token} onChange={(e) => set('nt_token', e.target.value)} /></label>
-        <label>If the heartbeat is lost with a position open{' '}
-          <select value={draft.heartbeat_policy} onChange={(e) => set('heartbeat_policy', e.target.value as SettingsView['heartbeat_policy'])}>
-            <option value="keep">Keep the bracket</option>
-            <option value="flatten">Flatten</option>
-          </select>
-        </label>
-      </fieldset>
-      <fieldset>
-        <legend>London Strategic Edge</legend>
-        <label>API key <input type="password" autoComplete="off" placeholder={current.lse_api_key || 'not set'}
-          value={draft.lse_api_key} onChange={(e) => set('lse_api_key', e.target.value)} /></label>
-        <label>Pause entries after no bar for (seconds){' '}
-          <input type="number" min={1} value={draft.stale_seconds} onChange={(e) => set('stale_seconds', Number(e.target.value))} /></label>
-      </fieldset>
-      <fieldset>
-        <legend>Backtests and safety</legend>
-        <label>Hold-out (months){' '}
-          <input type="number" min={1} max={120} value={draft.holdout_months} onChange={(e) => set('holdout_months', Number(e.target.value))} /></label>
-        <label>Halt the day at this % of the daily loss limit{' '}
-          <input type="number" min={1} max={100} step="any" value={draft.safety_margin_pct} onChange={(e) => set('safety_margin_pct', Number(e.target.value))} /></label>
-      </fieldset>
-      <button type="submit" disabled={save.isPending || Object.keys(changes).length === 0}>Save</button>
-      {save.isSuccess && <p role="status">Saved. Restart Fenrir Desk to apply the changes.</p>}
-      {save.isError && <p role="alert">{String(save.error)}</p>}
+    <form className="max-w-2xl space-y-6" onSubmit={(e) => { e.preventDefault(); save.mutate(changes) }}>
+      <Section legend="NinjaTrader">
+        <Field id="nt-url" label="Address">
+          <Input id="nt-url" value={draft.nt_url} onChange={(e) => set('nt_url', e.target.value)} />
+        </Field>
+        <Field id="nt-token" label="Token">
+          <Input id="nt-token" type="password" autoComplete="off" placeholder={current.nt_token || 'not set'}
+            value={draft.nt_token} onChange={(e) => set('nt_token', e.target.value)} />
+        </Field>
+        <Field id="heartbeat-policy" label="If the heartbeat is lost with a position open">
+          <Select value={draft.heartbeat_policy} onValueChange={(v) => set('heartbeat_policy', v as SettingsView['heartbeat_policy'])}>
+            <SelectTrigger id="heartbeat-policy" className="w-56"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="keep">Keep the bracket</SelectItem>
+              <SelectItem value="flatten">Flatten</SelectItem>
+            </SelectContent>
+          </Select>
+        </Field>
+      </Section>
+      <Section legend="London Strategic Edge">
+        <Field id="lse-key" label="API key">
+          <Input id="lse-key" type="password" autoComplete="off" placeholder={current.lse_api_key || 'not set'}
+            value={draft.lse_api_key} onChange={(e) => set('lse_api_key', e.target.value)} />
+        </Field>
+        <Field id="stale-seconds" label="Pause entries after no bar for (seconds)">
+          <Input id="stale-seconds" type="number" min={1} value={draft.stale_seconds}
+            onChange={(e) => set('stale_seconds', Number(e.target.value))} />
+        </Field>
+      </Section>
+      <Section legend="Backtests and safety">
+        <Field id="holdout-months" label="Hold-out (months)">
+          <Input id="holdout-months" type="number" min={1} max={120} value={draft.holdout_months}
+            onChange={(e) => set('holdout_months', Number(e.target.value))} />
+        </Field>
+        <Field id="safety-margin" label="Halt the day at this % of the daily loss limit">
+          <Input id="safety-margin" type="number" min={1} max={100} step="any" value={draft.safety_margin_pct}
+            onChange={(e) => set('safety_margin_pct', Number(e.target.value))} />
+        </Field>
+      </Section>
+      <div className="flex items-center gap-3">
+        <Button type="submit" disabled={save.isPending || Object.keys(changes).length === 0}>Save</Button>
+        {save.isSuccess && <p role="status" className="text-sm text-muted-foreground">Saved. Restart Fenrir Desk to apply the changes.</p>}
+        {save.isError && <p role="alert" className="text-sm text-destructive">{String(save.error)}</p>}
+      </div>
     </form>
   )
 }
@@ -394,11 +436,11 @@ function SettingsForm({ current }: { current: SettingsView }) {
 function SettingsPage() {
   const settings = useQuery({ queryKey: ['settings'], queryFn: () => apiFetch<SettingsView>('/api/settings') })
   return (
-    <main>
+    <>
       <h1>Settings</h1>
-      {settings.isError && <p role="alert">{String(settings.error)}</p>}
-      {settings.data ? <SettingsForm current={settings.data} /> : !settings.isError && <p>Loading…</p>}
-    </main>
+      {settings.isError && <p role="alert" className="text-destructive">{String(settings.error)}</p>}
+      {settings.data ? <SettingsForm current={settings.data} /> : !settings.isError && <p className="text-muted-foreground">Loading…</p>}
+    </>
   )
 }
 
@@ -424,7 +466,7 @@ Expected: fields show current values; token and key fields are empty with the ma
 - [ ] **Step 4: Commit**
 
 ```bash
-git add web/src/routes/settings.tsx
+git add web/src/routes/settings.tsx web/src/components/ui web/package.json web/package-lock.json
 git commit -m "feat(web): add settings page
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
@@ -436,11 +478,17 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `web/src/routes/live.tsx` (replace the empty page component from plan 12)
+- Create (by shadcn CLI, skipped if another plan already added them): `web/src/components/ui/{alert-dialog,card,table,badge}.tsx`
 - Test: `web/e2e/kill-switch.spec.ts`
 
 **Interfaces:**
 - Consumes: `apiFetch<T>` (plan 12); `liveRoute` in `web/src/routes/live.tsx` (plan 12); `GET /api/live/status`, `GET /api/live/journal?account=&day=`, `POST /api/live/kill`, `POST /api/live/resolve` (plans 21/22, shapes in the index).
-- Produces: the Live page at `/live`. Button `Kill switch`; status text starting `Kill switch done`.
+- Produces: the Live page at `/live`. Button `Kill switch` opens a shadcn `AlertDialog` (`role=alertdialog`) with buttons `Flatten and disarm all` and `Cancel`; status text starting `Kill switch done`.
+
+- [ ] **Step 0: Add the shadcn components this page needs**
+
+Run: `cd web && npx shadcn@latest add alert-dialog card table badge && cd ..`
+Expected: the files exist in `web/src/components/ui/`. If the CLI says a file already exists (another plan added it), answer **No** to overwriting.
 
 - [ ] **Step 1: Write the failing Playwright test**
 
@@ -472,28 +520,29 @@ async function mockApi(page: Page, statusCode: number) {
 
 test('kill switch asks for confirmation, then flattens and disarms everything', async ({ page }) => {
   const kills = await mockApi(page, 200)
-  page.once('dialog', (d) => void d.accept())
   await page.goto('/live')
   await expect(page.getByText('Drawdown remaining')).toBeVisible()
   await page.getByRole('button', { name: 'Kill switch' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Flatten and disarm all' }).click()
   await expect(page.getByText(/^Kill switch done/)).toBeVisible()
   expect(kills).toHaveLength(1)
 })
 
 test('dismissing the confirmation sends nothing', async ({ page }) => {
   const kills = await mockApi(page, 200)
-  page.once('dialog', (d) => void d.dismiss())
   await page.goto('/live')
   await page.getByRole('button', { name: 'Kill switch' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Cancel' }).click()
+  await expect(page.getByRole('alertdialog')).toHaveCount(0)
   await expect(page.getByText(/^Kill switch done/)).toHaveCount(0)
   expect(kills).toHaveLength(0)
 })
 
 test('kill switch works while status is unavailable', async ({ page }) => {
   const kills = await mockApi(page, 500)
-  page.once('dialog', (d) => void d.accept())
   await page.goto('/live')
   await page.getByRole('button', { name: 'Kill switch' }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: 'Flatten and disarm all' }).click()
   await expect(page.getByText(/^Kill switch done/)).toBeVisible()
   expect(kills).toHaveLength(1)
 })
@@ -512,6 +561,15 @@ Replace the contents of `web/src/routes/live.tsx`, keeping plan 12's `createRout
 // web/src/routes/live.tsx
 import { createRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Table, TableBody, TableCaption, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { apiFetch } from '../api'
 import { rootRoute } from './root'
 
@@ -546,13 +604,30 @@ function KillSwitch() {
     mutationFn: () => post<{ ok: boolean }>('/api/live/kill'),
     onSettled: () => Promise.all([qc.invalidateQueries({ queryKey: ['live'] }), qc.invalidateQueries({ queryKey: ['arming'] })]),
   })
-  const ask = () => window.confirm('Flatten every position, cancel every order and disarm every account?') && kill.mutate()
   return (
-    <section aria-label="Kill switch">
-      <button onClick={ask} disabled={kill.isPending}>Kill switch</button>
-      {kill.data?.ok && <p role="status">Kill switch done: flattened, cancelled and disarmed.</p>}
+    <section aria-label="Kill switch" className="flex items-center gap-3">
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button variant="destructive" size="lg" disabled={kill.isPending}>Kill switch</Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Stop everything?</AlertDialogTitle>
+            <AlertDialogDescription>Flatten every position, cancel every order and disarm every account.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction className="bg-destructive text-white hover:bg-destructive/90" onClick={() => kill.mutate()}>
+              Flatten and disarm all
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {kill.data?.ok && <p role="status" className="text-sm text-muted-foreground">Kill switch done: flattened, cancelled and disarmed.</p>}
       {(kill.isError || kill.data?.ok === false) && (
-        <p role="alert">Kill switch failed{kill.error ? `: ${String(kill.error)}` : ''}. Flatten in NinjaTrader now.</p>
+        <p role="alert" className="text-sm text-destructive">
+          Kill switch failed{kill.error ? `: ${String(kill.error)}` : ''}. Flatten in NinjaTrader now.
+        </p>
       )}
     </section>
   )
@@ -568,15 +643,21 @@ function Journal({ account }: { account: string }) {
   // shortcut: shows the latest 50 rows only; add paging if the user needs the full day here (Claude can read SQLite).
   const latest = (rows.data ?? []).slice(-50)
   return (
-    <table>
-      <caption>Journal for {day} (latest 50)</caption>
-      <thead><tr><th>Time</th><th>Kind</th><th>Details</th></tr></thead>
-      <tbody>
+    <Table>
+      <TableCaption className="caption-top text-left">Journal for {day} (latest 50)</TableCaption>
+      <TableHeader>
+        <TableRow><TableHead>Time</TableHead><TableHead>Kind</TableHead><TableHead>Details</TableHead></TableRow>
+      </TableHeader>
+      <TableBody>
         {latest.map((r) => (
-          <tr key={r.id}><td>{r.ts}</td><td>{r.kind}</td><td><code>{JSON.stringify(r.payload)}</code></td></tr>
+          <TableRow key={r.id}>
+            <TableCell className="whitespace-nowrap">{r.ts}</TableCell>
+            <TableCell><Badge variant={r.kind === 'alert' || r.kind === 'halt' || r.kind === 'rejection' ? 'destructive' : 'secondary'}>{r.kind}</Badge></TableCell>
+            <TableCell><code className="text-xs">{JSON.stringify(r.payload)}</code></TableCell>
+          </TableRow>
         ))}
-      </tbody>
-    </table>
+      </TableBody>
+    </Table>
   )
 }
 
@@ -586,23 +667,50 @@ function AccountCard({ a }: { a: AccountStatus }) {
     mutationFn: () => post<{ ok: boolean }>('/api/live/resolve', { account: a.account }),
     onSettled: () => qc.invalidateQueries({ queryKey: ['live'] }),
   })
-  const ask = () =>
-    window.confirm(`Resume ${a.account}? Only do this after matching NinjaTrader's positions and orders by hand.`) && resolve.mutate()
   const p = a.position
   return (
-    <section aria-label={a.account}>
-      <h2>{a.account} <small>{a.mode} · {a.strategy} · {a.rules_account} · {a.contract}</small></h2>
-      {a.halted && <p role="alert">Halted: {a.halt_reason} <button onClick={ask}>Resolve</button></p>}
-      <dl>
-        <dt>Balance</dt><dd>{usd(a.balance)}</dd>
-        <dt>Drawdown remaining</dt><dd>{usd(a.limits.drawdown_remaining)}</dd>
-        <dt>Daily loss remaining</dt><dd>{usd(a.limits.daily_loss_remaining)}</dd>
-        <dt>Contracts</dt><dd>{a.limits.held_minis} of {a.limits.max_minis} minis</dd>
-        <dt>Position</dt>
-        <dd>{p.qty === 0 ? 'Flat' : `${p.qty} @ ${p.entry} · stop ${p.stop} · target ${p.target}`}</dd>
-      </dl>
-      <Journal account={a.account} />
-    </section>
+    <Card role="region" aria-label={a.account}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          {a.account} <Badge variant={a.mode === 'live' ? 'destructive' : 'secondary'}>{a.mode}</Badge>
+        </CardTitle>
+        <CardDescription>{a.strategy} · {a.rules_account} · {a.contract}</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {a.halted && (
+          <Alert variant="destructive">
+            <AlertTitle>Halted</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center gap-3">
+              <span>{a.halt_reason}</span>
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" size="sm">Resolve</Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Resume {a.account}?</AlertDialogTitle>
+                    <AlertDialogDescription>Only do this after matching NinjaTrader's positions and orders by hand.</AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => resolve.mutate()}>Resume</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </AlertDescription>
+          </Alert>
+        )}
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
+          <dt className="text-muted-foreground">Balance</dt><dd>{usd(a.balance)}</dd>
+          <dt className="text-muted-foreground">Drawdown remaining</dt><dd>{usd(a.limits.drawdown_remaining)}</dd>
+          <dt className="text-muted-foreground">Daily loss remaining</dt><dd>{usd(a.limits.daily_loss_remaining)}</dd>
+          <dt className="text-muted-foreground">Contracts</dt><dd>{a.limits.held_minis} of {a.limits.max_minis} minis</dd>
+          <dt className="text-muted-foreground">Position</dt>
+          <dd>{p.qty === 0 ? 'Flat' : `${p.qty} @ ${p.entry} · stop ${p.stop} · target ${p.target}`}</dd>
+        </dl>
+        <Journal account={a.account} />
+      </CardContent>
+    </Card>
   )
 }
 
@@ -614,19 +722,29 @@ function LivePage() {
   })
   const s = status.data
   return (
-    <main>
+    <>
       <h1>Live</h1>
-      <KillSwitch />
-      {status.isError && <p role="alert">Status unavailable: {String(status.error)}</p>}
-      {s && (
-        <dl>
-          <dt>LSE</dt><dd>{s.lse.connected ? 'Connected' : 'Disconnected'} · last bar {s.lse.last_bar_ts ?? 'none'}</dd>
-          <dt>NinjaTrader</dt><dd>{s.nt.connected ? 'Connected' : 'Disconnected'} · last heartbeat {s.nt.last_heartbeat ?? 'none'}</dd>
-        </dl>
-      )}
-      {s?.accounts.length === 0 && <p>No account is armed.</p>}
-      {s?.accounts.map((a) => <AccountCard key={a.account} a={a} />)}
-    </main>
+      <div className="space-y-6">
+        <KillSwitch />
+        {status.isError && <p role="alert" className="text-destructive">Status unavailable: {String(status.error)}</p>}
+        {s && (
+          <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
+            <dt className="text-muted-foreground">LSE</dt>
+            <dd className="flex items-center gap-2">
+              <Badge variant={s.lse.connected ? 'secondary' : 'destructive'}>{s.lse.connected ? 'Connected' : 'Disconnected'}</Badge>
+              last bar {s.lse.last_bar_ts ?? 'none'}
+            </dd>
+            <dt className="text-muted-foreground">NinjaTrader</dt>
+            <dd className="flex items-center gap-2">
+              <Badge variant={s.nt.connected ? 'secondary' : 'destructive'}>{s.nt.connected ? 'Connected' : 'Disconnected'}</Badge>
+              last heartbeat {s.nt.last_heartbeat ?? 'none'}
+            </dd>
+          </dl>
+        )}
+        {s?.accounts.length === 0 && <p className="text-muted-foreground">No account is armed.</p>}
+        {s?.accounts.map((a) => <AccountCard key={a.account} a={a} />)}
+      </div>
+    </>
   )
 }
 
@@ -650,7 +768,7 @@ Expected: `3 passed`
 - [ ] **Step 5: Commit**
 
 ```bash
-git add web/src/routes/live.tsx web/e2e/kill-switch.spec.ts
+git add web/src/routes/live.tsx web/src/components/ui web/package.json web/package-lock.json web/e2e/kill-switch.spec.ts
 git commit -m "feat(web): add live page with limits, journal and kill switch
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"

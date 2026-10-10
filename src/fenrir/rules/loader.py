@@ -10,6 +10,23 @@ from fenrir.rules.schema import AccountRules
 _ID = re.compile(r"([a-z0-9]+)-([a-z0-9]+(?:-[a-z0-9]+)*)")
 
 
+class _UniqueKeyLoader(yaml.SafeLoader):
+    """SafeLoader that rejects a repeated key; PyYAML keeps the last one silently."""
+
+    def construct_mapping(self, node, deep=False):
+        keys = [
+            self.construct_object(k, deep=deep)
+            for k, _ in node.value
+            if k.tag != "tag:yaml.org,2002:merge"  # `<<: *anchor` may be overridden
+        ]
+        for key in keys:
+            if keys.count(key) > 1:  # count, not a set: keys may be unhashable
+                raise yaml.constructor.ConstructorError(
+                    None, None, f"duplicate key {key!r}", node.start_mark
+                )
+        return super().construct_mapping(node, deep)
+
+
 def account_id(rules: AccountRules) -> str:
     return f"{rules.firm}-{rules.account}"
 
@@ -24,7 +41,7 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
 def load_account(account_id: str, rules_dir: Path) -> AccountRules:
     path = rules_path(account_id, rules_dir)
     try:
-        rules = AccountRules.model_validate(yaml.safe_load(path.read_text()))
+        rules = AccountRules.model_validate(yaml.load(path.read_text(), _UniqueKeyLoader))
     except FileNotFoundError:
         raise ValueError(f"unknown account {account_id!r}: {path} not found") from None
     # ValueError also covers ValidationError, bad YAML dates and non-UTF-8 files

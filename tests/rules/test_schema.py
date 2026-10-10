@@ -63,9 +63,87 @@ def test_unknown_time_zone_rejected(base):
         AccountRules.model_validate(base)
 
 
-def test_commission_needs_every_symbol(base):
-    del base["costs"]["commission_per_side"]["MNQ"]
-    with pytest.raises(ValidationError, match="MNQ"):
+def test_evaluation_with_payout_rejected(base):
+    base["evaluation"]["payout"] = base["funded"]["payout"]
+    with pytest.raises(ValidationError, match="evaluation needs"):
+        AccountRules.model_validate(base)
+
+
+def test_funded_with_profit_target_rejected(base):
+    base["funded"]["profit_target"] = 3000
+    with pytest.raises(ValidationError, match="funded needs"):
+        AccountRules.model_validate(base)
+
+
+@pytest.mark.parametrize("symbol", ["ES", "MES", "NQ", "MNQ"])
+def test_commission_needs_every_symbol(base, symbol):
+    del base["costs"]["commission_per_side"][symbol]
+    with pytest.raises(ValidationError, match=f"commission_per_side.{symbol}\n  Field required"):
+        AccountRules.model_validate(base)
+
+
+def test_extra_commission_symbol_rejected(base):
+    base["costs"]["commission_per_side"]["YM"] = 0
+    with pytest.raises(ValidationError, match="YM"):
+        AccountRules.model_validate(base)
+
+
+def test_negative_commission_rejected(base):
+    base["costs"]["commission_per_side"]["ES"] = -1
+    with pytest.raises(ValidationError, match="commission_per_side.ES"):
+        AccountRules.model_validate(base)
+
+
+@pytest.mark.parametrize("pct, ok", [(0, False), (0.5, True), (100, True), (101, False)])
+def test_pct_bounds(base, pct, ok):
+    base["funded"]["payout"]["split_pct"] = pct
+    if ok:
+        AccountRules.model_validate(base)
+    else:
+        with pytest.raises(ValidationError, match="split_pct"):
+            AccountRules.model_validate(base)
+
+
+@pytest.mark.parametrize(
+    "section, key, value",
+    [
+        ("max_drawdown", "amount", float("inf")),
+        ("max_drawdown", "locks_at", float("inf")),
+        (None, "daily_loss_limit", float("inf")),
+        ("payout", "min_profit", float("inf")),
+        ("payout", "min_profit", float("nan")),
+    ],
+)
+def test_non_finite_numbers_rejected(base, section, key, value):
+    phase = base["funded"]
+    (phase[section] if section else phase)[key] = value
+    with pytest.raises(ValidationError, match=key):
+        AccountRules.model_validate(base)
+
+
+def test_non_finite_commission_rejected(base):
+    base["costs"]["commission_per_side"]["ES"] = float("nan")
+    with pytest.raises(ValidationError, match="commission_per_side.ES"):
+        AccountRules.model_validate(base)
+
+
+@pytest.mark.parametrize(
+    "path, value",
+    [
+        (("funded", "daily_loss_limit"), True),  # would load as $1
+        (("contracts", "max_minis"), "4"),
+        (("contracts", "max_minis"), True),
+        (("prohibited", "hft"), "yes"),
+        (("automation_allowed",), 0),
+    ],
+)
+def test_wrong_types_not_coerced(base, path, value):
+    *parents, key = path
+    target = base
+    for p in parents:
+        target = target[p]
+    target[key] = value
+    with pytest.raises(ValidationError, match=key):
         AccountRules.model_validate(base)
 
 
@@ -73,3 +151,6 @@ def test_model_is_frozen(base):
     rules = AccountRules.model_validate(base)
     with pytest.raises(ValidationError):
         rules.firm = "other"
+    with pytest.raises(ValidationError):
+        rules.costs.commission_per_side.ES = -9
+    hash(rules)  # usable as a cache key

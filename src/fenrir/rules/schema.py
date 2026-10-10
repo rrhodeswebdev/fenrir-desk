@@ -6,14 +6,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-SYMBOLS = frozenset({"ES", "MES", "NQ", "MNQ"})
-
 Pct = Annotated[float, Field(gt=0, le=100)]
 Money = Annotated[float, Field(ge=0)]
 
 
 class _Model(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
+    # strict: no "4" -> 4 or true -> 1.0; no inf/nan, which would disable a limit
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True, allow_inf_nan=False)
 
 
 class Drawdown(_Model):
@@ -73,21 +72,17 @@ class Prohibited(_Model):
     hft: bool
 
 
+class Commission(_Model):
+    ES: Money
+    MES: Money
+    NQ: Money
+    MNQ: Money
+
+
 class Costs(_Model):
     eval_fee: Money
     activation_fee: Money
-    commission_per_side: dict[str, float]
-
-    @field_validator("commission_per_side")
-    @classmethod
-    def _every_symbol(cls, value: dict[str, float]) -> dict[str, float]:
-        if set(value) != SYMBOLS:
-            raise ValueError(
-                f"commission_per_side needs exactly {sorted(SYMBOLS)}, got {sorted(value)}"
-            )
-        if any(c < 0 for c in value.values()):
-            raise ValueError("commission_per_side values must be >= 0")
-        return value
+    commission_per_side: Commission
 
 
 class AccountRules(_Model):

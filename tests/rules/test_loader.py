@@ -55,6 +55,35 @@ def test_malformed_yaml_names_path(tmp_path):
         load_account("lucid-flex-50k", tmp_path)
 
 
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("automation_allowed: true", "automation_allowed: true\nautomation_allowed: false"),
+        ("  max_minis: 4", "  max_minis: 4\n  max_minis: 40"),
+    ],
+)
+def test_duplicate_key_rejected(tmp_path, base, old, new):
+    path = write(tmp_path, base)
+    text = path.read_text()
+    assert old in text
+    path.write_text(text.replace(old, new))
+    with pytest.raises(ValueError, match=r"flex-50k\.yaml.*duplicate key"):
+        load_account("lucid-flex-50k", tmp_path)
+
+
+def test_merge_key_can_override(tmp_path, base):
+    path = write(tmp_path, base)
+    text = path.read_text()
+    eval_dd = "evaluation:\n  profit_target: 3000\n  max_drawdown:"
+    funded_dd = "funded:\n  max_drawdown:\n    amount: 2000\n"
+    assert eval_dd in text and funded_dd in text
+    merged = "funded:\n  max_drawdown:\n    <<: *dd\n    amount: 2500\n"
+    path.write_text(text.replace(eval_dd, eval_dd + " &dd").replace(funded_dd, merged))
+    rules = load_account("lucid-flex-50k", tmp_path)
+    assert rules.funded.max_drawdown.amount == 2500
+    assert rules.funded.max_drawdown.locks_at == 2100
+
+
 def test_bad_date_names_path(tmp_path, base):
     path = write(tmp_path, base)
     path.write_text(path.read_text().replace("verified_on: null", "verified_on: 2026-13-01"))

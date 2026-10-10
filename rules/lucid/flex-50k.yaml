@@ -1,0 +1,24 @@
+# UNVERIFIED: illustrative values copied from the design spec, not from Lucid.
+# Replace every value from Lucid's own site and set verified_on (plan 05, Task 4).
+firm: lucid
+account: flex-50k
+verified_on: null
+source_url: https://lucidtrading.com
+automation_allowed: true
+evaluation:
+  profit_target: 3000
+  max_drawdown: { amount: 2000, trailing: end_of_day, locks_at: null }
+  daily_loss_limit: null
+  consistency: null            # or { max_day_pct: 40 }
+  min_trading_days: 0
+funded:
+  max_drawdown: { amount: 2000, trailing: end_of_day, locks_at: null }
+  daily_loss_limit: null
+  consistency: null
+  payout: { max_pct_of_profit: 50, split_pct: 90, min_days: 0, min_profit: 0 }
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 4, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs: { eval_fee: 0, activation_fee: 0, commission_per_side: { ES: 0, MES: 0, NQ: 0, MNQ: 0 } }

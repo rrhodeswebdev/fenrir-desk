@@ -93,6 +93,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/core/` | Pure shared domain types: `Bar`, actions, contract specs, rollover, trading days. |
 | `tests/` | pytest suite mirroring `src/fenrir/`; `fixtures/` holds shared test data. |
 | `src/fenrir/rules/` | Rules schema, loader, account state and pure rule functions. |
+| `rules/` | Prop-firm rule YAML files, one per account type and size, entered from the firm's own site. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

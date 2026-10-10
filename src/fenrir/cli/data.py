@@ -25,6 +25,20 @@ def pull(
     since: Annotated[str, typer.Option(help="first trading day, YYYY-MM-DD")] = DEFAULT_SINCE,
 ) -> None:
     """Download 1-minute bars from LSE into data/bars/."""
+    # Validate and normalize series
+    normalized_series = [s.upper() for s in (series or list(SERIES))]
+    for s in normalized_series:
+        if s not in SERIES:
+            typer.echo(f"unknown series {s}; choose from {', '.join(SERIES)}", err=True)
+            raise typer.Exit(1)
+
+    # Validate since date format
+    try:
+        since_date = date.fromisoformat(since)
+    except ValueError:
+        typer.echo(f"--since must be YYYY-MM-DD, got {since}", err=True)
+        raise typer.Exit(1) from None
+
     settings = load_settings()
     if not settings.lse_api_key:
         typer.echo("FENRIR_LSE_API_KEY is not set. Add it to .env.", err=True)
@@ -37,8 +51,8 @@ def pull(
     windows = run_pull(
         settings.data_dir,
         load_instruments(),
-        tuple(series or SERIES),
-        date.fromisoformat(since),
+        tuple(normalized_series),
+        since_date,
         trading_day(datetime.now(UTC)),
         fetch,
         lambda: datetime.now(UTC).isoformat(),

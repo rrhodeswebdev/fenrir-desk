@@ -49,3 +49,32 @@ def test_pull_then_summary_json(tmp_path, monkeypatch):
     assert len(out["data_version"]) == 64
     nq = next(s for s in out["series"] if s["series"] == "NQ")
     assert nq["days"] >= 1
+
+
+def test_pull_unknown_series(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["data", "pull", "--series", "YM"])
+    assert result.exit_code == 1
+    assert "unknown series YM" in result.output
+
+
+def test_pull_lowercase_series(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+
+    def fake(settings, w):
+        ts = datetime.combine(w.last, time(15, 0), tzinfo=UTC)
+        return pl.DataFrame(
+            {"ts": [ts], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1]}
+        )
+
+    monkeypatch.setattr("fenrir.cli.data.fetch_contract", fake)
+    since = datetime.now(UTC).date().replace(day=1).isoformat()
+    result = CliRunner().invoke(app, ["data", "pull", "--series", "nq", "--since", since])
+    assert result.exit_code == 0, result.output
+
+
+def test_pull_malformed_since(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    result = CliRunner().invoke(app, ["data", "pull", "--since", "2026-13-01"])
+    assert result.exit_code == 1
+    assert "--since must be YYYY-MM-DD" in result.output

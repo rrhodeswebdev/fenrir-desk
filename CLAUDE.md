@@ -86,7 +86,11 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 |---|---|
 | `assets/brand/` | Logo, app icon and brand guide (palette, type). Source of truth for visual identity. |
 | `docs/` | Design specs and implementation plans. Not runtime code. |
-| `docs/superpowers/plans/` | Implementation plans, one per subsystem; `README.md` is the index and holds the cross-plan contracts. |
+| `design/` | Static design prototypes (synthetic data) that set the visual system; `DESIGN.md` at the root records it. |
+| `.impeccable/` | Impeccable design-skill state: direction contracts (`surfaces/`) and the `DESIGN.md` sidecar (`design.json`). Review captures and references are gitignored. |
+| `docs/superpowers/` | Local only (gitignored). `specs/` holds the v1 design spec; `plans/` holds the implementation plans, with `plans/README.md` as the index and cross-plan contracts. |
+
+All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 
 ---
 

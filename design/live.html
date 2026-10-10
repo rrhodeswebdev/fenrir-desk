@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fenrir Desk · Live</title>
+<link rel="icon" href="../assets/brand/icon/png/app-icon-32.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  color-scheme: dark;
+  --ground: #0E1116;
+  --ground-deep: #0A0C10;
+  --rule: #262D37;
+  --rule-strong: #3A4350;
+  --idle: #1E242D;
+  --ink: #E8EEF4;
+  --ink-2: #C9D3DD;
+  --ink-3: #8FA0B2;
+  --ember: #E0A33A;
+  --red: #E5484D;
+  --face-display: "Chakra Petch", sans-serif;
+  --face-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --track-label: 0.24em;
+  --track-value: 0.04em;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+  --step: 90ms;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 13px/1.5 var(--face-mono);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+::selection { background: var(--ember); color: var(--ground); }
+* { scrollbar-width: thin; scrollbar-color: var(--rule-strong) transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--rule-strong); }
+:focus-visible { outline: 1px solid var(--ember); outline-offset: 3px; }
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.label {
+  font: 500 11px/1.4 var(--face-mono);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.value { font: 500 13px/1.4 var(--face-mono); letter-spacing: var(--track-value); color: var(--ink); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* Shell */
+.app { display: grid; grid-template-columns: 184px 1fr; min-height: 100vh; }
+main { border-left: 1px solid var(--rule); min-width: 0; }
+.rail {
+  display: flex; flex-direction: column; gap: var(--s6);
+  padding: var(--s5) 0 var(--s5);
+  position: sticky; top: 0; height: 100vh;
+}
+.rail .mark { display: block; width: 44px; height: 44px; margin: 0 var(--s5); }
+.rail nav ul { list-style: none; margin: 0; padding: 0; }
+.rail nav a {
+  display: flex; align-items: center; justify-content: space-between;
+  height: 44px; padding: 0 var(--s5);
+  color: var(--ink-3); text-decoration: none;
+  font: 500 11px/1 var(--face-mono); letter-spacing: var(--track-label); text-transform: uppercase;
+  transition: color var(--step) steps(2);
+}
+.rail nav a:hover { color: var(--ink); }
+.rail nav a[aria-current="page"] { color: var(--ink); background: var(--ground-deep); box-shadow: inset 0 0 0 1px var(--ink-3); margin: 0 var(--s3); padding: 0 var(--s3); }
+.rail nav a[aria-current="page"]::after { content: ""; width: 8px; height: 16px; background: var(--ember); }
+.strip .time { font: 500 20px/1 var(--face-display); letter-spacing: 0.04em; }
+
+/* Top strip */
+.strip {
+  display: flex; align-items: center; gap: var(--s5);
+  min-height: 72px; padding: 0 var(--s6); white-space: nowrap;
+  border-bottom: 1px solid var(--rule);
+}
+.strip .title { font: 600 15px/1 var(--face-display); letter-spacing: 0.3em; text-transform: uppercase; }
+.links { display: flex; gap: var(--s5); align-items: center; }
+.ctl span { white-space: nowrap; }
+.link { display: grid; gap: 6px; }
+.link .row { display: flex; gap: var(--s2); align-items: baseline; }
+.synthetic { color: var(--ember); }
+.strip .spacer { flex: 1; }
+.alarm-text { color: var(--red); }
+
+/* Code strip: colour lives here and nowhere decorative */
+.code { display: flex; gap: 4px; }
+.code i { display: block; width: 22px; height: 10px; background: var(--ink-2); }
+.code i[data-s="idle"] { background: var(--idle); }
+.code i[data-s="caution"] { background: var(--ember); }
+.code i[data-s="alarm"] { background: var(--red); }
+.code.big i { width: 40px; height: 14px; }
+
+/* Outlined controls with an active-edge block */
+.ctl {
+  display: inline-flex; align-items: stretch; min-height: 44px;
+  border: 1px solid var(--ink-3);
+  font: 500 11px/1 var(--face-mono); letter-spacing: var(--track-label); text-transform: uppercase;
+  color: var(--ink);
+  transition: border-color var(--step) steps(2), background var(--step) steps(2);
+}
+.ctl span { display: flex; align-items: center; padding: 0 var(--s5); }
+.ctl .edge { width: 14px; padding: 0; background: transparent; border-left: 1px solid var(--ink-3); }
+.ctl:hover, .ctl:focus-visible { border-color: var(--ink); }
+.ctl:not(:has(.edge)):hover, .ctl:not(:has(.edge)):focus-visible { box-shadow: inset -10px 0 var(--ember); }
+.ctl:hover .edge { border-color: var(--ink); }
+.ctl.kill .edge, .ctl.kill:hover .edge { background: var(--red); border-color: var(--red); }
+.ctl.warn .edge { background: var(--ember); border-color: var(--ember); }
+.ctl:disabled { color: var(--ink-3); border-color: var(--rule-strong); cursor: not-allowed; }
+
+/* Focus field */
+.focus {
+  display: grid; grid-template-columns: minmax(280px, 1fr) minmax(360px, 1.25fr) minmax(260px, 0.8fr);
+  gap: var(--s6); padding: var(--s6) var(--s6);
+  border-bottom: 1px solid var(--rule);
+}
+.ident { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+.catno {
+  margin: 0; font: 500 clamp(56px, 6.4vw, 96px)/0.92 var(--face-display);
+  letter-spacing: 0.01em; color: var(--ink);
+}
+.acct-name { font: 500 15px/1.3 var(--face-mono); letter-spacing: 0.3em; text-transform: uppercase; color: var(--ink); margin: 0; }
+.ident p { margin: 0; color: var(--ink-2); max-width: 44ch; }
+.state-line { display: flex; gap: var(--s3); align-items: center; }
+.ident .actions { display: flex; gap: var(--s3); flex-wrap: wrap; margin-top: var(--s2); }
+
+.dial-wrap { display: grid; place-items: center; min-width: 0; }
+.dial { width: 100%; max-width: 520px; aspect-ratio: 1; overflow: visible; }
+.dial .grid { stroke: var(--rule-strong); stroke-width: 1; fill: none; }
+.dial .ring { stroke: var(--ink-3); stroke-width: 1; fill: none; }
+.dial .ring.floor { stroke-dasharray: 2 4; }
+.dial .ring.safety { stroke-dasharray: 8 4; }
+.dial .ring.floor.at-risk { stroke: var(--red); }
+.dial .ring.safety.at-risk { stroke: var(--ember); }
+.dial .fill-tick { stroke: var(--ink); stroke-width: 1.5; }
+.dial .trace.overnight { stroke: var(--ink-3); stroke-opacity: 0.35; stroke-dasharray: 1 3; }
+.dial .ring.target { stroke: var(--ink-2); }
+.dial .ring-label { fill: var(--ink-2); font: 500 12px var(--face-mono); letter-spacing: 0.2em; text-transform: uppercase; }
+.dial .hour { fill: var(--ink-3); font: 500 12px var(--face-mono); letter-spacing: 0.1em; }
+.dial .trace { stroke: var(--ink); stroke-width: 1.2; fill: none; stroke-linejoin: round; }
+.dial .hub { fill: var(--ground); stroke: var(--rule-strong); }
+.dial .now { fill: var(--ink); }
+.dial .flat-by { stroke: var(--ink-3); stroke-dasharray: 1 3; }
+.dial .center-value { fill: var(--ink); font: 600 22px var(--face-display); letter-spacing: 0.02em; text-anchor: middle; }
+.dial .center-label { fill: var(--ink-3); font: 500 11px var(--face-mono); letter-spacing: 0.24em; text-anchor: middle; }
+
+.data { display: flex; flex-direction: column; gap: var(--s5); min-width: 0; }
+.data dl { margin: 0; display: grid; gap: var(--s4); }
+.data dt { margin-bottom: 6px; }
+.data dd { margin: 0; }
+.data .rule { border-top: 1px solid var(--rule); }
+.meter { display: grid; gap: 6px; }
+.meter .row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s3); }
+.segs { display: grid; grid-template-columns: repeat(20, 1fr); gap: 3px; }
+.segs i { height: 10px; background: var(--idle); }
+.segs i.on { background: var(--ink-2); }
+.segs i.caution { background: var(--ember); }
+.segs i.alarm { background: var(--red); }
+.segs i.mark { box-shadow: 0 -4px 0 -2px var(--ember); }
+.muted { color: var(--ink-3); }
+
+/* Sleeves + journal */
+.lower { display: grid; grid-template-columns: repeat(3, minmax(220px, 1fr)) minmax(320px, 1.3fr); align-items: start; }
+.journal { border-left: 1px solid var(--rule); align-self: stretch; }
+.sleeve {
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--s3); cursor: pointer;
+  padding: var(--s5); border-right: 1px solid var(--rule); text-align: left;
+  min-width: 0;
+  transition: background var(--step) steps(2);
+}
+.sleeve:hover { background: var(--ground-deep); }
+.sleeve.alarm { box-shadow: inset 0 0 0 1px var(--red); }
+.sleeve.caution { box-shadow: inset 0 0 0 1px var(--ember); }
+.sleeve.idle .mini, .sleeve.idle .catno-s { opacity: 0.55; filter: grayscale(1); }
+.sleeve .head { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); }
+.catno-s { font: 500 24px/1 var(--face-display); letter-spacing: 0.04em; text-align: left; }
+.sleeve .body { display: grid; grid-template-columns: 112px 1fr; gap: var(--s4); align-items: center; }
+.sleeve .mini { width: 112px; }
+.sleeve .ctl { align-self: flex-start; }
+.dial.mini .trace { stroke-width: 2.5; }
+.dial.mini .grid { stroke: var(--idle); }
+.sleeve .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--s3); }
+.sleeve .facts dd { margin: 0; text-align: right; }
+.sleeve .alert { margin: 0; font: 500 11px/1.4 var(--face-mono); letter-spacing: 0.12em; text-transform: uppercase; }
+.sleeve.alarm .alert { color: var(--red); }
+.sleeve.caution .alert { color: var(--ember); }
+
+.journal { padding: var(--s5); display: flex; flex-direction: column; gap: var(--s4); min-width: 0; }
+.journal .head { display: flex; justify-content: space-between; align-items: center; }
+.journal ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+.journal .more { align-self: flex-start; color: var(--ink-2); text-decoration: underline; text-underline-offset: 4px; text-decoration-color: var(--rule-strong); }
+.journal li {
+  display: grid; grid-template-columns: 72px 1fr; gap: var(--s3);
+  padding: 7px 0; border-top: 1px solid var(--rule); font-size: 12px; color: var(--ink-2);
+}
+.journal li .kind { letter-spacing: 0.16em; color: var(--ink-3); margin-right: var(--s2); }
+.journal li[data-k="halt"] .kind, .journal li[data-k="alert"] .kind { color: var(--ember); }
+.journal li[data-k="mismatch"] .kind { color: var(--red); }
+.journal li .msg { overflow-wrap: anywhere; }
+
+/* Kill confirmation */
+dialog {
+  border: 1px solid var(--red); background: var(--ground); color: var(--ink);
+  padding: var(--s6); max-width: 520px; width: calc(100% - 32px);
+}
+dialog::backdrop { background: rgb(5 7 10 / 0.82); }
+dialog h2 { margin: 0 0 var(--s4); font: 600 32px/1 var(--face-display); letter-spacing: 0.02em; }
+dialog p { margin: 0 0 var(--s5); color: var(--ink-2); }
+dialog ul { margin: 0 0 var(--s6); padding: 0; list-style: none; display: grid; gap: 6px; }
+dialog .actions { display: flex; gap: var(--s3); flex-wrap: wrap; }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+@media (max-width: 1180px) {
+  .focus { grid-template-columns: 1fr 1fr; }
+  .dial-wrap { grid-column: 1 / -1; grid-row: 1; }
+  .lower { grid-template-columns: repeat(3, 1fr); }
+  .journal { grid-column: 1 / -1; border-top: 1px solid var(--rule); }
+}
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; }
+  main { border-left: 0; }
+  .strip { white-space: normal; }
+  .rail { position: static; height: auto; flex-direction: row; align-items: center; gap: var(--s3); padding: var(--s3) var(--s4); border-right: 0; border-bottom: 1px solid var(--rule); overflow-x: auto; }
+  .rail .mark { margin: 0; width: 32px; height: 32px; flex: none; }
+  .rail nav ul { display: flex; }
+  .rail nav a { height: 40px; padding: 0 var(--s3); gap: var(--s2); }
+  .strip { flex-wrap: wrap; gap: var(--s4); padding: var(--s4); }
+  .strip .spacer { display: none; }
+  .links { flex-wrap: wrap; gap: var(--s4); }
+  .focus { grid-template-columns: 1fr; gap: var(--s6); padding: var(--s6) var(--s4); }
+  .dial-wrap { grid-row: auto; }
+  .lower { grid-template-columns: 1fr; }
+  .sleeve { border-right: 0; border-bottom: 1px solid var(--rule); }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <img class="mark" src="../assets/brand/logo/fenrir-desk-mark-on-dark.svg" alt="Fenrir Desk">
+    <nav aria-label="Pages">
+      <ul>
+        <li><a href="#">Workbench</a></li>
+        <li><a href="#">Rules</a></li>
+        <li><a href="#">Data</a></li>
+        <li><a href="#">Backtests</a></li>
+        <li><a href="#">Strategies</a></li>
+        <li><a href="#" aria-current="page">Live</a></li>
+        <li><a href="#">Settings</a></li>
+      </ul>
+    </nav>
+  </aside>
+
+  <main>
+    <header class="strip">
+      <h1 class="title">Live</h1>
+      <div class="link">
+        <span class="label">New York</span>
+        <span class="time">14:31:07</span>
+      </div>
+      <div class="links" aria-label="Connections">
+        <div class="link">
+          <span class="label">LSE feed</span>
+          <div class="row"><span class="value">14:31:00</span><span class="label">2s</span></div>
+        </div>
+        <div class="link">
+          <span class="label">NinjaTrader</span>
+          <div class="row"><span class="value">1.8s</span><span class="label">heartbeat</span></div>
+        </div>
+        <div class="link">
+          <span class="label">Feed · Broker · Drift · Book</span>
+          <div class="row">
+            <div class="code big" role="img" aria-label="Feed normal, broker normal, drift normal, book mismatch on LFE 0911">
+              <i data-s="ok"></i><i data-s="ok"></i><i data-s="ok"></i><i data-s="alarm"></i>
+            </div>
+            <span class="label alarm-text">Book · LFE 0911</span>
+          </div>
+        </div>
+      </div>
+      <span class="spacer"></span>
+      <span class="label synthetic">Synthetic data</span>
+      <button class="ctl kill" id="kill-open"><span>Kill all</span><span class="edge" aria-hidden="true"></span></button>
+    </header>
+
+    <section class="focus" aria-labelledby="focus-catno">
+      <div class="ident">
+        <h2 class="catno" id="focus-catno">LFE 0507</h2>
+        <p class="acct-name" id="focus-type">Lucid Flex 50K</p>
+        <div class="state-line">
+          <div class="code big" id="focus-code" role="img"></div>
+          <span class="label" id="focus-state">Live · Evaluation</span>
+        </div>
+        <p id="focus-desc">orb.py on MNQ Z26. Long 2 since 14:12. Bracket working at the broker.</p>
+        <div class="actions" id="focus-actions"></div>
+      </div>
+
+      <div class="dial-wrap">
+        <svg class="dial" id="dial" viewBox="0 0 600 600" role="img" aria-labelledby="dial-title">
+          <title id="dial-title">Session dial</title>
+        </svg>
+      </div>
+
+      <div class="data" id="focus-data"></div>
+    </section>
+
+    <section class="lower" aria-label="Armed accounts and journal">
+      <div id="sleeves" style="display: contents"></div>
+      <section class="journal" aria-labelledby="journal-title">
+        <div class="head">
+          <h2 class="label" id="journal-title" style="margin:0">Journal · today</h2>
+          <span class="label">All accounts</span>
+        </div>
+        <ol id="journal"></ol>
+        <a class="label more" href="#">Full journal</a>
+      </section>
+    </section>
+  </main>
+</div>
+
+<dialog id="kill">
+  <h2>Kill all accounts</h2>
+  <p>Flatten every position, cancel every working order, disarm every account. Armed strategies stop until you arm them again.</p>
+  <ul class="value">
+    <li>4 accounts armed</li>
+    <li>2 open positions · 6 working orders</li>
+  </ul>
+  <div class="actions">
+    <button class="ctl kill" id="kill-confirm"><span>Flatten and disarm all</span><span class="edge" aria-hidden="true"></span></button>
+    <button class="ctl" id="kill-cancel"><span>Cancel</span></button>
+  </div>
+</dialog>
+
+<script>
+// Synthetic data for the design prototype only.
+const SESSION_MIN = 23 * 60;          // 18:00 ET to 17:00 ET
+const NOW_MIN = 20 * 60 + 31;         // 14:31 ET
+const OPEN_MIN = 15 * 60 + 30;        // 09:30 ET
+const FLAT_BY_MIN = 22 * 60 + 45;     // 16:45 ET
+
+const ACCOUNTS = [
+  { id: "LFE 0507", type: "Lucid Flex 50K", mode: "Live", phase: "Evaluation", strategy: "orb.py", contract: "MNQ Z26",
+    desc: "orb.py on MNQ Z26. Long 2 since 14:12. Bracket working at the broker.", fills: [16 * 60 + 41, 17 * 60 + 4, 20 * 60 + 12],
+    floor: -2000, target: 3000, safety: null, equity: 1180, today: 212, seed: 7, state: "ok",
+    code: ["ok", "ok", "ok", "ok"],
+    meters: [
+      { k: "Drawdown left", used: 588, max: 2000, unit: "$", left: 1412 },
+      { k: "Daily loss left", none: true },
+      { k: "Contracts", used: 2, max: 40, unit: "MNQ" },
+      { k: "Target", used: 1180, max: 3000, unit: "$", progress: true },
+    ],
+    position: "Long 2 @ 25,412.25", bracket: "Stop 25,402.25 · Target 25,432.25" },
+  { id: "LPR 1123", type: "Lucid Pro 50K", mode: "Sim", phase: "Funded", strategy: "vwap_fade.py", contract: "NQ Z26",
+    desc: "Halted for the day at 81% of the daily loss limit. Flat. Re-arms at the next session.",
+    fills: [16 * 60 + 2, 18 * 60 + 30, 19 * 60 + 58], floor: -2500, target: 3000, safety: -800, equity: -640, today: -812, seed: 11, state: "caution", atRisk: ["safety"],
+    alert: "Halted · 81% daily loss used",
+    code: ["ok", "ok", "ok", "caution"],
+    meters: [
+      { k: "Drawdown left", used: 640, max: 2500, unit: "$", left: 1860 },
+      { k: "Daily loss left", used: 812, max: 1000, unit: "$", left: 188, safety: 0.8 },
+      { k: "Contracts", used: 0, max: 4, unit: "NQ" },
+      { k: "Payout", used: 0, max: 1, unit: "", none: true, text: "Not eligible" },
+    ],
+    position: "Flat", bracket: "No working orders" },
+  { id: "LFE 0911", type: "Lucid Flex 100K", mode: "Sim", phase: "Evaluation", strategy: "orb.py", contract: "MNQ Z26",
+    desc: "NinjaTrader shows long 1 MNQ; the runner expects flat. Trading blocked until you resolve it.",
+    fills: [17 * 60 + 10], floor: -3000, target: 6000, safety: null, equity: 420, today: 96, seed: 23, state: "alarm",
+    alert: "Book mismatch · resolve",
+    code: ["ok", "ok", "ok", "alarm"],
+    meters: [
+      { k: "Drawdown left", used: 0, max: 3000, unit: "$", left: 3000 },
+      { k: "Daily loss left", none: true },
+      { k: "Contracts", used: 1, max: 60, unit: "MNQ" },
+      { k: "Target", used: 420, max: 6000, unit: "$", progress: true },
+    ],
+    position: "NT: Long 1 · Runner: Flat", bracket: "1 stop working" },
+  { id: "LDA 0042", type: "Lucid Daily 25K", mode: "Dry run", phase: "Evaluation", strategy: "orb.py", contract: "MES Z26",
+    desc: "Dry run. Actions are logged, nothing is sent. No signal yet today.",
+    floor: -1000, target: 1250, safety: -400, equity: 0, today: 0, seed: 31, state: "idle",
+    code: ["ok", "idle", "ok", "ok"],
+    meters: [
+      { k: "Drawdown left", used: 0, max: 1000, unit: "$", left: 1000 },
+      { k: "Daily loss left", used: 0, max: 500, unit: "$", left: 500, safety: 0.8 },
+      { k: "Contracts", used: 0, max: 20, unit: "MES" },
+      { k: "Target", used: 0, max: 1250, unit: "$", progress: true },
+    ],
+    position: "Flat", bracket: "No working orders" },
+];
+
+const JOURNAL = [
+  ["14:31:00", "bar", "LFE 0507 · MNQ Z26 C 25,418.50 · step: hold"],
+  ["14:30:12", "mismatch", "LFE 0911 · NT long 1 MNQ, runner flat · trading blocked"],
+  ["14:12:00", "fill", "LFE 0507 · Buy 2 MNQ Z26 @ 25,412.25"],
+  ["14:11:00", "action", "LFE 0507 · Bracket long 2 · stop 25,402.25 · target 25,432.25"],
+  ["13:58:41", "halt", "LPR 1123 · 81% of daily loss used · halted for the day"],
+  ["13:58:41", "fill", "LPR 1123 · Sell 1 NQ Z26 @ 25,398.00 · stop"],
+  ["13:22:05", "reject", "LDA 0042 · Bracket 4 MES · stop-out would breach daily loss"],
+  ["11:04:00", "fill", "LFE 0507 · Sell 2 MNQ Z26 @ 25,301.75 · target"],
+  ["09:30:00", "alert", "All · Session open · 4 accounts armed"],
+];
+
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs = {}, text) => {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (text != null) n.textContent = text;
+  return n;
+};
+const money = (v) => (v < 0 ? "−$" : "$") + Math.abs(v).toLocaleString("en-US");
+
+function rng(seed) {
+  return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+
+// Equity per minute since 18:00: flat overnight, a walk from the open that lands on the account's equity now.
+function series(a) {
+  const r = rng(a.seed), pts = [];
+  const e = a.equity - a.today, steps = NOW_MIN - OPEN_MIN, span = a.target - a.floor;
+  let walk = 0;
+  for (let m = 0; m <= NOW_MIN; m += 1) {
+    if (m < OPEN_MIN || a.mode === "Dry run") { pts.push([m, e]); continue; }
+    const shock = r() < 0.02 ? (r() - 0.5) * span * 0.12 : 0;
+    walk = walk * 0.97 + (r() - 0.5) * span * 0.018 + shock;
+    const k = (m - OPEN_MIN) / steps;
+    pts.push([m, e + a.today * k + walk * Math.sin(Math.PI * Math.min(1, k * 1.05))]);
+  }
+  pts.push([NOW_MIN, a.equity]);
+  return pts;
+}
+
+function drawDial(svg, a, opts) {
+  const { size = 600, detail = true } = opts || {};
+  while (svg.lastChild && svg.lastChild.nodeName !== "title") svg.removeChild(svg.lastChild);
+  const c = size / 2, rIn = size * 0.12, rOut = size * 0.46;
+  const r = (e) => rIn + (Math.max(a.floor, Math.min(a.target, e)) - a.floor) / (a.target - a.floor) * (rOut - rIn);
+  const ang = (m) => (m / SESSION_MIN) * 2 * Math.PI - Math.PI / 2;
+  const at = (m, rad) => [c + rad * Math.cos(ang(m)), c + rad * Math.sin(ang(m))];
+
+  for (let h = 0; h < 23; h++) {
+    const [x1, y1] = at(h * 60, rIn), [x2, y2] = at(h * 60, rOut);
+    svg.append(el("line", { class: "grid", x1, y1, x2, y2 }));
+    if (detail && h % 2 === 0) {
+      const [tx, ty] = at(h * 60, rOut + 22);
+      svg.append(el("text", { class: "hour", x: tx, y: ty + 3, "text-anchor": "middle" }, String((18 + h) % 24).padStart(2, "0")));
+    }
+  }
+  for (let i = 1; i < 6; i++) svg.append(el("circle", { class: "grid", cx: c, cy: c, r: rIn + (rOut - rIn) * i / 6 }));
+  const [fx1, fy1] = at(FLAT_BY_MIN, rIn), [fx2, fy2] = at(FLAT_BY_MIN, rOut);
+  svg.append(el("line", { class: "flat-by", x1: fx1, y1: fy1, x2: fx2, y2: fy2 }));
+
+  const rings = [["floor", a.floor, "Floor"], ["start", 0, "Start"], ["target", a.target, "Target"]];
+  if (a.safety != null) rings.push(["safety", a.safety, "Safety 80%"]);
+  for (const [cls, v, name] of rings) {
+    const risk = (a.atRisk || []).includes(cls) ? " at-risk" : "";
+    svg.append(el("circle", { class: "ring " + cls + risk, cx: c, cy: c, r: r(v) }));
+    if (detail) svg.append(el("text", { class: "ring-label", x: c + 14, y: c - r(v) + 16 }, name + " " + money(v)));
+  }
+
+  const raw = series(a);
+  const path = (seg) => seg.map(([m, e], i) => { const [x, y] = at(m, r(e)); return (i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1); }).join(" ");
+  const split = raw.findIndex(([m]) => m >= OPEN_MIN);
+  svg.append(el("path", { class: "trace overnight", d: path(raw.slice(0, split + 1)) }));
+  const trace = el("path", { class: "trace", d: path(raw.slice(split)) });
+  svg.append(trace);
+  const pts = raw.map(([m, e]) => at(m, r(e)));
+  if (detail) for (const m of a.fills || []) {
+    const e = raw.find(([pm]) => pm >= m)[1];
+    const [x1, y1] = at(m, r(e) - 9), [x2, y2] = at(m, r(e) + 9);
+    svg.append(el("line", { class: "fill-tick", x1, y1, x2, y2 }));
+  }
+  const [nx, ny] = pts[pts.length - 1];
+  svg.append(el("circle", { class: "now", cx: nx, cy: ny, r: detail ? 4 : 3 }));
+  svg.append(el("circle", { class: "hub", cx: c, cy: c, r: rIn * 0.72 }));
+  if (detail) {
+    svg.append(el("text", { class: "center-value", x: c, y: c + 4 }, money(a.today)));
+    svg.append(el("text", { class: "center-label", x: c, y: c + 26 }, "TODAY"));
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      const len = trace.getTotalLength();
+      trace.style.strokeDasharray = len;
+      trace.animate([{ strokeDashoffset: len }, { strokeDashoffset: 0 }], { duration: 900, easing: "cubic-bezier(0.16, 1, 0.3, 1)" });
+    }
+  }
+}
+
+function meterHTML(m) {
+  if (m.none) return `<div class="meter"><div class="row"><dt class="label">${m.k}</dt><dd class="value muted">${m.text || "No limit"}</dd></div>
+    <div class="segs" aria-hidden="true">${"<i></i>".repeat(20)}</div></div>`;
+  const frac = Math.min(1, m.used / m.max), on = Math.round(frac * 20);
+  const segs = Array.from({ length: 20 }, (_, i) => {
+    let cls = i < on ? "on" : "";
+    if (i < on && m.safety && frac >= m.safety) cls = "caution";
+    if (i < on && frac >= 1) cls = "alarm";
+    if (m.safety && i === Math.round(m.safety * 20) - 1) cls += " mark";
+    return `<i class="${cls}"></i>`;
+  }).join("");
+  const fig = m.unit === "$"
+    ? (m.progress ? `${money(m.used)} <span class="muted">of ${money(m.max)}</span>` : `${money(m.left)} <span class="muted">of ${money(m.max)}</span>`)
+    : `${m.used} <span class="muted">of ${m.max} ${m.unit}</span>`;
+  const label = m.progress ? `${Math.round(frac * 100)}% of target` : `${Math.round(frac * 100)}% used`;
+  return `<div class="meter"><div class="row"><dt class="label">${m.k}</dt><dd class="value">${fig}</dd></div>
+    <div class="segs" role="img" aria-label="${m.k}: ${label}">${segs}</div></div>`;
+}
+
+function codeHTML(code) {
+  const names = ["Feed", "Broker", "Risk", "Book"];
+  return code.map((s, i) => `<i data-s="${s}" title="${names[i]}: ${s}"></i>`).join("");
+}
+
+function renderFocus(a) {
+  document.getElementById("focus-catno").textContent = a.id;
+  document.getElementById("focus-type").textContent = a.type;
+  document.getElementById("focus-state").textContent = `${a.mode} · ${a.phase}`;
+  document.getElementById("focus-desc").textContent = a.desc;
+  document.getElementById("focus-actions").innerHTML =
+    (a.state === "alarm" ? `<button class="ctl kill"><span>Resolve</span><span class="edge" aria-hidden="true"></span></button>` : "") +
+    `<button class="ctl"><span>Disarm</span></button><button class="ctl"><span>Journal</span></button>`;
+  const code = document.getElementById("focus-code");
+  code.innerHTML = codeHTML(a.code);
+  code.setAttribute("aria-label", "Feed, broker, risk, book: " + a.code.join(", "));
+  document.getElementById("focus-data").innerHTML = `
+    <dl>
+      <div><dt class="label">Strategy</dt><dd class="value">${a.strategy}</dd></div>
+      <div><dt class="label">Contract</dt><dd class="value">${a.contract}</dd></div>
+      <div><dt class="label">Position</dt><dd class="value">${a.position}</dd></div>
+      <div><dt class="label">Bracket</dt><dd class="value">${a.bracket}</dd></div>
+    </dl>
+    <div class="rule"></div>
+    <dl>${a.meters.map(meterHTML).join("")}</dl>`;
+  drawDial(document.getElementById("dial"), a);
+}
+
+function renderSleeves(selected) {
+  const host = document.getElementById("sleeves");
+  host.innerHTML = "";
+  ACCOUNTS.filter((a) => a.id !== selected).forEach((a) => {
+    const b = document.createElement("article");
+    b.className = "sleeve " + a.state;
+    b.innerHTML = `
+      <div class="head">
+        <button class="catno-s" aria-label="Focus ${a.id}, ${a.type}">${a.id}</button>
+        <span class="code" role="img" aria-label="Feed, broker, risk, book: ${a.code.join(", ")}">${codeHTML(a.code)}</span>
+      </div>
+      <div class="label">${a.type} · ${a.mode}</div>
+      ${a.alert ? `<p class="alert">${a.alert}</p>` : ""}
+      <div class="body">
+        <svg class="dial mini" viewBox="0 0 600 600" aria-hidden="true"></svg>
+        <dl class="facts">
+          <dt class="label">Today</dt><dd class="value">${money(a.today)}</dd>
+          <dt class="label">DD left</dt><dd class="value">${money(a.meters[0].left)}</dd>
+          <dt class="label">Position</dt><dd class="value">${a.position.split(" · ")[0].split(" @ ")[0]}</dd>
+        </dl>
+      </div>
+      ${a.state === "alarm" ? `<button class="ctl kill"><span>Resolve</span><span class="edge" aria-hidden="true"></span></button>` : ""}`;
+    drawDial(b.querySelector("svg"), a, { detail: false });
+    b.addEventListener("click", (e) => { if (!e.target.closest(".ctl")) select(a.id); });
+    host.append(b);
+  });
+}
+
+function renderJournal() {
+  document.getElementById("journal").innerHTML = JOURNAL.map(([t, k, msg]) =>
+    `<li data-k="${k}"><span>${t}</span><span class="msg"><span class="kind">${k.toUpperCase()}</span>${msg}</span></li>`).join("");
+}
+
+function select(id) {
+  const a = ACCOUNTS.find((x) => x.id === id);
+  renderFocus(a);
+  renderSleeves(id);
+}
+
+const kill = document.getElementById("kill");
+document.getElementById("kill-open").addEventListener("click", () => kill.showModal());
+document.getElementById("kill-cancel").addEventListener("click", () => kill.close());
+document.getElementById("kill-confirm").addEventListener("click", () => kill.close());
+
+renderJournal();
+const activeNav = document.querySelector('.rail nav a[aria-current="page"]');
+const railEl = document.querySelector(".rail");
+if (railEl.scrollWidth > railEl.clientWidth) railEl.scrollLeft = activeNav.offsetLeft - 48;
+const SEVERITY = { alarm: 0, caution: 1, ok: 2, idle: 3 };
+select([...ACCOUNTS].sort((x, y) => SEVERITY[x.state] - SEVERITY[y.state])[0].id);
+</script>
+</body>
+</html>

@@ -1,0 +1,350 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-10T18:31:00+00:00",
+  "title": "Design System: Fenrir Desk",
+  "extensions": {
+    "colorMeta": {
+      "ground": {
+        "role": "neutral",
+        "displayName": "Night",
+        "canonical": "oklch(17.7% 0.011 261)",
+        "tonalRamp": [
+          "oklch(15% 0.011 261)",
+          "oklch(26% 0.011 261)",
+          "oklch(37% 0.011 261)",
+          "oklch(48% 0.011 261)",
+          "oklch(59% 0.011 261)",
+          "oklch(70% 0.011 261)",
+          "oklch(82% 0.011 261)",
+          "oklch(95% 0.011 261)"
+        ]
+      },
+      "ground-deep": {
+        "role": "neutral",
+        "displayName": "Night Deep",
+        "canonical": "oklch(15.4% 0.009 264)",
+        "tonalRamp": [
+          "oklch(15% 0.009 264)",
+          "oklch(26% 0.009 264)",
+          "oklch(37% 0.009 264)",
+          "oklch(48% 0.009 264)",
+          "oklch(59% 0.009 264)",
+          "oklch(70% 0.009 264)",
+          "oklch(82% 0.009 264)",
+          "oklch(95% 0.009 264)"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "oklch(29.5% 0.021 257)",
+        "tonalRamp": [
+          "oklch(15% 0.021 257)",
+          "oklch(26% 0.021 257)",
+          "oklch(37% 0.021 257)",
+          "oklch(48% 0.021 257)",
+          "oklch(59% 0.021 257)",
+          "oklch(70% 0.021 257)",
+          "oklch(82% 0.021 257)",
+          "oklch(95% 0.021 257)"
+        ]
+      },
+      "rule-strong": {
+        "role": "neutral",
+        "displayName": "Hairline Strong",
+        "canonical": "oklch(38.0% 0.025 258)",
+        "tonalRamp": [
+          "oklch(15% 0.025 258)",
+          "oklch(26% 0.025 258)",
+          "oklch(37% 0.025 258)",
+          "oklch(48% 0.025 258)",
+          "oklch(59% 0.025 258)",
+          "oklch(70% 0.025 258)",
+          "oklch(82% 0.025 258)",
+          "oklch(95% 0.025 258)"
+        ]
+      },
+      "idle": {
+        "role": "neutral",
+        "displayName": "Unlit",
+        "canonical": "oklch(25.8% 0.019 258)",
+        "tonalRamp": [
+          "oklch(15% 0.019 258)",
+          "oklch(26% 0.019 258)",
+          "oklch(37% 0.019 258)",
+          "oklch(48% 0.019 258)",
+          "oklch(59% 0.019 258)",
+          "oklch(70% 0.019 258)",
+          "oklch(82% 0.019 258)",
+          "oklch(95% 0.019 258)"
+        ]
+      },
+      "ink": {
+        "role": "primary",
+        "displayName": "Ice",
+        "canonical": "oklch(94.6% 0.010 248)",
+        "tonalRamp": [
+          "oklch(15% 0.01 248)",
+          "oklch(26% 0.01 248)",
+          "oklch(37% 0.01 248)",
+          "oklch(48% 0.01 248)",
+          "oklch(59% 0.01 248)",
+          "oklch(70% 0.01 248)",
+          "oklch(82% 0.01 248)",
+          "oklch(95% 0.01 248)"
+        ]
+      },
+      "ink-2": {
+        "role": "neutral",
+        "displayName": "Steel",
+        "canonical": "oklch(86.2% 0.018 248)",
+        "tonalRamp": [
+          "oklch(15% 0.018 248)",
+          "oklch(26% 0.018 248)",
+          "oklch(37% 0.018 248)",
+          "oklch(48% 0.018 248)",
+          "oklch(59% 0.018 248)",
+          "oklch(70% 0.018 248)",
+          "oklch(82% 0.018 248)",
+          "oklch(95% 0.018 248)"
+        ]
+      },
+      "ink-3": {
+        "role": "neutral",
+        "displayName": "Slate",
+        "canonical": "oklch(69.8% 0.033 250)",
+        "tonalRamp": [
+          "oklch(15% 0.033 250)",
+          "oklch(26% 0.033 250)",
+          "oklch(37% 0.033 250)",
+          "oklch(48% 0.033 250)",
+          "oklch(59% 0.033 250)",
+          "oklch(70% 0.033 250)",
+          "oklch(82% 0.033 250)",
+          "oklch(95% 0.033 250)"
+        ]
+      },
+      "ember": {
+        "role": "secondary",
+        "displayName": "Ember",
+        "canonical": "oklch(75.6% 0.137 77)",
+        "tonalRamp": [
+          "oklch(15% 0.137 77)",
+          "oklch(26% 0.137 77)",
+          "oklch(37% 0.137 77)",
+          "oklch(48% 0.137 77)",
+          "oklch(59% 0.137 77)",
+          "oklch(70% 0.137 77)",
+          "oklch(82% 0.137 77)",
+          "oklch(95% 0.137 77)"
+        ]
+      },
+      "red": {
+        "role": "tertiary",
+        "displayName": "Signal Red",
+        "canonical": "oklch(62.6% 0.193 23)",
+        "tonalRamp": [
+          "oklch(15% 0.193 23)",
+          "oklch(26% 0.193 23)",
+          "oklch(37% 0.193 23)",
+          "oklch(48% 0.193 23)",
+          "oklch(59% 0.193 23)",
+          "oklch(70% 0.193 23)",
+          "oklch(82% 0.193 23)",
+          "oklch(95% 0.193 23)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Focused account catalog number; one per page."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Dialog titles."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Sleeve catalog numbers."
+      },
+      "readout": {
+        "displayName": "Readout",
+        "purpose": "Session clock; dial centre P&L at 600/22px."
+      },
+      "page-title": {
+        "displayName": "Page Title",
+        "purpose": "Page name in the top strip."
+      },
+      "account-name": {
+        "displayName": "Account Name",
+        "purpose": "Account type under a catalog number."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Descriptions, max 44ch."
+      },
+      "value": {
+        "displayName": "Value",
+        "purpose": "Every data figure, tabular."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Every label, nav item and control caption, uppercase, Slate."
+      }
+    },
+    "shadows": [
+      {
+        "name": "inset-outline",
+        "value": "inset 0 0 0 1px <state colour>",
+        "purpose": "Active nav cell (Slate), alarm (Red) and caution (Ember) sleeves. Not depth."
+      },
+      {
+        "name": "inset-edge",
+        "value": "inset -10px 0 #E0A33A",
+        "purpose": "Ember edge block on plain controls at hover/focus. Not depth."
+      }
+    ],
+    "motion": [
+      {
+        "name": "step",
+        "value": "90ms steps(2)",
+        "purpose": "Every state switch: hover, focus, outline and background changes."
+      },
+      {
+        "name": "trace-draw",
+        "value": "900ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "The one authored moment: focused dial live trace draws on focus change. Both disabled under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack-dial",
+        "value": "1180px"
+      },
+      {
+        "name": "single-column",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Outlined Control",
+      "kind": "button",
+      "refersTo": "control",
+      "description": "Default action: square outline, mono caps caption, Ember edge on hover/focus.",
+      "html": "<button class=\"ds-ctl\"><span>Disarm</span></button>",
+      "css": ".ds-ctl{display:inline-flex;align-items:stretch;min-height:44px;background:none;border:1px solid #8FA0B2;color:#E8EEF4;border-radius:0;padding:0;cursor:pointer;font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;transition:border-color 90ms steps(2),box-shadow 90ms steps(2);} .ds-ctl span{display:flex;align-items:center;padding:0 24px;} .ds-ctl:hover,.ds-ctl:focus-visible{border-color:#E8EEF4;box-shadow:inset -10px 0 #E0A33A;} .ds-ctl:focus-visible{outline:1px solid #E0A33A;outline-offset:3px;}"
+    },
+    {
+      "name": "Kill Control",
+      "kind": "button",
+      "refersTo": "control-edge-kill",
+      "description": "Destructive action (kill, resolve): outlined control with a Signal Red edge block.",
+      "html": "<button class=\"ds-ctl-kill\"><span>Kill all</span><span class=\"ds-edge\" aria-hidden=\"true\"></span></button>",
+      "css": ".ds-ctl-kill{display:inline-flex;align-items:stretch;min-height:44px;background:none;border:1px solid #8FA0B2;color:#E8EEF4;border-radius:0;padding:0;cursor:pointer;font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;transition:border-color 90ms steps(2);} .ds-ctl-kill span{display:flex;align-items:center;padding:0 24px;} .ds-ctl-kill .ds-edge{width:14px;padding:0;background:#E5484D;border-left:1px solid #E5484D;} .ds-ctl-kill:hover,.ds-ctl-kill:focus-visible{border-color:#E8EEF4;} .ds-ctl-kill:focus-visible{outline:1px solid #E0A33A;outline-offset:3px;}"
+    },
+    {
+      "name": "Index Rail",
+      "kind": "nav",
+      "refersTo": "nav-item-active",
+      "description": "Page navigation; active page is a boxed cell with an Ember block.",
+      "html": "<nav class=\"ds-rail\"><a href=\"#\">Rules</a><a href=\"#\">Backtests</a><a href=\"#\" aria-current=\"page\">Live</a><a href=\"#\">Settings</a></nav>",
+      "css": ".ds-rail{display:flex;flex-direction:column;width:184px;background:#0E1116;} .ds-rail a{display:flex;align-items:center;justify-content:space-between;height:44px;padding:0 24px;color:#8FA0B2;text-decoration:none;font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;transition:color 90ms steps(2);} .ds-rail a:hover{color:#E8EEF4;} .ds-rail a:focus-visible{outline:1px solid #E0A33A;outline-offset:3px;} .ds-rail a[aria-current=page]{color:#E8EEF4;background:#0A0C10;box-shadow:inset 0 0 0 1px #8FA0B2;margin:0 12px;padding:0 12px;} .ds-rail a[aria-current=page]::after{content:'';width:8px;height:16px;background:#E0A33A;}"
+    },
+    {
+      "name": "Code Strip",
+      "kind": "chip",
+      "refersTo": "code-cell",
+      "description": "Fixed-order state cells; replaces status badges. Steel normal, Unlit idle, Ember caution, Red alarm.",
+      "html": "<span class=\"ds-code\" role=\"img\" aria-label=\"Feed normal, broker normal, risk caution, book alarm\"><i></i><i data-s=\"idle\"></i><i data-s=\"caution\"></i><i data-s=\"alarm\"></i></span>",
+      "css": ".ds-code{display:inline-flex;gap:4px;} .ds-code i{display:block;width:22px;height:10px;background:#C9D3DD;} .ds-code i[data-s=idle]{background:#1E242D;} .ds-code i[data-s=caution]{background:#E0A33A;} .ds-code i[data-s=alarm]{background:#E5484D;}"
+    },
+    {
+      "name": "Segmented Meter",
+      "kind": "custom",
+      "refersTo": "meter-segment",
+      "description": "Distance to a limit in 20 cells; Ember past the safety mark, Red at 100%.",
+      "html": "<div class=\"ds-meter\"><div class=\"ds-row\"><span class=\"ds-l\">Daily loss left</span><span class=\"ds-v\">$188 of $1,000</span></div><div class=\"ds-segs\" role=\"img\" aria-label=\"Daily loss: 81% used\"><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i class=\"c\"></i><i></i><i></i><i></i><i></i></div></div>",
+      "css": ".ds-meter{display:grid;gap:6px;width:300px;} .ds-row{display:flex;justify-content:space-between;align-items:baseline;} .ds-l{font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;color:#8FA0B2;} .ds-v{font:500 13px/1.4 'IBM Plex Mono',monospace;letter-spacing:0.04em;color:#E8EEF4;font-variant-numeric:tabular-nums;} .ds-segs{display:grid;grid-template-columns:repeat(20,1fr);gap:3px;} .ds-segs i{height:10px;background:#1E242D;} .ds-segs i.c{background:#E0A33A;} .ds-segs i:nth-child(16){box-shadow:0 -4px 0 -2px #E0A33A;}"
+    },
+    {
+      "name": "Sleeve",
+      "kind": "card",
+      "refersTo": "sleeve",
+      "description": "An armed account in the lower band; replaces Card. Square, unfilled, state outline.",
+      "html": "<article class=\"ds-sleeve ds-caution\" tabindex=\"0\"><div class=\"ds-head\"><span class=\"ds-cat\">LPR 1123</span><span class=\"ds-code\"><i></i><i></i><i></i><i data-s=\"caution\"></i></span></div><div class=\"ds-lab\">Lucid Pro 50K · Sim</div><p class=\"ds-alert\">Halted · 81% daily loss used</p></article>",
+      "css": ".ds-sleeve{display:flex;flex-direction:column;gap:12px;padding:24px;width:260px;background:#0E1116;border-right:1px solid #262D37;cursor:pointer;transition:background 90ms steps(2);} .ds-sleeve:hover{background:#0A0C10;} .ds-sleeve:focus-visible{outline:1px solid #E0A33A;outline-offset:3px;} .ds-caution{box-shadow:inset 0 0 0 1px #E0A33A;} .ds-head{display:flex;justify-content:space-between;align-items:center;} .ds-cat{font:500 24px/1 'Chakra Petch',sans-serif;letter-spacing:0.04em;color:#E8EEF4;} .ds-code{display:inline-flex;gap:4px;} .ds-code i{display:block;width:22px;height:10px;background:#C9D3DD;} .ds-code i[data-s=caution]{background:#E0A33A;} .ds-lab{font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;color:#8FA0B2;} .ds-alert{margin:0;font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.12em;text-transform:uppercase;color:#E0A33A;}"
+    },
+    {
+      "name": "Kill-Switch Confirmation",
+      "kind": "custom",
+      "refersTo": "kill-dialog",
+      "description": "AlertDialog for the kill switch: Red border, plain consequence, red-edge confirm.",
+      "html": "<div class=\"ds-dlg\" role=\"alertdialog\" aria-label=\"Kill all accounts\"><h2>Kill all accounts</h2><p>Flatten every position, cancel every working order, disarm every account.</p><div class=\"ds-act\"><button class=\"ds-k\"><span>Flatten and disarm all</span><span class=\"ds-e\"></span></button><button class=\"ds-k\"><span>Cancel</span></button></div></div>",
+      "css": ".ds-dlg{border:1px solid #E5484D;background:#0E1116;color:#E8EEF4;padding:32px;max-width:520px;} .ds-dlg h2{margin:0 0 16px;font:600 32px/1 'Chakra Petch',sans-serif;letter-spacing:0.02em;} .ds-dlg p{margin:0 0 24px;color:#C9D3DD;font:400 13px/1.5 'IBM Plex Mono',monospace;} .ds-act{display:flex;gap:12px;} .ds-k{display:inline-flex;align-items:stretch;min-height:44px;background:none;border:1px solid #8FA0B2;color:#E8EEF4;padding:0;cursor:pointer;font-family:var(--face-mono,'IBM Plex Mono',monospace);font-weight:500;font-size:11px;letter-spacing:0.24em;text-transform:uppercase;} .ds-k span{display:flex;align-items:center;padding:0 24px;} .ds-k .ds-e{width:14px;padding:0;background:#E5484D;} .ds-k:hover,.ds-k:focus-visible{border-color:#E8EEF4;} .ds-k:focus-visible{outline:1px solid #E0A33A;outline-offset:3px;}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Catalogued Sleeve",
+    "overview": "Every armed account is filed like a factory record sleeve: a matte Night ground, one Ice hairline plot owning the field, and a catalog number (LFE 0507) set at display scale as the headline. The desk is read from across the room on a second monitor, so the field is calm and monochrome by default. Anything abnormal carries colour; nothing else does.\n\nDensity is terminal-grade. Every label is tracked IBM Plex Mono capitals, every figure is tabular, and Chakra Petch is reserved for the identifiers and readouts a trader scans for. Structure comes from 1px hairlines and outlined rectangles, never from fills, cards, radius or shadow. The system rejects the KPI-card trading dashboard with green/red P&L tiles.\n\nDark only. There is no light theme, no theme switch, and no `.dark` class variant; the dark palette is the root palette.",
+    "keyCharacteristics": [
+      "Night ground, Ice and Steel hairlines, Slate labels; colour quarantined to state.",
+      "Square everything: radius 0, outlined controls, 1px rules.",
+      "Catalog-number headlines in Chakra Petch; tracked mono caps for every label.",
+      "Segmented, cell-based readouts instead of smooth bars and badges.",
+      "Stepped 90ms state switches; one authored ease-out moment."
+    ],
+    "rules": [
+      {
+        "name": "The Quarantine Rule",
+        "body": "Colour appears only for abnormal or selected state: code strips, segmented readouts, active-edge blocks, at-risk rings. Steel is normal, Ember is caution or selected, Signal Red is halt, breach or destructive. Never decorative; if removing the colour loses no information, the colour was wrong.",
+        "section": "colors"
+      },
+      {
+        "name": "The No Green Rule",
+        "body": "Normal is Steel, not green. Profit and loss are figures with a sign, never green or red tiles.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "All figures are tabular (`font-variant-numeric: tabular-nums` on the body). Numbers never shift width as they tick.",
+        "section": "typography"
+      },
+      {
+        "name": "The Self-Hosted Faces Rule",
+        "body": "Fonts are bundled, never fetched. The React build installs `@fontsource/chakra-petch` (import `500.css`, `600.css`) and `@fontsource/ibm-plex-mono` (import `400.css`, `500.css`) in the entry module. The app is local-only and must work offline; the Google Fonts link in `design/live.html` is prototype-only and must not be copied.",
+        "section": "typography"
+      },
+      {
+        "name": "The Legible Floor Rule",
+        "body": "No text below 11px, including SVG labels inside the dial.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Field Rule",
+        "body": "Nothing floats. A surface is distinguished by a hairline or a tonal step, never by a shadow.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** keep every surface Night (#0E1116) and separate regions with 1px Hairline rules.",
+      "**Do** use Steel for normal, Ember for caution or selected, Signal Red for halt, breach or destructive, and nothing else for colour.",
+      "**Do** set every label in IBM Plex Mono 500, 11px, uppercase, 0.24em tracking, in Slate.",
+      "**Do** use Chakra Petch only for catalog numbers, readouts, page and dialog titles.",
+      "**Do** self-host the fonts through `@fontsource`; the app must render identically offline.",
+      "**Do** put the destructive edge block on the right of kill and resolve controls, and confirm the kill switch in an AlertDialog with a Red border.",
+      "**Do** give every code strip and meter an `aria-label` that states each cell's state in words."
+    ],
+    "donts": [
+      "**Don't** add a light theme, a theme toggle, or a `.dark` variant.",
+      "**Don't** use colour decoratively, including green for profit or red for loss on figures.",
+      "**Don't** round any corner; radius is 0.",
+      "**Don't** use drop shadows, glows or elevation; inset hairlines and edge blocks only.",
+      "**Don't** use KPI cards, filled buttons or pill badges; use sleeves, outlined controls and code strips.",
+      "**Don't** load fonts from Google Fonts or any CDN in the app.",
+      "**Don't** ease ordinary state changes; only the dial trace draw is eased."
+    ]
+  }
+}

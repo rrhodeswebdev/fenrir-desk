@@ -57,14 +57,23 @@ def parse_settings(env: Mapping[str, str]) -> Settings:
     )
 
 
+def _env_value(raw: str) -> str:
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        return v[1:-1]
+    return v.split(" #", 1)[0].strip()  # unquoted values may carry an inline comment
+
+
 def parse_env_text(text: str) -> dict[str, str]:
     pairs = (line.strip().split("=", 1) for line in text.splitlines())
     return {
-        k.strip().removeprefix("export ").strip(): v.strip().strip('"').strip("'")
+        k.strip().removeprefix("export ").strip(): _env_value(v)
         for k, v in (p for p in pairs if len(p) == 2 and not p[0].startswith("#"))
     }
 
 
 def load_settings(env_file: Path = Path(".env")) -> Settings:
     from_file = parse_env_text(env_file.read_text()) if env_file.exists() else {}
-    return parse_settings({**from_file, **os.environ})
+    # an empty env var (e.g. compose passing through an unset one) must not hide the file's value
+    from_env = {k: v for k, v in os.environ.items() if v != ""}
+    return parse_settings({**from_file, **from_env})

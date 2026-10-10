@@ -47,6 +47,13 @@ def test_front_month_before_calendar_raises():
         front_month(parse_instruments(DOC), "NQ", date(2024, 12, 31))
 
 
+def test_front_month_past_calendar_raises():
+    inst = parse_instruments(DOC)  # last roll 2026-12-10 -> NQH27, which rolls 2027-03-11
+    assert front_month(inst, "NQ", date(2027, 3, 10)) == "NQH27"
+    with pytest.raises(ValueError, match="calendar ends 2027-03-11"):
+        front_month(inst, "NQ", date(2027, 3, 11))
+
+
 def test_front_month_unknown_series_raises():
     with pytest.raises(ValueError, match="ES"):
         front_month(parse_instruments(DOC), "ES", date(2025, 6, 1))

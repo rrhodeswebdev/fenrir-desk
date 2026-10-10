@@ -65,13 +65,31 @@ def test_parse_env_text_handles_comments_and_quotes():
     }
 
 
+def test_parse_env_text_inline_comments_and_mismatched_quotes():
+    text = 'FENRIR_NT_URL=http://10.0.0.5:8123  # vm ip\nA=\'abc"\nB="x # y"\nC=a#b\n'
+    assert parse_env_text(text) == {
+        "FENRIR_NT_URL": "http://10.0.0.5:8123",
+        "A": "'abc\"",
+        "B": "x # y",
+        "C": "a#b",
+    }
+
+
 def test_load_settings_environ_overrides_file(tmp_path, monkeypatch):
     env_file = tmp_path / ".env"
     env_file.write_text("FENRIR_NT_TOKEN=from-file\nFENRIR_STALE_SECONDS=10\n")
     monkeypatch.setenv("FENRIR_NT_TOKEN", "from-env")
+    monkeypatch.delenv("FENRIR_STALE_SECONDS", raising=False)
     s = load_settings(env_file)
     assert s.nt_token == "from-env"
     assert s.stale_seconds == 10
+
+
+def test_load_settings_empty_environ_does_not_hide_file(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("FENRIR_NT_TOKEN=from-file\n")
+    monkeypatch.setenv("FENRIR_NT_TOKEN", "")
+    assert load_settings(env_file).nt_token == "from-file"
 
 
 def test_load_settings_missing_file_uses_environ(tmp_path, monkeypatch):

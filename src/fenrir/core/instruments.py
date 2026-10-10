@@ -95,4 +95,11 @@ def front_month(instruments: Instruments, series: str, day: date) -> str:
     if i == 0:
         first = rolls[0].start if rolls else "none"
         raise ValueError(f"no {series} contract for {day}; calendar starts {first}")
+    if i == len(rolls):
+        # the last contract is front month only until the next quarterly roll
+        last = rolls[-1].start
+        y, m = (last.year + 1, last.month - 9) if last.month > 9 else (last.year, last.month + 3)
+        end = _third_friday(y, m) - timedelta(days=8)
+        if day >= end:
+            raise ValueError(f"no {series} contract for {day}; calendar ends {end}")
     return rolls[i - 1].contract

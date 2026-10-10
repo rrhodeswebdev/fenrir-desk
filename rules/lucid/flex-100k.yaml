@@ -1,0 +1,40 @@
+# From Lucid's help center (LucidFlex collection, articles updated 2026-07-28 to 2026-08-31).
+# NOT VERIFIED: eval_fee (only on lucidtrading.com, which blocks scripts). Enter it from your receipt.
+# daily_loss_limit: null is the "DLL off" purchase option; Lucid does not publish the DLL-on amounts.
+firm: lucid
+account: flex-100k
+verified_on: 2026-10-10
+source_url: https://support.lucidtrading.com/en/collections/16914631-lucidflex
+automation_allowed: true
+evaluation:
+  profit_target: 6000
+  max_drawdown: { amount: 3000, trailing: end_of_day, locks_at: 3100 }
+  daily_loss_limit: null
+  consistency: { max_day_pct: 50 }  # Lucid allows a small cushion above 50%; 50 is the safe side
+  min_trading_days: 0
+funded:
+  max_drawdown: { amount: 3000, trailing: end_of_day, locks_at: 3100 }
+  daily_loss_limit: null
+  consistency: null
+  payout:
+    max_pct_of_profit: 50
+    split_pct: 90
+    min_days: 5
+    min_profit: 500
+    min_day_profit: 200
+    max_amount: 2500
+    max_payouts: 5
+  scaling:
+    - { from_profit: 0, max_minis: 3 }
+    - { from_profit: 1000, max_minis: 4 }
+    - { from_profit: 2000, max_minis: 5 }
+    - { from_profit: 3000, max_minis: 6 }
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 6, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  eval_fee: 0  # NOT VERIFIED, see header
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

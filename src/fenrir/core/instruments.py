@@ -37,6 +37,16 @@ def _third_friday(year: int, month: int) -> date:
     return first + timedelta(days=(4 - first.weekday()) % 7 + 14)
 
 
+def in_roll_window(day: date) -> bool:
+    """Roll Thursday through the Tuesday of expiry week: the data provider's continuous
+    series may still hold the expiring contract, so backtests skip these days and live
+    trading takes no entries (docs/data-gate.md "Roll mismatch")."""
+    if day.month not in _LETTERS:
+        return False
+    expiry = _third_friday(day.year, day.month)
+    return expiry - timedelta(days=8) <= day <= expiry - timedelta(days=3)
+
+
 def quarterly_rolls(series: str, first_year: int, last_year: int) -> tuple[Roll, ...]:
     """CME roll: front month moves to the next quarter 8 days before expiry (3rd Friday)."""
 

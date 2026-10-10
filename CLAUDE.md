@@ -98,6 +98,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/strategy/` | Strategy contract (`Ctx`, `Position`, `Strategy`) and the loader that imports and validates strategy files. |
 | `strategies/` | Strategy files written by Claude; each exports `MARKET`, `PARAMS`, `init`, `step`. Contract in `strategies/CLAUDE.md`. |
 | `src/fenrir/data/` | LSE history pull, Parquet store, front-month bar loading, live bar building. Only `lse.py` knows LSE. |
+| `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

@@ -97,6 +97,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `rules/` | Prop-firm rule YAML files, one per account type and size, entered from the firm's own site. |
 | `src/fenrir/strategy/` | Strategy contract (`Ctx`, `Position`, `Strategy`) and the loader that imports and validates strategy files. |
 | `strategies/` | Strategy files written by Claude; each exports `MARKET`, `PARAMS`, `init`, `step`. Contract in `strategies/CLAUDE.md`. |
+| `src/fenrir/data/` | LSE history pull, Parquet store, front-month bar loading, live bar building. Only `lse.py` knows LSE. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

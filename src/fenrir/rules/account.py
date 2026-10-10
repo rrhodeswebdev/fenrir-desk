@@ -10,7 +10,15 @@ from fenrir.rules.flat_by import flat_by
 from fenrir.rules.ledger import book
 from fenrir.rules.microscalp import microscalp
 from fenrir.rules.schema import AccountRules
-from fenrir.rules.state import AccountState, AccountView, Breach, Event, Phase, Rule
+from fenrir.rules.state import (
+    AccountState,
+    AccountView,
+    Breach,
+    Event,
+    Phase,
+    Rule,
+    at_or_below,
+)
 
 
 def phase_rules(rules: AccountRules, phase: Phase) -> schema.Phase:
@@ -94,7 +102,7 @@ def passed(state: AccountState, rules: AccountRules) -> bool:
         return False
     days = day_pnls(state)
     return (
-        state.balance >= e.profit_target
+        at_or_below(e.profit_target, state.balance)
         and len(days) >= e.min_trading_days
         and _consistent(e, days)
     )
@@ -107,12 +115,12 @@ def payout(state: AccountState, rules: AccountRules) -> float | None:
     if state.phase != "funded" or state.position != 0 or state.balance <= 0:
         return None
     days = tuple(pnl for _, pnl in state.closed_days)  # completed sessions only
-    if sum(d >= p.min_day_profit for d in days) < p.min_days or not _consistent(f, days):
+    if sum(at_or_below(p.min_day_profit, d) for d in days) < p.min_days or not _consistent(f, days):
         return None
     request = state.balance * p.max_pct_of_profit / 100
     if p.max_amount is not None:
         request = min(request, p.max_amount)
-    if request < p.min_profit:
+    if not at_or_below(p.min_profit, request):
         return None
     return request * p.split_pct / 100
 

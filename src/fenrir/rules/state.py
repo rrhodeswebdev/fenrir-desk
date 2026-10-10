@@ -68,6 +68,11 @@ class Breach:
 Rule = Callable[[AccountState, Event], AccountState | Breach]
 
 
+def at_or_below(value: float, limit: float) -> bool:
+    """Money compared to the cent: float sums of fills and commissions drift."""
+    return round(value - limit, 2) <= 0
+
+
 @dataclass(frozen=True, slots=True)
 class AccountView:
     phase: Phase

@@ -85,3 +85,21 @@ def test_wrong_side_target_rejected(base, make_state):
 
 def test_zero_qty_rejected(base, make_state):
     assert "qty" in run(make_state(), base, long(19980.0, qty=0))
+
+
+def short(stop, target=19900.0):
+    return Bracket(side="short", qty=1, stop=stop, target=target)
+
+
+def test_accepts_affordable_short(base, make_state):
+    assert run(make_state(), base, short(20020.0)) is None
+
+
+def test_short_stop_out_exactly_at_floor_rejected(base, make_state):
+    assert "drawdown" in run(make_state(), base, short(20099.75))  # (99.75 + 0.25) x 20 = 2000
+
+
+def test_stop_out_exactly_at_daily_loss_rejected(base, make_state):
+    base["evaluation"]["daily_loss_limit"] = 500
+    assert "daily loss" in run(make_state(), base, short(20024.75))  # (24.75 + 0.25) x 20 = 500
+    assert run(make_state(), base, short(20024.5)) is None  # 495

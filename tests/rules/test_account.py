@@ -205,3 +205,36 @@ def test_payout_request_is_capped(base, make_state):
 def test_payout_below_minimum_request(base, make_state):
     rules = flex_rules(base)
     assert payout(funded_with(make_state, 900.0, (200,) * 5), rules) is None  # 450 < 500
+
+
+def test_passes_at_exact_target_despite_float_drift(base, make_state):
+    rules = AccountRules.model_validate(base)
+    balance = 3000.03 - 0.01 - 0.01 - 0.01  # three commissions: 2999.9999999999995
+    assert passed(make_state(balance=balance), rules)
+    assert not passed(make_state(balance=2999.99), rules)
+
+
+def test_payout_counts_day_at_exact_min_day_profit(base, make_state):
+    rules = flex_rules(base)
+    assert payout(funded_with(make_state, 8000.0, (150,) * 5), rules) == 1800.0
+    assert payout(funded_with(make_state, 8000.0, (150,) * 4 + (149.99,)), rules) is None
+
+
+def test_payout_at_exact_minimum_request(base, make_state):
+    rules = flex_rules(base)
+    assert payout(funded_with(make_state, 1000.0, (200,) * 5), rules) == 450.0  # 500 x 90%
+
+
+def test_dll_on_without_evaluation_amount_is_an_error(base):
+    base["funded"]["daily_loss_limit"] = 1000  # evaluation stays null
+    with pytest.raises(ValueError, match="no daily_loss_limit amount for evaluation$"):
+        with_dll(AccountRules.model_validate(base), True)
+
+
+def test_dll_on_direct_account_checks_funded_only(base):
+    base["evaluation"] = None
+    with pytest.raises(ValueError, match="no daily_loss_limit amount for funded$"):
+        with_dll(AccountRules.model_validate(base), True)
+    base["funded"]["daily_loss_limit"] = 1000
+    rules = AccountRules.model_validate(base)
+    assert with_dll(rules, True) == rules

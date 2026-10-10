@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime
 
 from fenrir.rules.schema import Drawdown
-from fenrir.rules.state import AccountState, Breach, DayClosed, Event, Mark, Rule
+from fenrir.rules.state import AccountState, Breach, DayClosed, Event, Mark, Rule, at_or_below
 
 
 def max_drawdown(dd: Drawdown) -> Rule:
@@ -14,7 +14,7 @@ def max_drawdown(dd: Drawdown) -> Rule:
         return replace(state, peak=peak, floor=max(state.floor, level - dd.amount))
 
     def check(state: AccountState, equity: float, ts: datetime) -> AccountState | Breach:
-        if equity <= state.floor:
+        if at_or_below(equity, state.floor):
             reason = f"equity {equity:.2f} at or below drawdown floor {state.floor:.2f}"
             return Breach("max_drawdown", reason, ts)
         return state

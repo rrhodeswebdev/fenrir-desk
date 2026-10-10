@@ -5,7 +5,7 @@ from fenrir.core.instruments import ContractSpec
 from fenrir.rules.account import phase_rules
 from fenrir.rules.contracts import contract_limit, max_minis
 from fenrir.rules.schema import AccountRules
-from fenrir.rules.state import AccountState
+from fenrir.rules.state import AccountState, at_or_below
 
 
 def check(
@@ -36,14 +36,14 @@ def check(
         2 * getattr(rules.costs.commission_per_side, spec.symbol) * bracket.qty
     )
     equity_after = state.balance + state.open_pnl - loss
-    if equity_after <= state.floor:
+    if at_or_below(equity_after, state.floor):
         return (
             f"stop-out loss {loss:.2f} would put equity {equity_after:.2f}"
             f" at or below drawdown floor {state.floor:.2f}"
         )
     limit = phase_rules(rules, state.phase).daily_loss_limit
     today_after = state.balance - state.day_start_balance + state.open_pnl - loss
-    if limit is not None and today_after <= -limit:
+    if limit is not None and at_or_below(today_after, -limit):
         return (
             f"stop-out loss {loss:.2f} would put day P&L {today_after:.2f}"
             f" at or below daily loss limit -{limit:.2f}"

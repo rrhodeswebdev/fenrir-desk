@@ -70,3 +70,17 @@ def test_intraday_does_not_trail_at_day_close(make_state, et):
 def test_day_close_breach(make_state, et):
     out = rule()(make_state(balance=-2000.0), DayClosed(day=D, ts=et("17:00")))
     assert isinstance(out, Breach)
+
+
+def test_breach_at_floor_despite_float_drift(make_state, et):
+    balance = -1500.0 - 0.06 - 0.06 - 0.06  # three commissions: -1500.1799999999998
+    out = rule()(make_state(balance=balance), mark(et, -499.82, 0.0, 0.0))
+    assert isinstance(out, Breach)  # equity is -2000.00 to the cent
+
+
+def test_intraday_trailing_locks(make_state, et):
+    r = rule("intraday", locks_at=2100.0)
+    s = r(make_state(), mark(et, 2500.0, 3000.0, 2500.0))
+    assert (s.peak, s.floor) == (3000.0, 100.0)  # locked at locks_at - amount, not 1000
+    assert isinstance(r(s, mark(et, 100.0, 100.0, 100.0)), Breach)
+    assert not isinstance(r(s, mark(et, 101.0, 101.0, 101.0)), Breach)

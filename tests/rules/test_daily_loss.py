@@ -19,3 +19,8 @@ def test_no_halt_above_limit(make_state, et):
 def test_yesterdays_loss_not_counted(make_state, et):
     s = make_state(balance=-900.0, day_start_balance=-900.0)
     assert not daily_loss_limit(1000.0)(s, mark(et, -100.0)).halted_today
+
+
+def test_halt_at_limit_despite_float_drift(make_state, et):
+    balance = -600.0 - 0.06 - 0.06 - 0.06  # three commissions
+    assert daily_loss_limit(1000.0)(make_state(balance=balance), mark(et, -399.82)).halted_today

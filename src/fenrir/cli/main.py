@@ -1,6 +1,9 @@
 import typer
 
+from fenrir.cli import data
+
 app = typer.Typer(no_args_is_help=True)
+app.add_typer(data.app, name="data")
 
 
 @app.callback()

@@ -10,6 +10,7 @@ dependencies = [
     "polars>=2.0.0",
     "pyarrow>=26.0.0",
     "pandas-market-calendars>=5.5.0",
+    "lse-data>=0.14",
 ]
 
 [project.scripts]

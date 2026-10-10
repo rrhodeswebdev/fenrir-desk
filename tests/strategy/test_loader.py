@@ -1,4 +1,5 @@
 import hashlib
+import sys
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,13 @@ def test_dataclass_state_works(tmp_path):
     text = base + GOOD.replace('return params["n"]', 'return S(params["n"])')
     s = load_strategy(write(tmp_path / "d.py", text))
     assert s.init(s.params).n == 3
+
+
+@pytest.mark.parametrize(
+    "body", ["import numpy_not_installed\n", "x = undefined_name\n"], ids=["import", "name"]
+)
+def test_exec_errors_become_value_error_and_unregister(tmp_path, body):
+    path = write(tmp_path / "execfail_zq.py", body + GOOD)
+    with pytest.raises(ValueError, match="execfail_zq.py"):
+        load_strategy(path)
+    assert not [k for k in sys.modules if k.startswith("fenrir_strategy_execfail_zq_")]

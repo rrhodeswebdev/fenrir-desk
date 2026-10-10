@@ -77,9 +77,12 @@ def load_strategy(path: Path) -> Strategy:
     name = f"fenrir_strategy_{path.stem}_{digest[:12]}"
     module = types.ModuleType(name)
     module.__file__ = str(path)
-    sys.modules[name] = module  # dataclasses defined in the file resolve their module
-    # here
-    exec(compile(tree, str(path), "exec"), module.__dict__)
+    sys.modules[name] = module  # so dataclasses defined in the file resolve their module
+    try:
+        exec(compile(tree, str(path), "exec"), module.__dict__)
+    except Exception as e:
+        sys.modules.pop(name, None)
+        raise ValueError(f"{path}: {type(e).__name__}: {e}") from e
 
     missing = [n for n in ("MARKET", "PARAMS", "init", "step") if not hasattr(module, n)]
     if missing:

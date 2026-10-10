@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-10T18:31:00+00:00",
+  "generatedAt": "2026-10-10T19:02:42+00:00",
   "title": "Design System: Fenrir Desk",
   "extensions": {
     "colorMeta": {
@@ -257,8 +257,8 @@
       "name": "Code Strip",
       "kind": "chip",
       "refersTo": "code-cell",
-      "description": "Fixed-order state cells; replaces status badges. Steel normal, Unlit idle, Ember caution, Red alarm.",
-      "html": "<span class=\"ds-code\" role=\"img\" aria-label=\"Feed normal, broker normal, risk caution, book alarm\"><i></i><i data-s=\"idle\"></i><i data-s=\"caution\"></i><i data-s=\"alarm\"></i></span>",
+      "description": "Fixed-order state cells; replaces status badges. System strip: Feed, Broker, Drift. Account strip: Risk, Book. Steel normal, Unlit idle, Ember caution, Red alarm.",
+      "html": "<span class=\"ds-code\" role=\"img\" aria-label=\"Risk caution, book alarm\"><i data-s=\"caution\"></i><i data-s=\"alarm\"></i></span>",
       "css": ".ds-code{display:inline-flex;gap:4px;} .ds-code i{display:block;width:22px;height:10px;background:#C9D3DD;} .ds-code i[data-s=idle]{background:#1E242D;} .ds-code i[data-s=caution]{background:#E0A33A;} .ds-code i[data-s=alarm]{background:#E5484D;}"
     },
     {

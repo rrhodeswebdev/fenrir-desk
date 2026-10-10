@@ -164,7 +164,7 @@ A cold blue-grey monochrome on near-black, with two signal colours that only eve
 - **Ice** (ink): primary text, catalog numbers, the live dial trace, fill ticks, the "now" dot, hovered control outlines.
 
 ### Secondary
-- **Ember** (ember): caution and selected. Caution code cells, safety-ring at-risk, meter segments past the safety mark, the safety mark itself, the hover/focus edge block on plain controls, the active nav block, focus outline, text selection, HALT and ALERT journal kinds, the synthetic-data notice.
+- **Ember** (ember): caution and selected. Caution code cells, safety-ring at-risk, meter segments past the safety mark, the safety mark itself, the hover/focus edge block on plain controls, the active nav block, focus outline, text selection, HALT and ALERT journal kinds (REJECT stays plain Slate: a pre-trade rejection means the guard worked and needs no action), the synthetic-data notice.
 
 ### Tertiary
 - **Signal Red** (red): halt, breach and destructive. Alarm code cells, floor-ring at-risk, meter segments at 100%, the kill/resolve edge block, the kill-dialog border, alarm sleeve outline, MISMATCH journal kind, the alarm name beside the top-strip code strip.
@@ -354,7 +354,7 @@ Outlined, square, captioned in tracked mono caps.
 Page title, New York session clock (Readout), connection links as Label over Value, the system code strip with the alarming account named beside it in Red, and the kill switch at the far right.
 
 ### Code Strip (shadcn Badge replacement)
-A fixed-order row of state cells (feed, broker, risk/drift, book). Steel normal, Unlit idle, Ember caution, Red alarm. Always carries an `aria-label` spelling out each cell's state. Replaces status Badges; there are no pill badges.
+A fixed-order row of state cells, split by scope. The system strip in the top strip has Feed · Broker · Drift (shared by every account); each account's strip has Risk · Book (Risk: Ember for a safety-margin halt or daily loss past the safety mark, Red for a breach; Book: Red for a position mismatch). Stale and drift halts light the system cell, never the account. Steel normal, Unlit idle, Ember caution, Red alarm. Always carries an `aria-label` spelling out each cell's state. Replaces status Badges; there are no pill badges.
 
 ### Catalog-Number Headline
 The account identifier at Display scale, the account type in Account Name style beneath, then the code strip with the mode and phase as a Label.

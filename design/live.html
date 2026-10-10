@@ -275,10 +275,10 @@ dialog .actions { display: flex; gap: var(--s3); flex-wrap: wrap; }
           <div class="row"><span class="value">1.8s</span><span class="label">heartbeat</span></div>
         </div>
         <div class="link">
-          <span class="label">Feed · Broker · Drift · Book</span>
+          <span class="label">Feed · Broker · Drift</span>
           <div class="row">
-            <div class="code big" role="img" aria-label="Feed normal, broker normal, drift normal, book mismatch on LFE 0911">
-              <i data-s="ok"></i><i data-s="ok"></i><i data-s="ok"></i><i data-s="alarm"></i>
+            <div class="code big" role="img" aria-label="Feed normal, broker normal, drift normal">
+              <i data-s="ok"></i><i data-s="ok"></i><i data-s="ok"></i>
             </div>
             <span class="label alarm-text">Book · LFE 0911</span>
           </div>
@@ -348,7 +348,7 @@ const ACCOUNTS = [
   { id: "LFE 0507", type: "Lucid Flex 50K", mode: "Live", phase: "Evaluation", strategy: "orb.py", contract: "MNQ Z26",
     desc: "orb.py on MNQ Z26. Long 2 since 14:12. Bracket working at the broker.", fills: [16 * 60 + 41, 17 * 60 + 4, 20 * 60 + 12],
     floor: -2000, target: 3000, safety: null, equity: 1180, today: 212, seed: 7, state: "ok",
-    code: ["ok", "ok", "ok", "ok"],
+    code: ["ok", "ok"],
     meters: [
       { k: "Drawdown left", used: 588, max: 2000, unit: "$", left: 1412 },
       { k: "Daily loss left", none: true },
@@ -360,7 +360,7 @@ const ACCOUNTS = [
     desc: "Halted for the day at 81% of the daily loss limit. Flat. Re-arms at the next session.",
     fills: [16 * 60 + 2, 18 * 60 + 30, 19 * 60 + 58], floor: -2500, target: 3000, safety: -800, equity: -640, today: -812, seed: 11, state: "caution", atRisk: ["safety"],
     alert: "Halted · 81% daily loss used",
-    code: ["ok", "ok", "ok", "caution"],
+    code: ["caution", "ok"],
     meters: [
       { k: "Drawdown left", used: 640, max: 2500, unit: "$", left: 1860 },
       { k: "Daily loss left", used: 812, max: 1000, unit: "$", left: 188, safety: 0.8 },
@@ -372,7 +372,7 @@ const ACCOUNTS = [
     desc: "NinjaTrader shows long 1 MNQ; the runner expects flat. Trading blocked until you resolve it.",
     fills: [17 * 60 + 10], floor: -3000, target: 6000, safety: null, equity: 420, today: 96, seed: 23, state: "alarm",
     alert: "Book mismatch · resolve",
-    code: ["ok", "ok", "ok", "alarm"],
+    code: ["ok", "alarm"],
     meters: [
       { k: "Drawdown left", used: 0, max: 3000, unit: "$", left: 3000 },
       { k: "Daily loss left", none: true },
@@ -383,7 +383,7 @@ const ACCOUNTS = [
   { id: "LDA 0042", type: "Lucid Daily 25K", mode: "Dry run", phase: "Evaluation", strategy: "orb.py", contract: "MES Z26",
     desc: "Dry run. Actions are logged, nothing is sent. No signal yet today.",
     floor: -1000, target: 1250, safety: -400, equity: 0, today: 0, seed: 31, state: "idle",
-    code: ["ok", "idle", "ok", "ok"],
+    code: ["ok", "ok"],
     meters: [
       { k: "Drawdown left", used: 0, max: 1000, unit: "$", left: 1000 },
       { k: "Daily loss left", used: 0, max: 500, unit: "$", left: 500, safety: 0.8 },
@@ -509,7 +509,7 @@ function meterHTML(m) {
 }
 
 function codeHTML(code) {
-  const names = ["Feed", "Broker", "Risk", "Book"];
+  const names = ["Risk", "Book"];
   return code.map((s, i) => `<i data-s="${s}" title="${names[i]}: ${s}"></i>`).join("");
 }
 
@@ -523,7 +523,7 @@ function renderFocus(a) {
     `<button class="ctl"><span>Disarm</span></button><button class="ctl"><span>Journal</span></button>`;
   const code = document.getElementById("focus-code");
   code.innerHTML = codeHTML(a.code);
-  code.setAttribute("aria-label", "Feed, broker, risk, book: " + a.code.join(", "));
+  code.setAttribute("aria-label", "Risk, book: " + a.code.join(", "));
   document.getElementById("focus-data").innerHTML = `
     <dl>
       <div><dt class="label">Strategy</dt><dd class="value">${a.strategy}</dd></div>
@@ -545,7 +545,7 @@ function renderSleeves(selected) {
     b.innerHTML = `
       <div class="head">
         <button class="catno-s" aria-label="Focus ${a.id}, ${a.type}">${a.id}</button>
-        <span class="code" role="img" aria-label="Feed, broker, risk, book: ${a.code.join(", ")}">${codeHTML(a.code)}</span>
+        <span class="code" role="img" aria-label="Risk, book: ${a.code.join(", ")}">${codeHTML(a.code)}</span>
       </div>
       <div class="label">${a.type} · ${a.mode}</div>
       ${a.alert ? `<p class="alert">${a.alert}</p>` : ""}

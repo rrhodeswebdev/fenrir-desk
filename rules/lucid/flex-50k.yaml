@@ -1,0 +1,38 @@
+# From Lucid's help center (LucidFlex collection, articles updated 2026-07-28 to 2026-08-31).
+# daily_loss_limit is the amount when the optional DLL is on; null until Lucid's amount is known.
+# Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
+firm: lucid
+account: flex-50k
+verified_on: 2026-10-10
+source_url: https://support.lucidtrading.com/en/collections/16914631-lucidflex
+automation_allowed: true
+evaluation:
+  profit_target: 3000
+  max_drawdown: { amount: 2000, trailing: end_of_day, locks_at: 2100 }
+  daily_loss_limit: null
+  consistency: { max_day_pct: 50 }  # Lucid allows a small cushion above 50%; 50 is the safe side
+  min_trading_days: 0
+funded:
+  max_drawdown: { amount: 2000, trailing: end_of_day, locks_at: 2100 }
+  daily_loss_limit: null
+  consistency: null
+  payout:
+    max_pct_of_profit: 50
+    split_pct: 90
+    min_days: 5
+    min_profit: 500
+    min_day_profit: 150
+    max_amount: 2000
+    max_payouts: 5
+  scaling:
+    - { from_profit: 0, max_minis: 2 }
+    - { from_profit: 1000, max_minis: 3 }
+    - { from_profit: 2000, max_minis: 4 }
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 4, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

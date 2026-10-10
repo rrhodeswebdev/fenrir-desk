@@ -78,6 +78,16 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - Breaking changes: `!` before the colon and/or a `BREAKING CHANGE: <description>` footer (→ MAJOR).
 - Footers use `Token: value` form (e.g. `Refs: #12`).
 
+## 6. Directory Map
+
+Every directory with its own responsibility has a short `CLAUDE.md` saying what it handles, what it does not, and its entry points. Read it before working in that directory. When you create a directory, add its `CLAUDE.md` and a row here in the same commit; when a directory's job changes, update both.
+
+| Directory | Handles |
+|---|---|
+| `assets/brand/` | Logo, app icon and brand guide (palette, type). Source of truth for visual identity. |
+| `docs/` | Design specs and implementation plans. Not runtime code. |
+| `docs/superpowers/plans/` | Implementation plans, one per subsystem; `README.md` is the index and holds the cross-plan contracts. |
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

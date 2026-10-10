@@ -85,3 +85,19 @@ def test_no_trade_when_data_starts_after_the_range():
         [],
         [],
     ]
+
+
+def test_no_entry_at_or_after_16_00_et():
+    # 15:59 ET (before cash close) should allow entry
+    actions = run([*opening_range(), bar("15:59", 103.0, 101.0, 102.5)])
+    assert actions[-1] == [Bracket("long", 1, 102.5 - 40 * 0.25, 102.5 + 80 * 0.25)]
+
+    # 16:00 ET (at cash close) should block entry
+    actions = run([*opening_range(), bar("16:00", 103.0, 101.0, 102.5)])
+    assert actions[-1] == []
+
+
+def test_no_action_from_evening_bars():
+    # Evening bar at 18:05 ET on DAY (belongs to next trading day) should not enter
+    actions = run([*opening_range(), bar("18:05", 120.0, 95.0, 110.0)])
+    assert actions[-1] == []

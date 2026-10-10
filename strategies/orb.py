@@ -12,6 +12,7 @@ MARKET = "NQ"
 PARAMS = {"range_min": 15, "stop_ticks": 40, "target_ticks": 80, "qty": 1}
 
 OPEN_MINUTE = 9 * 60 + 30
+LAST_ENTRY_MINUTE = 16 * 60  # no new entries at or after the 16:00 ET cash close
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,7 +41,12 @@ def step(state, bar, ctx):
         high = bar.high if state.high is None else max(state.high, bar.high)
         low = bar.low if state.low is None else min(state.low, bar.low)
         return replace(state, high=high, low=low), []
-    if state.traded or state.high is None or ctx.position.qty != 0:
+    if (
+        state.traded
+        or state.high is None
+        or ctx.position.qty != 0
+        or minute >= LAST_ENTRY_MINUTE - OPEN_MINUTE
+    ):
         return state, []
     if bar.close > state.high:
         side, sign = "long", 1

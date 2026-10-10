@@ -14,7 +14,9 @@ class Window:
     last: date  # last trading day pulled, inclusive
 
 
-def pull_windows(instruments: Instruments, series: str, since: date, today: date) -> tuple[Window, ...]:
+def pull_windows(
+    instruments: Instruments, series: str, since: date, today: date
+) -> tuple[Window, ...]:
     rolls = [r for r in instruments.rolls if r.series == series]
     ends = [r.start - timedelta(days=1) for r in rolls[1:]] + [today]
     windows = (
@@ -24,9 +26,13 @@ def pull_windows(instruments: Instruments, series: str, since: date, today: date
     return tuple(w for w in windows if w.first <= w.last)
 
 
-def todo(windows: tuple[Window, ...], manifest: Mapping[str, Any], today: date) -> tuple[Window, ...]:
+def todo(
+    windows: tuple[Window, ...], manifest: Mapping[str, Any], today: date
+) -> tuple[Window, ...]:
     def done(w: Window) -> bool:
         entry = manifest.get("series", {}).get(w.series, {}).get(w.contract)
-        return bool(entry) and entry["complete"] and date.fromisoformat(entry["first_day"]) <= w.first
+        return (
+            bool(entry) and entry["complete"] and date.fromisoformat(entry["first_day"]) <= w.first
+        )
 
     return tuple(w for w in windows if not done(w))

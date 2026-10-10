@@ -5,7 +5,9 @@ from fenrir.data.pull import Window, pull_windows, todo
 
 INST = parse_instruments(
     {
-        "contracts": [{"symbol": "NQ", "series": "NQ", "point_value": 20, "tick": 0.25, "minis": 1}],
+        "contracts": [
+            {"symbol": "NQ", "series": "NQ", "point_value": 20, "tick": 0.25, "minis": 1}
+        ],
         "rollover": {"series": ["NQ"], "first_year": 2025, "last_year": 2026},
     }
 )
@@ -24,8 +26,18 @@ def test_todo_skips_complete_contracts_only():
     manifest = {
         "series": {
             "NQ": {
-                "NQZ25": {"first_day": "2025-12-01", "last_day": "2025-12-10", "rows": 9, "complete": True},
-                "NQH26": {"first_day": "2025-12-11", "last_day": "2026-02-01", "rows": 9, "complete": False},
+                "NQZ25": {
+                    "first_day": "2025-12-01",
+                    "last_day": "2025-12-10",
+                    "rows": 9,
+                    "complete": True,
+                },
+                "NQH26": {
+                    "first_day": "2025-12-11",
+                    "last_day": "2026-02-01",
+                    "rows": 9,
+                    "complete": False,
+                },
             }
         }
     }
@@ -36,7 +48,14 @@ def test_todo_repulls_when_since_moves_earlier():
     windows = pull_windows(INST, "NQ", date(2025, 11, 1), date(2025, 12, 5))
     manifest = {
         "series": {
-            "NQ": {"NQZ25": {"first_day": "2025-12-01", "last_day": "2025-12-10", "rows": 9, "complete": True}}
+            "NQ": {
+                "NQZ25": {
+                    "first_day": "2025-12-01",
+                    "last_day": "2025-12-10",
+                    "rows": 9,
+                    "complete": True,
+                }
+            }
         }
     }
     assert [w.contract for w in todo(windows, manifest, date(2025, 12, 5))] == ["NQZ25"]

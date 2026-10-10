@@ -63,3 +63,9 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Impeccable design-skill state (local only)
+.impeccable/
+
+# Superpowers specs and plans (local only)
+docs/superpowers/

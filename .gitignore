@@ -64,10 +64,8 @@ Thumbs.db
 # Claude Code local settings
 .claude/settings.local.json
 
-# Impeccable working files (review captures, downloaded references, decision mocks)
-.impeccable/review/
-.impeccable/refs/
-.impeccable/mocks/
+# Impeccable design-skill state (local only)
+.impeccable/
 
 # Superpowers specs and plans (local only)
 docs/superpowers/

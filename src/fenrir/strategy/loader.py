@@ -36,6 +36,8 @@ FORBIDDEN_IMPORTS = frozenset(
         "uuid",
     }
 )
+# Method names that read the wall clock (datetime.now(), date.today(), ...).
+CLOCK_METHODS = frozenset({"now", "utcnow", "today"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,16 @@ def _imported_roots(tree: ast.Module) -> set[str]:
     return roots
 
 
+def _clock_calls(tree: ast.Module) -> set[str]:
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in CLOCK_METHODS
+    }
+
+
 def load_strategy(path: Path) -> Strategy:
     source = path.read_bytes()
     try:
@@ -72,6 +84,9 @@ def load_strategy(path: Path) -> Strategy:
     forbidden = sorted(_imported_roots(tree) & FORBIDDEN_IMPORTS)
     if forbidden:
         raise ValueError(f"{path}: forbidden import {', '.join(forbidden)} (step must be pure)")
+    clocks = sorted(_clock_calls(tree))
+    if clocks:
+        raise ValueError(f"{path}: clock call .{clocks[0]}() (step must be pure)")
 
     digest = hashlib.sha256(source).hexdigest()
     name = f"fenrir_strategy_{path.stem}_{digest[:12]}"

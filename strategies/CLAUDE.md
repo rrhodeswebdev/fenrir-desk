@@ -13,6 +13,6 @@ Strategy files written by Claude. One file = one strategy; the file stem is its 
 - `ctx`: `ts`, `bars` (last <= 500, ending with the current bar), `position`,
   `account` (drawdown/daily-loss/target remaining, phase), `spec` (tick, point_value).
   See `src/fenrir/strategy/types.py`.
-- Imports of os, time, random, socket, etc. are rejected by the loader. Editing a file
+- Imports of os, time, random, socket, etc. are rejected by the loader, as are `.now()`/`.today()` calls. Editing a file
   changes its hash; arming then needs a fresh backtest.
 - Example: `orb.py`. Tests: `tests/strategy/`.

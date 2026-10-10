@@ -117,3 +117,17 @@ def test_exec_errors_become_value_error_and_unregister(tmp_path, body):
     with pytest.raises(ValueError, match="execfail_zq.py"):
         load_strategy(path)
     assert not [k for k in sys.modules if k.startswith("fenrir_strategy_execfail_zq_")]
+
+
+@pytest.mark.parametrize(
+    "call, header",
+    [
+        ("datetime.now()", "from datetime import datetime\n"),
+        ("datetime.datetime.utcnow()", "import datetime\n"),
+        ("date.today()", "from datetime import date\n"),
+    ],
+)
+def test_rejects_clock_calls(tmp_path, call, header):
+    text = header + GOOD.replace("return state, []", f"{call}\n    return state, []")
+    with pytest.raises(ValueError, match="clock call"):
+        load_strategy(write(tmp_path / "clock.py", text))

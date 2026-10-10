@@ -6,3 +6,4 @@ The strategy contract: what a strategy file must export, the values its `step` r
 - Pure vs shell: `types.py` is pure data; `loader.py` reads and executes files (shell).
 - Not here: strategy files themselves (`strategies/`), running them over bars (`src/fenrir/backtest/`), running them live (`src/fenrir/live/`).
 - Tests: `tests/strategy/`.
+- The import and clock checks in `loader.py` are a static lint against mistakes, not a sandbox.

@@ -1,9 +1,10 @@
 """Accounting for every event. Runs before the rules so they see post-event balances."""
 
 from dataclasses import replace
+from typing import assert_never
 
 from fenrir.core.sessions import trading_day
-from fenrir.rules.state import AccountState, DayClosed, Event, Fill, Mark
+from fenrir.rules.state import AccountState, DayClosed, Event, Fill, Mark, TradeClosed
 
 
 def book(state: AccountState, event: Event) -> AccountState:
@@ -30,4 +31,7 @@ def book(state: AccountState, event: Event) -> AccountState:
                 traded_today=False,
                 halted_today=False,
             )
-    return state
+        case TradeClosed():
+            return state
+        case _:
+            assert_never(event)

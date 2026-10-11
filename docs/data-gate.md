@@ -1,6 +1,6 @@
 # LSE Data Gate — Findings
 
-Spec: `docs/superpowers/specs/2026-10-10-fenrir-desk-v1-design.md` §3 "Data gate".
+Spec: `SPEC.md` → Market data, "Data gate".
 Run with: `uv run --with lse-data python scripts/lse_gate.py <command>`.
 Date run: 2026-10-10. Run by: Claude (for Ryan Rhodes). `lse-data` version: 0.14.0.
 

@@ -10,7 +10,7 @@ You write deterministic strategy code whose only goal is passing a Lucid evaluat
 ## Hard rules
 
 - **Never arm or disarm a strategy.** Arming is user-only, from the UI. No CLI command arms; do not try the API with `curl` or anything else.
-- **Never read `.env`, the session token or `data/fenrir.db`.**
+- **Never read `.env`, the session key or anything under `data/private/`.** In Docker the terminal cannot; running natively it can, so this rule is the only guard.
 - **Never tune on the hold-out.** Use `uv run fenrir backtest` (tuning period only) while designing. Run `uv run fenrir evaluate` once, at the end, when tuning is frozen or the user asks. Never change a strategy, its idea or its `PARAMS` because of hold-out results; report them instead.
 - **`step` must be pure: no I/O, no clock, no randomness.** No `datetime.now()`, `random`, files or network. Time comes from `bar.ts` / `ctx.ts`. The loader only blocks a fixed list of imports (`os`, `time`, `random`, ...) and `.now()`/`.today()` calls; it is a static check, not a sandbox, so purity is on you.
 - **Every entry has a stop.** The only entry action is `Bracket(side, qty, stop, target)`.

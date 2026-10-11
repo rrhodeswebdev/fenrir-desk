@@ -28,6 +28,10 @@ Fenrir Desk is a local-only web app where one futures prop trader uses Claude Co
 | Evaluation price | A user input per account (`eval_price` in `data/accounts.yaml`), not a rule: it varies with coupons. |
 | Daily loss limit | Per-account user choice (`dll_on`). When on, hitting it halts the day (Lucid soft breach); the attempt continues. |
 | Roll window | Thursday 8 days before expiry through Tuesday of expiry week: no bars in backtests, no entries live (LSE rolls later than our calendar). |
+| Terminal isolation (DEC-1) | In the Docker image the Workbench terminal runs as an unprivileged `claude` user; the server runs as root and keeps secrets, `fenrir.db` and the session key in a root-only volume. The session reaches the browser as an HttpOnly cookie via a one-time launch link, never in a page. Running natively, the terminal runs as you and is not isolated. |
+| Rejected WebSockets (DEC-2) | Refused at the handshake (HTTP 403), never accepted then closed. |
+| Rules files from the UI (DEC-3) | Written with a `ruamel.yaml` round-trip: comments, number formatting and layout are kept; only changed values move. |
+| Docker mounts (DEC-6) | The whole repo is mounted at `/app` so Claude can read the code and commit; secrets never live in it (see Running). |
 
 ### Out of scope for v1
 
@@ -40,10 +44,10 @@ Fenrir Desk is a local-only web app where one futures prop trader uses Claude Co
 ## Tech Stack
 
 - **Python 3.12**, `uv`, src layout, package `fenrir`, console script `fenrir = "fenrir.cli.main:app"`.
-- **Python libraries:** `typer`, `pydantic>=2` (frozen, `extra="forbid"`), `pyyaml`, `polars` + `pyarrow` (Parquet), `pandas-market-calendars` (CME_Equity), `lse-data>=0.14` (import name `lse`). Later: `fastapi` + `uvicorn[standard]`, `httpx` + `websockets`. Dev: `pytest`, `pytest-asyncio`, `hypothesis`, `ruff`.
+- **Python libraries:** `typer`, `pydantic>=2` (frozen, `extra="forbid"`), `pyyaml`, `polars` + `pyarrow` (Parquet), `pandas-market-calendars` (CME_Equity), `lse-data>=0.14` (import name `lse`). Later: `fastapi` + `uvicorn[standard]`, `httpx` + `websockets`, `ruamel.yaml` (rules round-trip), `pywinpty` (Windows PTY only). Dev: `pytest`, `pytest-asyncio`, `hypothesis`, `ruff`.
 - **Web (plan 12+):** Node 22, Vite, React 19, TypeScript strict, Tailwind CSS v4, shadcn/ui (Radix, New York), TanStack Router (code-based routes) + TanStack Query, `@xterm/xterm`, `lightweight-charts` (all charts), self-hosted `@fontsource` Chakra Petch + IBM Plex Mono, Playwright. Visual system: `DESIGN.md`.
 - **Add-on:** NinjaScript (C#, .NET Framework 4.8) inside NinjaTrader 8.
-- **Storage:** files in git (`rules/`, `strategies/`, `instruments.yaml`); gitignored `data/` (Parquet, results JSON, jobs, SQLite, `accounts.yaml`); `.env` for secrets.
+- **Storage:** files in git (`rules/`, `strategies/`, `instruments.yaml`); gitignored `data/` (Parquet, results JSON, jobs, `accounts.yaml`); a private directory (`FENRIR_PRIVATE_DIR`, default `data/private`; a root-only volume in Docker) for `fenrir.db`, the session key and, in Docker, the secrets file; `.env` for secrets when running natively.
 
 ## Commands
 
@@ -153,7 +157,7 @@ Build order: core → data, rules → strategy → backtest → server → web, 
 
 ### Rules
 
-One YAML per Lucid account type and size (`rules/lucid/flex-50k.yaml`), validated by a strict pydantic schema that rejects unknown and duplicate keys. Values come from Lucid's own site, with `verified_on` (null = unverified, shown stale) and `source_url`. Lucid Direct has no evaluation: `evaluation: null`, attempts start funded.
+One YAML per Lucid account type and size (`rules/lucid/flex-50k.yaml`), validated by a strict pydantic schema that rejects unknown and duplicate keys. Values come from Lucid's own site, with `verified_on` (null = unverified, shown stale) and `source_url`. Lucid Direct has no evaluation: `evaluation: null`, attempts start funded. The Rules page saves through a `ruamel.yaml` round-trip, so provenance comments and formatting survive an edit.
 
 Fields: `evaluation` (profit target, max drawdown, daily loss limit, consistency, min days), `funded` (same plus payout and optional scaling tiers), `max_drawdown.trailing` (`end_of_day` | `intraday`) and `locks_at`, `session.flat_by`, `contracts` (max minis, micros per mini), `prohibited` (microscalp, HFT), `costs` (activation fee, commission per side). No `eval_fee`.
 
@@ -175,14 +179,19 @@ One Python file in `strategies/` exporting `MARKET`, `PARAMS`, `init(params) -> 
 ### Claude Code workflow
 
 - **Terminal:** xterm.js on the Workbench page over WebSocket to a PTY in the server, started in the repo. Claude Code is installed in the image; its login is kept in a named volume.
-- **Security:** binds `127.0.0.1` (Docker publishes `127.0.0.1:8000:8000`); Host header checked; random session token per start, injected into `index.html`, required on every REST (`X-Fenrir-Token`) and WebSocket (`?token=`) request; WebSocket `Origin` checked.
+- **Security:** binds `127.0.0.1` (Docker publishes `127.0.0.1:8000:8000`); Host header checked. A random session key is kept in the private directory. `fenrir serve` prints a one-time launch link (`/launch?code=…`, a fresh single-use code per start); opening it sets an HttpOnly, SameSite=Strict session cookie that every REST and WebSocket request needs. No page, header, query string or API returns the session key. WebSocket `Origin` checked; a bad cookie or Origin is refused at the handshake (HTTP 403).
+- **Terminal isolation (Docker):** the PTY runs as the unprivileged `claude` user, with every `FENRIR_*` var dropped. It can read and write the repo, `data/bars`, `data/results` and `data/jobs`, and run `uv run fenrir backtest`; it cannot read the private volume (secrets, `fenrir.db`, session key), the server's environment or its logs, so it cannot arm, reach the session or reach NinjaTrader. Natively (`uv run fenrir serve`) the terminal runs as you and can read what you can; `fenrir serve` says so at start.
 - **Project skill:** `.claude/skills/fenrir-strategy/SKILL.md` teaches read rules → inspect data → write strategy → `fenrir backtest` → read report → iterate, on the tuning period only.
-- **Arming is user-only:** no CLI command arms; the PTY environment drops the token and every `FENRIR_*` var; arming needs a backtest of the current file hash against the account type, contract and current `dll_on`; arming a live account needs a confirmation showing the backtest summary.
+- **Arming is user-only:** no CLI command arms; the PTY cannot reach the session or the `armed` table (see Terminal isolation); arming needs a backtest of the current file hash against the account type, contract and current `dll_on`; arming a live account needs a confirmation showing the backtest summary.
 
 ### Live trading
 
 - **Modes:** dry run (actions logged, not sent) → sim → live.
 - **Loop per armed account, per closed bar:** bar → `step` → rule functions → pre-trade check (reject any bracket whose stop-out would breach drawdown or daily loss, or exceed the contract limit) → send with a unique client order ID → fills feed back as events. Limits use the stricter of NinjaTrader's figures and the app's own.
+- **Starting state (DEC-4a):** arming takes the account's balance at the start of the current phase and its peak balance so far (both NinjaTrader balances, prefilled with the current balance), so the trailing floor is right for an account armed mid-phase. Dry runs start fresh.
+- **Stricter of (DEC-4b):** drawdown remaining and today's P&L are computed from the app's own state and from NinjaTrader's balance and P&L against the same floor; the smaller distance wins. The Live page shows NinjaTrader's absolute balance and every distance in dollars.
+- **`dll_on` pinned (DEC-4d):** arming stores the account's `dll_on`; if `accounts.yaml` disagrees on a later start, the account halts until re-armed.
+- **Warm-up (DEC-4e):** on start or restart, `Ctx.bars` fills from the Parquet store plus today's live bars, and `init` + `step` replay today's session with actions suppressed; live decisions start at the next closed bar.
 - **Reconciliation:** on start and every reconnect. Any mismatch halts the account until the user resolves it. NinjaTrader is the source of truth for positions.
 - **Failure handling:**
 
@@ -192,15 +201,15 @@ One Python file in `strategies/` exporting `MARKET`, `PARAMS`, `init(params) -> 
 | Heartbeat lost with a position | Keep the bracket (default) or flatten (setting). |
 | No LSE bar for N seconds in session, or LSE drifts from fills | Pause new entries and alert. |
 | 16:40 America/New_York | Add-on flattens and cancels on its own, Python connected or not. |
-| Safety margin hit (default 80% of daily loss limit) | Halt the account for the day. |
+| Safety margin hit (default 80% of the nearer of the daily loss limit, when on, and the drawdown remaining at session start; DEC-4c) | Halt the account for the day. |
 | Strategy file hash changed while armed | Halt the account. |
 | Kill switch | Flatten all, cancel all, disarm all. |
 
-- **Journal:** SQLite `data/fenrir.db` records every bar decision, action, rejection, fill, alert and halt.
+- **Journal:** SQLite `<private_dir>/fenrir.db` records every bar decision, action, rejection, fill, alert and halt.
 
 ### NinjaTrader add-on
 
-HTTP + WebSocket server inside NinjaTrader on a configurable port, shared token on every request. Lists accounts, positions and working orders; submits brackets (market entry + OCO stop/target); flatten, cancel, flatten-all; streams account, position, order, fill and a 2 s heartbeat. Duplicate client order IDs are ignored. Flattens and cancels at 16:40 ET by itself. No market data, no decisions; forwards to NinjaTrader's API only. Shipped as an importable NinjaScript zip built from the repo.
+HTTP + WebSocket server inside NinjaTrader on a configurable port, shared token on every request. Lists accounts, positions and working orders; submits brackets (market entry + OCO stop/target); flatten, cancel, flatten-all; streams account, position, order, fill and a 2 s heartbeat. Duplicate client order IDs are ignored, and the seen IDs persist to a file on the NinjaTrader machine (last 7 days) so dedupe survives a restart. It acts only on the accounts listed in its config (`managed_accounts`); orders for any other account are refused, and the 16:40 ET flatten and `/flatten-all` touch managed accounts only. Flattens and cancels at 16:40 ET by itself. With `flatten_on_disconnect_seconds` set (default off, matching "keep the bracket"), it flattens managed accounts holding a position after no `/stream` client for that long. On a partial entry fill it cancels the rest of the entry and protects the filled quantity with stop and target at once. No market data, no decisions; forwards to NinjaTrader's API only. Shipped as an importable NinjaScript zip built from the repo.
 
 ### User interface
 
@@ -218,7 +227,7 @@ Follows `PRODUCT.md` and `DESIGN.md` exactly: dark only, radius 0, no shadows, c
 
 ### Running
 
-Users: `git clone`, `cp .env.example .env` (LSE key, NinjaTrader address and token), `docker compose up`, open `http://localhost:8000`. Multi-stage image (Node builds UI; Python runtime with `uv`, built UI, Claude Code, `git`), `restart: unless-stopped`, bind mounts for `strategies/`, `rules/`, `instruments.yaml`, `data/`, `.env`. NinjaTrader at `host.docker.internal:<port>` on the same Windows host, or the VM's IP from macOS. Live trading also needs NinjaTrader 8 with the add-on imported; the README covers import, VM IP and Windows Firewall.
+Users: `git clone`, `docker compose up`, open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and NinjaTrader address and token on the Settings page. Multi-stage image (Node builds UI; Python runtime with `uv`, built UI, Claude Code, `git`), `restart: unless-stopped`. The whole repo is bind-mounted at `/app` (DEC-6); secrets, `fenrir.db` and the session key live in a root-only named volume at `/var/lib/fenrir`, never in the repo; Claude Code's login lives in a named volume owned by `claude`. The image ignores a repo `.env` and warns if one holds secrets. NinjaTrader at `host.docker.internal:<port>` on the same Windows host, or the VM's IP from macOS. Live trading also needs NinjaTrader 8 with the add-on imported; the README covers import, VM IP and Windows Firewall.
 
 ## Code Style
 
@@ -282,7 +291,7 @@ def daily_loss_limit(limit: float) -> Rule:
 
 **Never**
 - Commit `.env`, API keys, broker credentials or anything under `data/`.
-- Add a CLI path, API path or environment leak that lets Claude arm, disarm or reach the session token.
+- Add a CLI path, API path, file or environment leak that lets the Docker terminal arm, disarm, or reach the session key, secrets or `fenrir.db`.
 - Tune on the hold-out period or rank by it.
 - Use back-adjusted prices, or allow an entry without a stop.
 - Put I/O, clock or randomness in a strategy `step` or a core function.
@@ -298,8 +307,8 @@ def daily_loss_limit(limit: float) -> Rule:
 4. Arming is refused (409) without a backtest matching the file hash, account, contract and `dll_on`; arming a live account needs confirmation.
 5. In dry run, sim and live, every bracket sent has a stop; a bracket whose stop-out would breach a limit is rejected and journalled.
 6. With Python disconnected, the add-on flattens and cancels all at 16:40 ET on a Sim account (manual checklist).
-7. The server returns 401 without the token, 400 for a foreign Host, and closes foreign-Origin WebSockets with 4401.
-8. From a clean clone, `cp .env.example .env && docker compose up` serves the app at `http://localhost:8000`.
+7. The server returns 401 without the session cookie and 400 for a foreign Host, and refuses WebSocket handshakes without the cookie or from a foreign Origin with HTTP 403; in Docker, the terminal cannot read the session key, secrets or `fenrir.db`.
+8. From a clean clone, `docker compose up` serves the app at `http://localhost:8000` through the printed launch link.
 
 ## Risks
 

@@ -1,0 +1,45 @@
+# From Lucid's help center (LucidDirect collection, articles updated 2026-08-26 to 2026-10-09):
+# https://support.lucidtrading.com/en/articles/12890148-luciddirect-funded-account
+# https://support.lucidtrading.com/en/articles/12890164-luciddirect-payout-objectives
+# https://support.lucidtrading.com/en/articles/12890178-luciddirect-consistency-percentage
+# https://support.lucidtrading.com/en/articles/12890185-luciddirect-daily-loss-limit
+# https://support.lucidtrading.com/en/articles/12890192-luciddirect-drawdown
+# https://support.lucidtrading.com/en/articles/16558826-new-live-structure (payout 5 is the last)
+# https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
+# No evaluation: attempts start funded.
+# The DLL is not optional on Direct: set dll_on: true for this account in
+# data/accounts.yaml, or backtests run without it.
+# Schema gaps, entered on the safe side:
+# - Funded DLL turns into 60% of peak end-of-day profit once the balance closes above
+#   the initial trail (+$3,600); the fixed amount is kept, which is never larger.
+# - A payout needs $6,000 profit in the cycle (no field for a profit goal). max_pct_of_profit
+#   is 2,500 / 6,000 rounded down and min_profit is the $2,500 cap, so the first request
+#   is allowed from $6,000 profit and is the $2,500 cap, as on Lucid (Lucid's minimum request
+#   is $500, but the goal is above the cap, so a smaller request never comes first).
+firm: lucid
+account: direct-100k
+verified_on: 2026-10-11
+source_url: https://support.lucidtrading.com/en/collections/16780869-luciddirect
+automation_allowed: true
+evaluation: null
+funded:
+  max_drawdown: { amount: 3500, trailing: end_of_day, locks_at: 3600 }
+  daily_loss_limit: 2100
+  consistency: { max_day_pct: 20 }
+  payout:
+    max_pct_of_profit: 41.66  # stands in for the $6,000 profit goal, see above
+    split_pct: 90
+    min_days: 0
+    min_profit: 2500
+    min_day_profit: 0
+    max_amount: 2500
+    max_payouts: 5
+  scaling: null
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 6, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

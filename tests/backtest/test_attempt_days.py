@@ -1,8 +1,12 @@
+from pathlib import Path
+
 import pytest
 from backtest_helpers import D1, D2, D3, NQ, bar, et, make_rules, scripted
 
 from fenrir.backtest.attempt import run_attempt
 from fenrir.core.actions import Bracket
+from fenrir.rules.account import with_dll
+from fenrir.rules.loader import load_account
 
 LONG = Bracket("long", 1, 95.0, 105.0)
 
@@ -51,6 +55,14 @@ def test_account_without_evaluation_starts_funded():
     )
     assert (r.outcome, r.days_to_pass, r.days_to_payout) == ("payout", 0, 1)
     assert r.first_payout == pytest.approx(85 * 0.50 * 0.90)
+
+
+def test_lucid_direct_attempt_starts_funded():
+    rules = with_dll(load_account("lucid-direct-50k", Path(__file__).parents[2] / "rules"), True)
+    bars = (*winning_day(D1), bar("09:30", 100, 100.5, 99.5, 100, D2))
+    r = run_attempt(bars, 0, len(bars), scripted({"09:30": [LONG]}), rules, NQ)
+    # days_to_pass 0: no evaluation; +85 is short of the $3,000 payout goal
+    assert (r.outcome, r.days_to_pass, r.first_payout) == ("passed", 0, None)
 
 
 def test_flat_by_forces_exit_and_blocks_entries():

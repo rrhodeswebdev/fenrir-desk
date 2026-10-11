@@ -1,0 +1,42 @@
+# From Lucid's help center (LucidDirect collection, articles updated 2026-08-26 to 2026-10-09):
+# https://support.lucidtrading.com/en/articles/12890148-luciddirect-funded-account
+# https://support.lucidtrading.com/en/articles/12890164-luciddirect-payout-objectives
+# https://support.lucidtrading.com/en/articles/12890178-luciddirect-consistency-percentage
+# https://support.lucidtrading.com/en/articles/12890185-luciddirect-daily-loss-limit
+# https://support.lucidtrading.com/en/articles/12890192-luciddirect-drawdown
+# https://support.lucidtrading.com/en/articles/16558826-new-live-structure (payout 5 is the last)
+# https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
+# No evaluation: attempts start funded.
+# No DLL on the 25k, so leave dll_on false for this account.
+# Schema gaps, entered on the safe side:
+# - A payout needs $1,500 profit in the cycle (no field for a profit goal). max_pct_of_profit
+#   is 1,000 / 1,500 rounded down and min_profit is the $1,000 cap, so the first request
+#   is allowed from $1,500 profit and is the $1,000 cap, as on Lucid (Lucid's minimum request
+#   is $500, but the goal is above the cap, so a smaller request never comes first).
+firm: lucid
+account: direct-25k
+verified_on: 2026-10-11
+source_url: https://support.lucidtrading.com/en/collections/16780869-luciddirect
+automation_allowed: true
+evaluation: null
+funded:
+  max_drawdown: { amount: 1000, trailing: end_of_day, locks_at: 1100 }
+  daily_loss_limit: null  # Lucid lists no DLL for the 25k
+  consistency: { max_day_pct: 20 }
+  payout:
+    max_pct_of_profit: 66.66  # stands in for the $1,500 profit goal, see above
+    split_pct: 90
+    min_days: 0
+    min_profit: 1000
+    min_day_profit: 0
+    max_amount: 1000
+    max_payouts: 5
+  scaling: null
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 2, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

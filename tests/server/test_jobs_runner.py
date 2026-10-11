@@ -15,7 +15,14 @@ from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import front_month, load_instruments
 from fenrir.data.store import write_bars
 from fenrir.server.jobs import Job, JobItem, to_json
-from fenrir.server.jobs_runner import CHILD, JobRunner, parse_event, strategy_user
+from fenrir.server.jobs_runner import (
+    CHILD,
+    ERROR_MAX,
+    JobRunner,
+    parse_event,
+    parse_grid,
+    strategy_user,
+)
 from fenrir.settings import Settings
 
 FAKE = (sys.executable, str(Path(__file__).with_name("fake_job_child.py")))
@@ -48,8 +55,8 @@ def settings(tmp_path) -> Settings:
 def make(settings):
     runners = []
 
-    def make(s: Settings = settings, child=FAKE) -> JobRunner:
-        runners.append(JobRunner(s, child=child))
+    def make(s: Settings = settings, child=FAKE, **kw) -> JobRunner:
+        runners.append(JobRunner(s, child=child, **kw))
         return runners[-1]
 
     yield make
@@ -69,9 +76,9 @@ def test_submit_runs_items_and_persists_a_round_trip(make, settings, tmp_path):
     done = runner.get(job.id)
     assert (done.items[0].status, done.items[0].key) == ("done", key("orb"))
     assert done.items[0].progress == (200, 200)
-    assert json.loads((settings.data_dir / "jobs" / f"{job.id}.json").read_text()) == json.loads(
-        json.dumps(to_json(done))
-    )
+    path = settings.data_dir / "jobs" / f"{job.id}.json"
+    assert json.loads(path.read_text()) == json.loads(json.dumps(to_json(done)))
+    assert path.stat().st_mode & 0o777 == 0o644  # the terminal may read data/jobs
     again = make()
     again.start()
     assert again.get(job.id) == done
@@ -105,7 +112,7 @@ def test_restart_reruns_only_unfinished_items(make, settings, tmp_path):
         "2026-10-10T14:00:00.000Z",
         True,
         (
-            JobItem(a, "lucid-flex-50k", "NQ", status="done", key="old"),
+            JobItem(a, "lucid-flex-50k", "NQ", status="done", key=OLD),
             JobItem(b, "lucid-flex-50k", "NQ", status="running", progress=(3, 9)),
             JobItem(c, "lucid-flex-50k", "NQ"),
         ),
@@ -115,7 +122,7 @@ def test_restart_reruns_only_unfinished_items(make, settings, tmp_path):
     runner = make()
     runner.start()
     wait_for(lambda: finished(runner, "j1"))
-    assert [it.key for it in runner.get("j1").items] == ["old", key("b"), key("c")]
+    assert [it.key for it in runner.get("j1").items] == [OLD, key("b"), key("c")]
 
 
 def test_a_corrupt_job_file_is_skipped_and_logged(make, settings, caplog):
@@ -177,7 +184,8 @@ def test_jobs_are_newest_first(make, tmp_path):
 def test_the_child_env_holds_no_secrets(make, tmp_path, monkeypatch):
     monkeypatch.setenv("FENRIR_NT_TOKEN", "secret")
     monkeypatch.setenv("FENRIR_LSE_API_KEY", "secret")
-    runner = make()
+    monkeypatch.setenv("COPIED_KEY", "x-sekrit-x")  # holds the session key
+    runner = make(secret="sekrit")
     runner.start()
     job = runner.submit(grid(tmp_path, "env"), True)
     wait_for(lambda: finished(runner, job.id))
@@ -208,6 +216,40 @@ def test_child_runs_in_its_own_session_and_stop_kills_its_group(make, tmp_path):
     assert runner.get(job.id).items[0].status == "running"
 
 
+def test_a_silent_child_is_killed_and_its_items_error(make, tmp_path):
+    runner = make(idle=0.5)
+    runner.start()
+    job = runner.submit(grid(tmp_path, "hang", "orb"), True)
+    wait_for(lambda: finished(runner, job.id))
+    info = json.loads((tmp_path / "hang.json").read_text())
+    wait_for(lambda: gone(info["sleeper"]))
+    for item in runner.get(job.id).items:
+        assert item.error.startswith("no progress for ")
+
+
+def test_child_output_is_bounded(make, tmp_path):
+    runner = make()
+    runner.start()
+    job = runner.submit(grid(tmp_path, "flood"), True)
+    wait_for(lambda: finished(runner, job.id))
+    time.sleep(0.2)  # the dropped lines arrive after the first error
+    assert runner.get(job.id).items[0].error == "y" * ERROR_MAX
+
+
+def test_a_symlinked_jobs_dir_is_refused(make, tmp_path, caplog):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "jobs").symlink_to(elsewhere)
+    runner = make()
+    runner.start()
+    job = runner.submit(grid(tmp_path, "orb"), True)
+    wait_for(lambda: finished(runner, job.id))
+    assert runner.get(job.id).items[0].error.startswith("refusing to run: ")
+    assert list(elsewhere.iterdir()) == []
+    assert "is a symlink" in caplog.text
+
+
 def test_isolation_refusal_errors_the_items(make, tmp_path, monkeypatch):
     monkeypatch.setenv("FENRIR_BIND_ALL", "1")
     monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
@@ -230,7 +272,22 @@ def test_strategy_user():
             strategy_user(env)
 
 
+def test_strategy_user_refuses_group_0_in_the_image(monkeypatch):
+    import pwd
+
+    class Pw:
+        pw_uid, pw_gid = 1000, 0
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda _name: Pw)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    with pytest.raises(ValueError, match="refusing to run strategy"):
+        strategy_user({"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "claude"})
+    Pw.pw_gid = 1000
+    assert strategy_user({"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "claude"}) == "claude"
+
+
 K = "a" * 64
+OLD = "0" * 64
 
 
 @pytest.mark.parametrize(
@@ -257,6 +314,7 @@ def test_parse_event(line, event):
         '{"i": 0, "status": "done", "key": "../../x"}',
         '{"i": 0, "progress": [1]}',
         '{"i": "0", "status": "running"}',
+        "[" * 100000,
     ],
 )
 def test_parse_event_rejects_anything_else(line):
@@ -273,16 +331,75 @@ def test_the_child_ignores_modules_planted_in_the_cwd(tmp_path):
     assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
 
 
-def test_real_job_produces_a_cached_report(make, tmp_path):
+def real_settings(tmp_path) -> Settings:
     s = replace(
         Settings(),
         data_dir=tmp_path / "data",
         rules_dir=tmp_path / "rules",
+        strategies_dir=tmp_path / "strategies",
         holdout_months=0,
     )
     (s.rules_dir / "lucid").mkdir(parents=True)
     rules = {**rules_data(), "account": "flex-50k"}
     (s.rules_dir / "lucid" / "flex-50k.yaml").write_text(yaml.safe_dump(rules))
+    s.strategies_dir.mkdir()
+    return s
+
+
+# module-level side effect: records which process executed the file
+SIDE_EFFECT = (
+    "open(__file__ + '.pid', 'w').write(str(__import__('os').getpid()))\n"
+    'MARKET = "NQ"\nPARAMS = {}\n\ndef init(p):\n    return None\n\n'
+    "def step(s, b, c):\n    return s, []\n"
+)
+
+
+def test_expand_executes_strategies_only_in_the_child(make, tmp_path):
+    s = real_settings(tmp_path)
+    path = s.strategies_dir / "side.py"
+    path.write_text(SIDE_EFFECT)
+    runner = make(s, child=CHILD)
+    grid = runner.expand([str(s.strategies_dir / "*.py")], ["lucid-*"], None)
+    assert set(grid) == {GridItem(path, "lucid-flex-50k", c) for c in ("NQ", "MNQ")}
+    assert int(Path(f"{path}.pid").read_text()) != os.getpid()
+    with pytest.raises(ValueError, match="ValueError: .*nope.*matches nothing"):
+        runner.expand([str(s.strategies_dir / "nope*.py")], ["lucid-*"], None)
+
+
+def test_expand_times_out_and_kills_the_child(make, tmp_path):
+    runner = make(expand_timeout=0.5)
+    with pytest.raises(ValueError, match="took over 0.5 s"):
+        runner.expand(["hang", str(tmp_path / "x.py")], [], None)
+    wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
+
+
+def test_parse_grid(tmp_path):
+    s = real_settings(tmp_path)
+    inside = str(s.strategies_dir / "a.py")
+    assert parse_grid(json.dumps([[inside, "lucid-flex-50k", "NQ"]]), s) == (
+        GridItem(Path(inside), "lucid-flex-50k", "NQ"),
+    )
+    assert parse_grid("[]", s) == ()
+    with pytest.raises(ValueError, match="^ValueError: 'x' matches nothing$"):
+        parse_grid(json.dumps({"error": "ValueError: 'x' matches nothing"}), s)
+    for bad in (
+        [[str(tmp_path / "a.py"), "lucid-flex-50k", "NQ"]],  # outside strategies_dir
+        [[str(s.strategies_dir / ".." / "a.py"), "lucid-flex-50k", "NQ"]],
+        [[inside, "lucid-nope", "NQ"]],
+        [[inside, "lucid-flex-50k", "XX"]],
+        [[inside, "lucid-flex-50k"]],
+        {"error": 1},
+        {"error": "x", "more": 1},
+        "x",
+    ):
+        with pytest.raises(ValueError, match="not a grid"):
+            parse_grid(json.dumps(bad), s)
+    with pytest.raises(ValueError):
+        parse_grid("[" * 100000, s)
+
+
+def test_real_job_produces_a_cached_report(make, tmp_path):
+    s = real_settings(tmp_path)
     code = front_month(load_instruments(), "NQ", D1)
     bars = [
         replace(bar(f"09:{m:02d}", p, p + 2, p - 1, p + 1, day), contract=code)

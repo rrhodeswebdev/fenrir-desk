@@ -157,4 +157,5 @@ def test_second_run_is_served_from_cache(tmp_path, monkeypatch):
     assert sorted(computed) == ["lucid-flex-100k", "lucid-flex-50k"]  # once each, not again
     assert second.stdout == first.stdout
     assert [r["account"] for r in json.loads(first.stdout)] == ["lucid-flex-100k", "lucid-flex-50k"]
+    assert "attempts" in first.stderr  # run 1 computed and showed progress
     assert second.stderr == ""  # a cache hit reports no progress

@@ -57,7 +57,7 @@ Format:      uv run ruff format .
 Pull data:   uv run fenrir data pull [--series ES --series NQ] [--since YYYY-MM-DD]
 Data info:   uv run fenrir data summary --json
 Data gate:   uv run --with lse-data python scripts/lse_gate.py <command>
-Backtest:    uv run fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached
+Backtest:    uv run fenrir backtest '<strategy glob>'... --account '<glob>' [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached; quote globs (zsh)
 Evaluate:    uv run fenrir evaluate <same args>                                                                      # tuning + hold-out
 ```
 

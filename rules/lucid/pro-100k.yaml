@@ -10,12 +10,15 @@
 # https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
 # daily_loss_limit is the fixed amount when the optional DLL is on.
 # Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
-# Schema gaps, entered on the safe side:
+# The funded page says "No simulated payout caps" but the payouts page lists caps; the caps
+# are entered as the safe side.
+# Schema gaps:
 # - Funded DLL turns into 60% of peak end-of-day profit once the balance closes above the
-#   initial trail (+$3,100); the fixed amount is kept, which is never larger.
-# - A payout may not dip into the $3,100 buffer (MLL + $100). max_pct_of_profit is
-#   500 / 3,600 rounded down: the $500 minimum request is reached at $3,600 profit,
-#   as on Lucid, and the request never exceeds profit above the buffer (it understates it).
+#   initial trail (+$3,100); the fixed amount is kept, so it halts no later than Lucid;
+#   whether that helps or hurts the outcome depends on the strategy.
+# - A payout may not dip into the $3,100 buffer (MLL + $100). max_pct_of_profit is just under
+#   500 / 3,600: the $500 minimum request is reached within $3 of Lucid's point
+#   ($3,600 profit), and the request never exceeds profit above the buffer (it understates it).
 firm: lucid
 account: pro-100k
 verified_on: 2026-10-11

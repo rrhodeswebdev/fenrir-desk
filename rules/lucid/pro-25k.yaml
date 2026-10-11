@@ -10,12 +10,15 @@
 # https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
 # daily_loss_limit is the fixed amount when the optional DLL is on.
 # Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
-# Schema gaps, entered on the safe side:
+# The funded page says "No simulated payout caps" but the payouts page lists caps; the caps
+# are entered as the safe side.
+# Schema gaps:
 # - Funded DLL turns into 60% of peak end-of-day profit once the balance closes above the
-#   initial trail (+$1,100); the fixed amount is kept, which is never larger.
-# - A payout may not dip into the $1,100 buffer (MLL + $100). max_pct_of_profit is
-#   500 / 1,600 rounded down: the $500 minimum request is reached at $1,600 profit,
-#   as on Lucid, and the request never exceeds profit above the buffer (it understates it).
+#   initial trail (+$1,100); the fixed amount is kept, so it halts no later than Lucid;
+#   whether that helps or hurts the outcome depends on the strategy.
+# - A payout may not dip into the $1,100 buffer (MLL + $100). max_pct_of_profit is just under
+#   500 / 1,600: the $500 minimum request is reached within $3 of Lucid's point
+#   ($1,600 profit), and the request never exceeds profit above the buffer (it understates it).
 firm: lucid
 account: pro-25k
 verified_on: 2026-10-11
@@ -32,7 +35,7 @@ funded:
   daily_loss_limit: 600  # funded-account page says $600, DLL page says none; $600 is the safe side
   consistency: { max_day_pct: 40 }
   payout:
-    max_pct_of_profit: 31.25  # stands in for the $1,100 buffer, see above
+    max_pct_of_profit: 31.24  # stands in for the $1,100 buffer, see above
     split_pct: 90
     min_days: 0
     min_profit: 500  # the per-cycle profit goal is below buffer + $500, so it never binds

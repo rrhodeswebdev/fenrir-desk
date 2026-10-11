@@ -70,12 +70,12 @@ Web dev:     npm --prefix web run dev            # proxies /api, /ws, /launch to
 Typecheck:   npm --prefix web run typecheck
 Web test:    npm --prefix web test -- --run      # Vitest unit tests
 Web build:   npm --prefix web run build          # writes web/dist/
+E2E:         npm --prefix web run e2e            # builds, then Playwright against fenrir serve on :8799; once: npx --prefix web playwright install chromium
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
-E2E:         npx --prefix web playwright test                                                     # (12)
 Run app:     docker compose up        → http://localhost:8000                                     # (18)
 ```
 

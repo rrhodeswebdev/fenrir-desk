@@ -32,6 +32,15 @@ def cache_key(item: GridItem, settings: Settings, include_holdout: bool) -> str:
     )
 
 
+def _read(path: Path) -> Report:
+    try:
+        report = json.loads(path.read_text())
+        report["created_at"]  # noqa: B018 - every stored report has one; list_reports sorts on it
+        return report
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        raise ValueError(f"{path}: corrupt cached report, delete it ({e!r})") from e
+
+
 def cached_run(
     item: GridItem,
     settings: Settings,
@@ -41,7 +50,7 @@ def cached_run(
 ) -> Report:
     path = _results(settings) / f"{cache_key(item, settings, include_holdout)}.json"
     if path.exists():
-        return json.loads(path.read_text())
+        return _read(path)
     report = run_backtest(
         item.strategy_path,
         item.account_id,
@@ -53,14 +62,22 @@ def cached_run(
     path.parent.mkdir(parents=True, exist_ok=True)
     # temp + rename: a crash never leaves a half-written <key>.json to be read as a hit;
     # a unique temp name keeps two runs of the same key from writing into one file
+    text = json.dumps(report)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
-        json.dump(report, f)
-    # stored under the key of the bytes that ran: a file edited mid-run misses next time
-    os.replace(tmp, path.parent / f"{report['key']}.json")
-    return report
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())  # no empty <key>.json after a power loss
+        # stored under the key of the bytes that ran: a file edited mid-run misses next time
+        os.replace(tmp, path.parent / f"{report['key']}.json")
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return json.loads(text)  # same types as a later hit (tuples come back as lists)
 
 
 def list_reports(settings: Settings) -> tuple[Report, ...]:
-    reports = [json.loads(p.read_text()) for p in _results(settings).glob("*.json")]
-    return tuple(sorted(reports, key=lambda r: r["created_at"], reverse=True))
+    reports = [_read(p) for p in _results(settings).glob("*.json")]
+    # key breaks created_at ties (one-second resolution) so the order is the same everywhere
+    return tuple(sorted(reports, key=lambda r: (r["created_at"], r["key"]), reverse=True))

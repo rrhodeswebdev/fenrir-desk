@@ -56,7 +56,8 @@ def runs(monkeypatch):
         key = cache_key(GridItem(path, account, contract), s, include_holdout)
         calls.append(key)
         created = f"2026-10-10T00:00:{len(calls):02d}Z"
-        return {"key": key, "created_at": created, "strategy_hash": "h", "account": account}
+        # a tuple, as a strategy's PARAMS can hold: JSON gives it back as a list
+        return {"key": key, "created_at": created, "account": account, "params": {"t": (1, 2)}}
 
     monkeypatch.setattr(cache, "run_backtest", fake)
     return calls
@@ -66,7 +67,7 @@ def test_second_run_is_cached(settings, item, runs):
     first = cached_run(item, settings, include_holdout=False)
     second = cached_run(item, settings, include_holdout=False)
     assert len(runs) == 1
-    assert first == second
+    assert first == second  # a miss returns the same types as a hit
     assert (settings.data_dir / "results" / f"{first['key']}.json").exists()
 
 
@@ -137,6 +138,25 @@ def test_list_reports_newest_first(settings):
     b = write_report(settings, "b", "2026-10-03T00:00:00Z")
     c = write_report(settings, "c", "2026-10-02T00:00:00Z")
     assert list_reports(settings) == (b, c, a)
+
+
+def test_list_reports_breaks_created_at_ties_by_key(settings):
+    a = write_report(settings, "a", "2026-10-01T00:00:00Z")
+    b = write_report(settings, "b", "2026-10-01T00:00:00Z")
+    assert list_reports(settings) == (b, a)
+
+
+@pytest.mark.parametrize("text", ["", '{"half": ', '{"key": "k"}'])
+def test_a_corrupt_report_is_an_error_naming_the_file(settings, item, runs, text):
+    path = settings.data_dir / "results" / f"{cache_key(item, settings, False)}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+    for read in (
+        lambda: cached_run(item, settings, include_holdout=False),
+        lambda: list_reports(settings),
+    ):
+        with pytest.raises(ValueError, match="corrupt cached report"):
+            read()
 
 
 def test_real_run_computes_once(settings, monkeypatch):

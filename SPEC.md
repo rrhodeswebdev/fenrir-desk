@@ -1,8 +1,8 @@
 # Spec: Fenrir Desk v1
 
-**Status:** Draft for review · **Updated:** 2026-10-11 · Replaces `docs/superpowers/specs/2026-10-10-fenrir-desk-v1-design.md`
+**Status:** Draft for review · **Updated:** 2026-10-11 · Replaces the 2026-10-10 v1 design spec
 
-Cross-plan contracts (exact names, signatures, file paths, JSON shapes) live in `docs/superpowers/plans/README.md` (local only). This spec says what and why; the contracts say exactly how modules meet. When they disagree, stop and ask.
+Cross-plan contracts (exact names, signatures, file paths, JSON shapes) live in `docs/contracts.md`. This spec says what and why; the contracts say exactly how modules meet. When they disagree, stop and ask.
 
 ## Objective
 
@@ -92,7 +92,7 @@ addon/                   → C# NinjaScript add-on                         (plan
 scripts/                 → one-off scripts run by hand; never imported
 tests/                   → pytest, mirrors src/fenrir/; fixtures/ for shared data
 design/                  → static prototypes; DESIGN.md records the system
-docs/                    → data-gate findings; superpowers/ (local) holds the plans
+docs/                    → data-gate findings, cross-plan contracts, Lucid rule mechanics
 data/                    → gitignored runtime data
 ```
 
@@ -268,7 +268,7 @@ def daily_loss_limit(limit: float) -> Rule:
 - Run `uv run pytest -q` and both ruff checks before every commit.
 - Read a directory's `CLAUDE.md` before working in it; new directory → its `CLAUDE.md` + a Directory Map row in the same commit.
 - Keep the core pure; I/O only in the shell.
-- Implement cross-plan contracts exactly; a contract change updates `plans/README.md` in the same commit and says so in the body.
+- Implement cross-plan contracts exactly; a contract change updates `docs/contracts.md` in the same commit and says so in the body.
 - Enter rule values from Lucid's own site with `verified_on` and `source_url`.
 - Pick the conservative choice in any fill or limit ambiguity.
 

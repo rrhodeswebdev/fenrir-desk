@@ -43,6 +43,8 @@ class PosixPty:
         master, slave = pty.openpty()
         try:
             _set_size(slave, COLS, ROWS)
+            if as_user:  # so the PTY user can reopen /dev/pts/N (tty, ssh, gpg pinentry)
+                os.fchown(slave, as_user["user"], as_user["group"])
             self._proc = subprocess.Popen(
                 argv,
                 stdin=slave,
@@ -120,6 +122,7 @@ class WindowsPty:
 def spawn(
     argv: Sequence[str], env: Mapping[str, str], as_user: dict[str, Any]
 ) -> PosixPty | WindowsPty:
-    """`argv` in a PTY; OSError when it cannot start (e.g. no such shell). `as_user` holds
+    """`argv` in a PTY; OSError when it cannot start (e.g. no such shell), SubprocessError
+    when taking the PTY as controlling tty fails. `as_user` holds
     `isolation.drop_to`'s Popen kwargs (POSIX only)."""
     return (WindowsPty if sys.platform == "win32" else PosixPty)(argv, env, as_user)

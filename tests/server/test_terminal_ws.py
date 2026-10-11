@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -13,6 +14,7 @@ import uvicorn
 from websockets.exceptions import ConnectionClosed, InvalidStatus
 from websockets.sync.client import connect
 
+from fenrir.server import ptyproc
 from fenrir.server.app import create_app
 from fenrir.server.auth import SESSION_COOKIE
 from fenrir.server.routes import terminal
@@ -118,6 +120,25 @@ def test_disconnect_kills_the_shell_and_its_jobs(port):
     assert gone(shell) and gone(job)
 
 
+def test_disconnect_with_unread_input_kills_the_shell(port):
+    with open_term(port) as ws:
+        send(ws, "echo pid=$$; exec sleep 1000\n")  # the shell becomes a process that never reads
+        shell = int(re.search(rb"pid=(\d+)", read_until(ws, rb"pid=\d+\r?\n")).group(1))
+        for _ in range(1024):  # far more than the tty input buffer holds
+            send(ws, "x" * 63 + "\n")
+    assert gone(shell)
+
+
+def test_too_much_unread_input_closes_1009(port):
+    with open_term(port) as ws:
+        send(ws, "exec sleep 1000\n")
+        send(ws, "x" * (terminal.MAX_PENDING + 1))
+        with pytest.raises(ConnectionClosed) as e:
+            while True:
+                ws.recv(timeout=5)
+        assert e.value.rcvd.code == 1009
+
+
 def test_shell_env_has_no_secrets(port, monkeypatch):
     monkeypatch.setenv("FENRIR_NT_TOKEN", "nt-secret")
     monkeypatch.setenv("LEAKY", f"x{KEY}x")
@@ -139,6 +160,14 @@ def test_pty_user_overlay_and_shell(port, monkeypatch):
         read_until(ws, rb"h=/home/claude u=claude")
 
 
+def test_unknown_pty_user_is_refused(port, monkeypatch, caplog):
+    monkeypatch.setenv("FENRIR_PTY_USER", "no-such-user-fenrir")
+    with pytest.raises(InvalidStatus) as e:
+        open_term(port)
+    assert e.value.response.status_code == 403
+    assert "no-such-user-fenrir" in caplog.text
+
+
 @pytest.mark.parametrize("cookie, origin", [("wrong", None), (KEY, "http://evil.example")])
 def test_bad_cookie_or_origin_is_refused(port, cookie, origin):
     with pytest.raises(InvalidStatus) as e:
@@ -158,6 +187,20 @@ def test_missing_shell_closes_with_a_message(port, monkeypatch):
     monkeypatch.setenv("SHELL", "/no/such/shell")
     with open_term(port) as ws:
         assert b"cannot start the shell /no/such/shell" in ws.recv(timeout=5)
+        with pytest.raises(ConnectionClosed) as e:
+            ws.recv(timeout=5)
+        assert e.value.rcvd.code == 1011
+
+
+def test_failed_controlling_tty_closes_with_a_message(port, monkeypatch):
+    def fail(argv, env, as_user):
+        raise subprocess.SubprocessError("Exception occurred in preexec_fn.")
+
+    monkeypatch.setattr(ptyproc, "spawn", fail)
+    with open_term(port) as ws:
+        assert b"cannot start the shell /bin/sh: Exception occurred in preexec_fn." in ws.recv(
+            timeout=5
+        )
         with pytest.raises(ConnectionClosed) as e:
             ws.recv(timeout=5)
         assert e.value.rcvd.code == 1011

@@ -20,6 +20,7 @@ from fenrir.server.jobs_runner import (
     CHILD,
     ERROR_MAX,
     JobRunner,
+    parse_description,
     parse_event,
     parse_grid,
     strategy_user,
@@ -366,6 +367,73 @@ def test_expand_times_out_and_kills_the_child(make, tmp_path):
     with pytest.raises(ValueError, match="took over 0.5 s"):
         runner.expand(["hang", str(tmp_path / "x.py")], [], None)
     wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
+
+
+def test_describe_times_out_kills_the_child_and_keeps_what_it_said(make, tmp_path):
+    s = real_settings(tmp_path)
+    for stem, hang in (("a", ""), ("b", "while True:\n    pass\n"), ("c", "")):
+        (s.strategies_dir / f"{stem}.py").write_text(SIDE_EFFECT + hang)
+    runner = make(s, child=CHILD, describe_timeout=2)
+    paths = [str(s.strategies_dir / f"{stem}.py") for stem in "abc"]
+    a, b, c = runner.describe(paths)
+    assert (a["name"], a["market"], a["error"]) == ("a", "NQ", None)
+    for entry in (b, c):
+        assert entry["error"] == "loading the strategies took over 2 s"
+        assert (entry["hash"], entry["market"], entry["params"]) == (None, None, {})
+    assert (b["path"], c["name"]) == (paths[1], "c")
+    wait_for(lambda: gone(int(Path(f"{paths[1]}.pid").read_text())))
+
+
+def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):
+    s = real_settings(tmp_path)
+    runner = make(s, child=CHILD)
+    for bad in (tmp_path / "x.py", s.strategies_dir / ".." / "x.py", s.strategies_dir / "d/x.py"):
+        with pytest.raises(ValueError, match="not a file in"):
+            runner.describe([str(s.strategies_dir / "ok.py"), str(bad)])
+
+
+H = "b" * 64
+GOOD = {"path": "/s/a.py", "name": "a", "hash": H, "market": "ES", "params": {"n": [1]}}
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        GOOD | {"error": None},
+        GOOD | {"market": None, "params": {}, "error": "E: x"},
+        GOOD | {"hash": None, "market": None, "params": {}, "error": "E: x"},
+    ],
+)
+def test_parse_description(entry):
+    assert parse_description(json.dumps(entry), ("/s/a.py",)) == entry
+
+
+def test_parse_description_clips_the_error():
+    line = json.dumps(GOOD | {"market": None, "params": {}, "error": "y" * 5000})
+    assert parse_description(line, ("/s/a.py",))["error"] == "y" * ERROR_MAX
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        json.dumps(GOOD | {"path": "/s/b.py", "name": "b", "error": None}),  # not requested
+        json.dumps(GOOD | {"name": "b", "error": None}),
+        json.dumps(GOOD | {"hash": "B" * 64, "error": None}),
+        json.dumps(GOOD | {"hash": None, "error": None}),
+        json.dumps(GOOD | {"market": "XX", "error": None}),
+        json.dumps(GOOD | {"params": [], "error": None}),
+        json.dumps(GOOD | {"error": "E: loaded and failed"}),
+        json.dumps(GOOD | {"market": None, "params": {"n": 1}, "error": "E: x"}),
+        json.dumps(GOOD | {"error": None, "more": 1}),
+        json.dumps(GOOD),
+        json.dumps(GOOD | {"error": None}).replace("[1]", "NaN"),
+        "[" * 100000,
+        "print output",
+    ],
+)
+def test_parse_description_rejects_anything_else(line):
+    with pytest.raises(ValueError):
+        parse_description(line, ("/s/a.py",))
 
 
 def test_parse_grid(tmp_path):

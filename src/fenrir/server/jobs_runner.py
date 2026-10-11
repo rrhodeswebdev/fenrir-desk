@@ -1,10 +1,11 @@
 """Shell for backtest jobs: `data/jobs/<id>.json`, one runner thread, one child process per job.
 
 Strategy code never runs in the server (DEC-1): grid expansion (`expand`, which loads each
-strategy to read its MARKET) and each job's unfinished items run in `fenrir.server.job_child`
-(one child per job, so the bars load once) with no `FENRIR_*` secrets in its environment, as
-`FENRIR_PTY_USER` when set. The child exits after the job, so its spawn pool and memoized bars
-go with it; the server never needs `fenrir.backtest.run.release()`.
+strategy to read its MARKET), `describe` (each strategy's MARKET and PARAMS) and each job's
+unfinished items run in `fenrir.server.job_child` (one child per job, so the bars load once)
+with no `FENRIR_*` secrets in its environment, as `FENRIR_PTY_USER` when set. The child exits
+after the job, so its spawn pool and memoized bars go with it; the server never needs
+`fenrir.backtest.run.release()`.
 """
 
 import contextlib
@@ -40,6 +41,7 @@ from fenrir.server.jobs import (
     update_item,
 )
 from fenrir.settings import Settings
+from fenrir.strategy.loader import MARKETS
 
 log = logging.getLogger(__name__)
 
@@ -52,9 +54,13 @@ ERROR_MAX = 2048
 Listener = Callable[[dict[str, Any]], None]
 
 
+def _no_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")  # NaN would 500 the response that carries it
+
+
 def _json(line: str) -> Any:
     try:
-        return json.loads(line)  # JSONDecodeError is a ValueError
+        return json.loads(line, parse_constant=_no_constant)  # JSONDecodeError is a ValueError
     except RecursionError:
         raise ValueError("JSON nested too deep") from None
 
@@ -106,6 +112,42 @@ def parse_grid(line: str, settings: Settings) -> tuple[GridItem, ...]:
             case _:
                 raise ValueError(f"not a grid row: {row!r}"[:300])
     return tuple(grid)
+
+
+def parse_description(line: str, paths: Container[str]) -> dict[str, Any]:
+    """One `--describe` child line -> `{path, name, hash, market, params, error}`; ValueError for
+    anything else. Loaded: market and params set, error None; failed: error set, market None,
+    params {}, hash None only when the file could not be read."""
+    match data := _json(line):
+        case {
+            "path": str(path),
+            "name": str(name),
+            "hash": str(digest),
+            "market": str(market),
+            "params": dict(),
+            "error": None,
+            **rest,
+        } if not rest and KEY.fullmatch(digest) and market in MARKETS:
+            pass
+        case {
+            "path": str(path),
+            "name": str(name),
+            "hash": digest,
+            "market": None,
+            "params": dict(params),
+            "error": str(error),
+            **rest,
+        } if (
+            not rest
+            and not params  # a mapping pattern `{}` would match any dict
+            and (digest is None or isinstance(digest, str) and KEY.fullmatch(digest))
+        ):
+            data["error"] = error[:ERROR_MAX]
+        case _:
+            raise ValueError(f"not a strategy description: {line[:200]!r}")
+    if path not in paths or name != Path(path).stem:
+        raise ValueError(f"not a file this child was given: {line[:200]!r}")
+    return data
 
 
 def strategy_user(settings: Settings) -> str | None:
@@ -160,6 +202,7 @@ class JobRunner:
         secret: str = "",
         idle: float = 30 * 60,
         expand_timeout: float = 60,
+        describe_timeout: float = 30,
     ) -> None:
         """`secret` (the session key): no env var holding it reaches the child."""
         self._settings = settings
@@ -167,6 +210,7 @@ class JobRunner:
         self._secret = secret
         self._idle = idle
         self._expand_timeout = expand_timeout
+        self._describe_timeout = describe_timeout
         self._dir = settings.data_dir / "jobs"
         self._lock = threading.Lock()
         self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
@@ -233,6 +277,42 @@ class JobRunner:
         if len(lines) != 1:
             raise ValueError(f"the strategy loader exited with code {code} without an answer")
         return parse_grid(lines[0], self._settings)
+
+    def describe(self, paths: Sequence[str]) -> list[dict[str, Any]]:
+        """`[{path, name, hash, market, params, error}]` in `paths` order, from an isolated child
+        that loads each strategy file (`parse_description`).
+
+        A file the child did not describe (isolation refusal, crash, timeout, bad output) gets
+        `error` with the reason and hash None. ValueError for a path not directly in
+        `strategies_dir`: the child executes every file it is given.
+        """
+        for p in paths:
+            if Path(p).parent != self._settings.strategies_dir:
+                raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")
+        if not paths:
+            return []
+        answers: dict[str, dict[str, Any]] = {}
+        error = "the strategy loader stopped before describing this file"
+        try:
+            proc = self._spawn(["--describe"], {"paths": list(paths)})
+        except Exception as e:  # isolation refusal, or the child could not start
+            error = f"{type(e).__name__}: {e}"
+        else:
+            try:
+                for line in _read(proc, self._describe_timeout):
+                    try:
+                        entry = parse_description(line, paths)
+                    except ValueError:
+                        log.warning("strategy loader: ignored child output %r", line[:200])
+                        continue
+                    answers.setdefault(entry["path"], entry)
+            except TimeoutError:
+                error = f"loading the strategies took over {self._describe_timeout:g} s"
+            finally:
+                _kill_group(proc.pid)  # first: a child that closed stdout may still hang
+                proc.wait()
+        failed = {"hash": None, "market": None, "params": {}, "error": error}
+        return [answers.get(p) or {"path": p, "name": Path(p).stem} | failed for p in paths]
 
     def submit(self, grid: Sequence[GridItem], include_holdout: bool) -> Job:
         created = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")

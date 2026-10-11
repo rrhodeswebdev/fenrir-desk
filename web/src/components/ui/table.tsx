@@ -1,6 +1,9 @@
 import * as React from "react"
 import { cn } from "@/lib/utils"
 
+// DESIGN.md "Journal Tape": an unstyled table. 1px Hairline rows, Label-type heads, no fills;
+// hover and selected rows take the one tonal step (Night Deep).
+
 function Table({ className, ...props }: React.ComponentProps<"table">) {
   return (
     <div

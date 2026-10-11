@@ -33,7 +33,7 @@ def _invalid(detail: str, errors: list[dict]) -> JSONResponse:
 
 
 def _relative(e: ValueError, rules_dir: Path) -> str:
-    """The loader's message with file paths relative to `rules_dir`, so the UI shows `lucid/x.yaml`."""
+    """The loader's message with paths relative to `rules_dir`, so the UI shows `lucid/x.yaml`."""
     return str(e).replace(f"{rules_dir}{os.sep}", "")
 
 

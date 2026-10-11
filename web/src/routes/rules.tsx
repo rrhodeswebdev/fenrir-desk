@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { errorText, pageError } from '@/errorText'
-import { errorsAt, fieldErrors, getIn, setIn, type FieldError, type Path } from '@/rulesForm'
+import { errorsAt, fieldErrors, getIn, removeAt, setIn, type FieldError, type Path } from '@/rulesForm'
 import { rootRoute } from './root'
 
 /** One `GET /api/rules` row (contracts: Plan 15). */
@@ -182,7 +182,34 @@ const EMPTY_EVALUATION = {
   min_trading_days: 0,
 }
 
-/** Every field 15.3 edits. payout.min_day_profit/max_amount/max_payouts and funded.scaling come in #54; until then they round-trip untouched. */
+type Tier = { from_profit: unknown; max_minis: unknown }
+const SCALING: Path = ['funded', 'scaling']
+const NEW_TIER: Tier = { from_profit: '', max_minis: '' }
+
+/** funded.scaling, one row pair per tier; a tier-order error shows at the list's own loc (Optional's Errors). */
+function ScalingTiers({ f }: { f: Form }) {
+  const tiers = (getIn(f.rules, SCALING) ?? []) as Tier[]
+  return (
+    <>
+      {tiers.map((_, i) => (
+        <div key={i} className="border-b py-2">
+          <Num f={f} path={[...SCALING, i, 'from_profit']} label={`Tier ${i + 1} from profit`} />
+          <Num f={f} path={[...SCALING, i, 'max_minis']} label={`Tier ${i + 1} max minis`} />
+          <Errors f={f} path={[...SCALING, i]} />
+          {/* the last tier goes with "No scaling", so the list is never empty */}
+          <Button type="button" size="sm" disabled={tiers.length === 1} onClick={() => f.set(SCALING, removeAt(tiers, i))}>
+            Remove tier {i + 1}
+          </Button>
+        </div>
+      ))}
+      <Button type="button" size="sm" className="mt-2" onClick={() => f.set(SCALING, [...tiers, NEW_TIER])}>
+        Add tier
+      </Button>
+    </>
+  )
+}
+
+/** Every schema field, field by field. */
 function RulesFields({ f }: { f: Form }) {
   return (
     <>
@@ -204,7 +231,15 @@ function RulesFields({ f }: { f: Form }) {
         <Num f={f} path={['funded', 'payout', 'split_pct']} label="Split %" />
         <Num f={f} path={['funded', 'payout', 'min_days']} label="Min days" />
         <Num f={f} path={['funded', 'payout', 'min_profit']} label="Min request" />
+        <Num f={f} path={['funded', 'payout', 'min_day_profit']} label="Min day profit" />
+        <NullableNum f={f} path={['funded', 'payout', 'max_amount']} label="Max per payout" />
+        <NullableNum f={f} path={['funded', 'payout', 'max_payouts']} label="Max payouts" />
         <Errors f={f} path={['funded', 'payout']} />
+      </Section>
+      <Section legend="Scaling">
+        <Optional f={f} path={SCALING} none="No scaling (max minis throughout)" empty={[{ ...NEW_TIER, from_profit: 0 }]}>
+          <ScalingTiers f={f} />
+        </Optional>
       </Section>
       <Section legend="Session">
         <Text f={f} path={['session', 'flat_by']} label="Flat by (HH:MM)" />

@@ -115,7 +115,10 @@ def period_result(
                 [d, c] for d, c in sorted(Counter(r.days_to_pass for r in passed).items())
             ],
         },
-        "failure_reasons": dict(sorted(failures.items())),
+        # every key always present; Counter drops zeros
+        "failure_reasons": dict(
+            sorted(({"flat_by": 0, "max_drawdown": 0, "no_result": 0} | failures).items())
+        ),
         "payout_rate": len(paid) / len(passed) if passed else 0.0,
         "median_days_to_payout": _median([r.days_to_payout for r in paid]),
         "median_first_payout": _median([r.first_payout for r in paid]),

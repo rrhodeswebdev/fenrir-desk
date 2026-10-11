@@ -83,6 +83,11 @@ def test_empty_medians_are_null():
     assert p["sample_equity"] == []
 
 
+def test_failure_reasons_always_has_every_key():
+    p = period_result([res(DAYS[0], "no_result")] * 2, make_rules(), DAYS[0], DAYS[0])
+    assert p["failure_reasons"] == {"flat_by": 0, "max_drawdown": 0, "no_result": 2}
+
+
 def period(p_pass_and_payout: float):
     return {
         **period_result(RESULTS, make_rules(), DAYS[0], DAYS[-1]),

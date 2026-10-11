@@ -335,6 +335,24 @@ def test_a_grid_loads_each_series_once_in_the_parent(settings, monkeypatch, spy_
     assert loads == ["NQ", "NQ"]  # a new data_version loads again
 
 
+def test_a_new_series_drops_the_idle_workers_before_loading(settings, monkeypatch, spy_pool):
+    pool_at_load = []
+
+    def counted(*a, **k):
+        pool_at_load.append(run_module._pool)
+        return load_bars(*a, **k)
+
+    monkeypatch.setattr("fenrir.backtest.run.load_bars", counted)
+    run_backtest(ORB, ACCOUNT, "MNQ", settings, include_holdout=False)
+    assert run_module._pool is not None and spy_pool["cancel"] == []
+    day = date(2025, 10, 1)
+    code = front_month(load_instruments(), "NQ", day)
+    write_bars(settings.data_dir, "NQ", code, day_bars(day, 0, code))  # a new data_version
+    run_backtest(ORB, ACCOUNT, "MNQ", settings, include_holdout=False)
+    assert pool_at_load == [None, None]  # no workers alive while the parent loaded
+    assert spy_pool["cancel"] == [True] and spy_pool["pools"] == 2
+
+
 def test_a_worker_loads_each_series_once_across_items(settings, monkeypatch):
     items = [(ORB, ACCOUNT, contract, settings, False) for contract in ("MNQ", "NQ")]
     seen = [run_module._plan(a, settings.holdout_months)[2] for a in items]  # keeps no bars

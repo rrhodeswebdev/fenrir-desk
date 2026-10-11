@@ -76,6 +76,7 @@ def worker_cap(memory: int | None, cpus: int, bars: int) -> tuple[int, int]:
     """
     if memory is None:
         return min(2, cpus), 0  # unknown limit: stay small rather than swap
+    # parent counted as PROCESS_BYTES (0.2 GB); measured 0.79 GB after a load, within the headroom
     free = memory * BUDGET_PCT // 100 - PROCESS_BYTES
     per_worker = PROCESS_BYTES + BYTES_PER_BAR * bars
     return max(1, min(cpus, free // per_worker)), max(0, per_worker - free)
@@ -116,7 +117,10 @@ def _once(name: str, key, make: Callable):
 
 
 def release() -> None:
-    """Shut the shared workers down and forget the memoized inputs, freeing their memory."""
+    """Shut the shared workers down and forget the memoized inputs, freeing their memory.
+
+    Takes the run lock, which is not reentrant: never call it from an `on_progress` callback.
+    """
     with _lock:
         _drop_pool()
         _memo.clear()
@@ -219,6 +223,7 @@ def _plan(load_args, holdout_months: int):
     strategy, rules, _, rules_hash, bars_key = _load(*load_args)
 
     def split():
+        _drop_pool()  # idle workers hold the old series: free it before the parent's load peak
         bars = _load_bars(bars_key)
         if not bars:
             raise ValueError(

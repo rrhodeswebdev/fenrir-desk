@@ -1,3 +1,5 @@
+import errno
+import socket
 import stat
 
 import pytest
@@ -7,14 +9,30 @@ from fenrir.cli import serve as serve_mod
 from fenrir.cli.main import app
 
 
+def free_port():
+    with socket.create_server(("127.0.0.1", 0)) as s:
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def port():
+    return free_port()
+
+
 @pytest.fixture
 def runs(monkeypatch, tmp_path):
-    """Run in tmp_path (no repo .env); record each uvicorn.run call instead of serving."""
+    """Run in tmp_path (no repo .env); record each server run (app, bound addresses), not serve."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
     monkeypatch.delenv("FENRIR_PRIVATE_DIR", raising=False)
     calls = []
-    monkeypatch.setattr(serve_mod.uvicorn, "run", lambda a, **kw: calls.append((a, kw)))
+
+    def run(self, sockets=None):
+        calls.append((self.config.app, [s.getsockname()[:2] for s in sockets]))
+        for s in sockets:
+            s.close()
+
+    monkeypatch.setattr(serve_mod.uvicorn.Server, "run", run)
     return calls
 
 
@@ -25,31 +43,56 @@ def built(path):
 
 
 def invoke(*args, env=None):
-    return CliRunner().invoke(app, ["serve", *args], env=env)
+    return CliRunner().invoke(app, ["serve", "--port", str(free_port()), *args], env=env)
 
 
 def launch_code(output):
     return output.split("/launch?code=")[1].split()[0]
 
 
-def test_binds_loopback_only(runs, tmp_path):
-    result = invoke("--port", "8123", "--static-dir", str(built(tmp_path / "dist")))
+def test_binds_both_loopback_addresses_only(runs, tmp_path, port):
+    result = invoke("--port", str(port), "--static-dir", str(built(tmp_path / "dist")))
     assert result.exit_code == 0, result.output
-    assert [kw for _, kw in runs] == [{"host": "127.0.0.1", "port": 8123}]
+    assert [addrs for _, addrs in runs] == [[("127.0.0.1", port), ("::1", port)]]
     assert "UI not built" not in result.output
 
 
-def test_prints_launch_url_with_a_fresh_code_each_start(runs):
-    first, second = invoke("--port", "8123"), invoke("--port", "8123")
-    assert "Open http://localhost:8123/launch?code=" in first.output
+def test_no_ipv6_loopback_falls_back_to_127_with_a_warning(runs, monkeypatch, port):
+    create_server = socket.create_server
+
+    def no_v6(address, **kw):
+        if address[0] == "::1":
+            raise OSError(errno.EADDRNOTAVAIL, "Can't assign requested address")
+        return create_server(address, **kw)
+
+    monkeypatch.setattr(serve_mod.socket, "create_server", no_v6)
+    result = invoke("--port", str(port))
+    assert result.exit_code == 0, result.output
+    assert "no IPv6 loopback" in result.output
+    assert [addrs for _, addrs in runs] == [[("127.0.0.1", port)]]
+
+
+@pytest.mark.parametrize("family, host", [(socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")])
+def test_port_taken_on_either_address_exits_1_before_the_link(runs, port, family, host):
+    with socket.create_server((host, port), family=family):
+        result = invoke("--port", str(port))
+    assert result.exit_code == 1
+    assert f"cannot listen on port {port}" in result.output
+    assert "launch?code=" not in result.output
+    assert runs == []
+
+
+def test_prints_launch_url_with_a_fresh_code_each_start(runs, port):
+    first, second = invoke("--port", str(port)), invoke("--port", str(port))
+    assert f"Open http://localhost:{port}/launch?code=" in first.output
     assert launch_code(first.output) != launch_code(second.output)
     assert runs[0][0].state.allowed_origins == frozenset(
-        {"http://localhost:8123", "http://127.0.0.1:8123"}
+        {f"http://localhost:{port}", f"http://127.0.0.1:{port}"}
     )
 
 
 def test_dev_prints_the_vite_url(runs):
-    result = invoke("--port", "8123", "--dev")
+    result = invoke("--dev")
     assert "Open http://localhost:5173/launch?code=" in result.output
     assert "http://localhost:5173" in runs[0][0].state.allowed_origins
 
@@ -70,13 +113,46 @@ def test_default_private_dir_is_data_private(runs, tmp_path):
     assert (tmp_path / "data" / "private" / "session.key").is_file()
 
 
-def test_empty_session_key_is_refused(runs, tmp_path):
+@pytest.fixture
+def key_path(tmp_path):
     (tmp_path / "data" / "private").mkdir(parents=True)
-    (tmp_path / "data" / "private" / "session.key").write_text("")
+    return tmp_path / "data" / "private" / "session.key"
+
+
+def refused(message):
     result = invoke()
     assert result.exit_code == 1
-    assert "session.key is empty" in result.output
+    assert message in result.output
+    assert "launch?code=" not in result.output
+
+
+def test_short_session_key_is_refused(runs, key_path):
+    key_path.write_text("x" * 31)
+    key_path.chmod(0o600)
+    refused("under 32 characters")
     assert runs == []
+
+
+def test_loose_session_key_mode_is_refused(runs, key_path):
+    key_path.write_text("x" * 43)
+    key_path.chmod(0o644)
+    refused("chmod 600 it or delete it")
+    assert runs == []
+
+
+def test_symlinked_session_key_is_refused(runs, key_path, tmp_path):
+    (tmp_path / "elsewhere").write_text("x" * 43)
+    (tmp_path / "elsewhere").chmod(0o600)
+    key_path.symlink_to(tmp_path / "elsewhere")
+    refused("is a symlink")
+    assert runs == []
+
+
+def test_existing_0600_key_of_32_chars_is_used(runs, key_path):
+    key_path.write_text("k" * 32 + "\n")
+    key_path.chmod(0o600)
+    assert invoke().exit_code == 0
+    assert runs[0][0].state.session_key == "k" * 32
 
 
 def test_without_build_prints_ui_not_built_and_serves_the_api(runs, tmp_path):

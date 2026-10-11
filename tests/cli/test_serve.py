@@ -1,4 +1,5 @@
 import errno
+import os
 import socket
 import stat
 
@@ -147,6 +148,15 @@ def test_symlinked_session_key_is_refused(runs, key_path, tmp_path):
     (tmp_path / "elsewhere").chmod(0o600)
     key_path.symlink_to(tmp_path / "elsewhere")
     refused("is a symlink")
+    assert runs == []
+
+
+def test_session_key_owned_by_another_user_is_refused(runs, key_path, monkeypatch):
+    key_path.write_text("x" * 43)
+    key_path.chmod(0o600)
+    euid = os.geteuid()
+    monkeypatch.setattr(serve_mod.os, "geteuid", lambda: euid + 1)
+    refused("owned by another user")
     assert runs == []
 
 

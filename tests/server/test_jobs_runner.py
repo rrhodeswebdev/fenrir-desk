@@ -14,6 +14,7 @@ from backtest_helpers import D1, D2, D3, bar, rules_data
 from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import front_month, load_instruments
 from fenrir.data.store import write_bars
+from fenrir.server import jobs_runner
 from fenrir.server.jobs import Job, JobItem, to_json
 from fenrir.server.jobs_runner import (
     CHILD,
@@ -257,33 +258,27 @@ def test_isolation_refusal_errors_the_items(make, tmp_path, monkeypatch):
     runner.start()
     job = runner.submit(grid(tmp_path, "orb"), True)
     wait_for(lambda: finished(runner, job.id))
-    assert runner.get(job.id).items[0].error.startswith("ValueError: refusing to run strategy")
+    error = runner.get(job.id).items[0].error
+    assert error.startswith("ValueError: refusing to run strategy")
+    assert "FENRIR_PTY_USER is unset" in error  # the shared isolation check's reasons
 
 
-def test_strategy_user():
-    assert strategy_user({}) is None
-    assert strategy_user({"FENRIR_PTY_USER": "claude"}) == "claude"
-    for env in (
-        {"FENRIR_BIND_ALL": "1"},
-        {"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "root"},
-        {"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "no-such-user-here"},
-    ):
-        with pytest.raises(ValueError, match="refusing to run strategy"):
-            strategy_user(env)
+def test_strategy_user_natively(monkeypatch):
+    monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
+    monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
+    assert strategy_user(Settings()) is None
+    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
+    assert strategy_user(Settings()) == "claude"
 
 
-def test_strategy_user_refuses_group_0_in_the_image(monkeypatch):
-    import pwd
-
-    class Pw:
-        pw_uid, pw_gid = 1000, 0
-
-    monkeypatch.setattr(pwd, "getpwnam", lambda _name: Pw)
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
-    with pytest.raises(ValueError, match="refusing to run strategy"):
-        strategy_user({"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "claude"})
-    Pw.pw_gid = 1000
-    assert strategy_user({"FENRIR_BIND_ALL": "1", "FENRIR_PTY_USER": "claude"}) == "claude"
+def test_strategy_user_refuses_with_the_isolation_reasons(monkeypatch):
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
+    monkeypatch.setattr(jobs_runner, "isolation_problems", lambda s: ["first", "second"])
+    with pytest.raises(ValueError, match="refusing to run strategy code: first; second"):
+        strategy_user(Settings())
+    monkeypatch.setattr(jobs_runner, "isolation_problems", lambda s: [])
+    assert strategy_user(Settings()) == "claude"
 
 
 K = "a" * 64

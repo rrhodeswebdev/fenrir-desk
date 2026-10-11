@@ -183,7 +183,9 @@ def _mark(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
     sim = _event(sim, env, mark)
     if isinstance(sim, AttemptResult) or not sim.account.halted_today:
         return sim
-    return _close(sim, env, _dll_exit(sim, env, bar), bar.ts)
+    sim = _close(sim, env, _dll_exit(sim, env, bar), bar.ts)
+    # the exit's slippage and commission are realized now: check them against the floor this bar
+    return sim if isinstance(sim, AttemptResult) else _event(sim, env, Mark(bar.ts, 0.0, 0.0, 0.0))
 
 
 def _dll_exit(sim: _Sim, env: _Env, bar: Bar) -> float:

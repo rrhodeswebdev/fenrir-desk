@@ -85,10 +85,15 @@ def test_invalid_bracket_is_ignored():
 
 def test_one_position_at_a_time():
     r = attempt(
-        [DECIDE, bar("09:31", 100.5, 102, 100, 101), bar("09:32", 101, 105.5, 100.5, 105)],
+        [
+            DECIDE,
+            bar("09:31", 100.5, 102, 100, 101),
+            bar("09:32", 101, 105.5, 100.5, 105),
+            bar("09:33", 105, 106, 104.5, 105),
+        ],
         {"09:30": [LONG, LONG], "09:31": [LONG]},
     )
-    assert len(r.fills) == 2
+    assert fills(r) == [(1, 100.75), (-1, 105.0)]
 
 
 def test_pretrade_check_rejects_bracket_that_could_breach():
@@ -147,3 +152,23 @@ def test_daily_loss_limit_flattens_and_halts_the_day():
         (-1, 97.0),
     ]  # flattened at the limit 97.25 - 1 tick; 09:33 entry refused
     assert (r.outcome, r.breach) == ("no_result", None)  # a day halt, not a failure
+
+
+def test_daily_loss_limit_exit_slippage_can_breach_drawdown():
+    # DLL hit at -100 (drawdown 104 not touched); the exit one tick lower realizes -105 <= -104
+    dll_long = Bracket("long", 1, 97.0, 105.0)
+    r = attempt(
+        [
+            DECIDE,
+            bar("09:31", 102, 102.5, 101.5, 102),
+            bar("09:32", 101, 101, 97.25, 97.5),
+        ],
+        {"09:30": [dll_long]},
+        daily_loss=100.0,
+        drawdown=104.0,
+    )
+    assert (r.outcome, r.breach.rule, r.breach.ts) == (
+        "breached",
+        "max_drawdown",
+        bar("09:32", 0, 0, 0, 0).ts,
+    )

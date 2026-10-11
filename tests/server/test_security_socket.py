@@ -117,7 +117,7 @@ def test_cross_origin_write_403(port):
     assert status(request(port, put, headers=cookie() + f"Origin: {EVIL}\r\n")) == 403
     assert status(request(port, put, headers=cookie())) == 403
     # the same write from our own origin passes the guard and reaches the route
-    assert status(request(port, put, headers=cookie() + origin(port))) not in (401, 403)
+    assert status(request(port, put, headers=cookie() + origin(port))) == 404  # no such account
 
 
 def test_refused_websocket_handshake_is_http_403(port):
@@ -130,8 +130,10 @@ def test_refused_websocket_handshake_is_http_403(port):
 
 def test_good_websocket_handshake_is_accepted(port):
     # connect() raises unless the handshake answers 101
+    # the server listens on 127.0.0.1 only; connect there so nothing on ::1 can answer
     with connect(
         f"ws://localhost:{port}/ws/probe",
+        sock=socket.create_connection(("127.0.0.1", port), timeout=5),
         origin=f"http://localhost:{port}",
         additional_headers={"Cookie": f"{SESSION_COOKIE}={KEY}"},
         open_timeout=5,

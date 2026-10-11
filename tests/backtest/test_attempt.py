@@ -217,3 +217,47 @@ def test_flat_by_bar_low_is_checked_against_the_daily_loss_limit():
         daily_loss=80.0,
     )
     assert fills(r) == [(1, 100.75), (-1, 96.5)]  # DLL level 96.75 - 1 tick, not the 100.25 close
+
+
+def test_flatten_after_bracket_drops_it():
+    r = attempt([DECIDE, bar("09:31", 100.5, 102, 100, 101)], {"09:30": [LONG, Flatten()]})
+    assert fills(r) == []
+
+
+def test_short_daily_loss_limit_exit():
+    # entry gaps to 97.75; the high 102.75 is worth -100 (stop 103 untouched): exit 102.75 + tick
+    r = attempt(
+        [DECIDE, bar("09:31", 98, 98.5, 97.5, 98), bar("09:32", 99, 102.75, 98.5, 102.5)],
+        {"09:30": [Bracket("short", 1, 103.0, 95.0)]},
+        daily_loss=100.0,
+    )
+    assert fills(r) == [(-1, 97.75), (1, 103.0)]
+
+
+def test_daily_loss_limit_gap_fills_at_the_open():
+    # the DLL level is 97.25, but the bar opens at 97 (stop 96 untouched): exit 97 - tick
+    r = attempt(
+        [DECIDE, bar("09:31", 102, 102.5, 101.5, 102), bar("09:32", 97, 97.5, 96.5, 97)],
+        {"09:30": [Bracket("long", 1, 96.0, 105.0)]},
+        daily_loss=100.0,
+    )
+    assert fills(r) == [(1, 102.25), (-1, 96.75)]
+
+
+def test_daily_loss_limit_room_counts_the_day_realized_loss():
+    # -60 realized first leaves 40 of room: the second trade exits at 99.25 - 40 / 20 - tick
+    r = attempt(
+        [
+            DECIDE,
+            bar("09:31", 100, 100.5, 99.75, 100),  # entry 100.25
+            bar("09:32", 97.5, 98, 97.5, 98),  # flatten at 97.25: -60
+            bar("09:33", 99, 99.5, 97.25, 97.5),  # entry gaps to 99.25; low worth -40
+        ],
+        {
+            "09:30": [Bracket("long", 1, 97.0, 105.0)],
+            "09:31": [Flatten()],
+            "09:32": [Bracket("long", 1, 96.5, 105.0)],
+        },
+        daily_loss=100.0,
+    )
+    assert fills(r) == [(1, 100.25), (-1, 97.25), (1, 99.25), (-1, 97.0)]

@@ -5,7 +5,7 @@ import { Page } from '@/components/page'
 import { StateText, type Tone } from '@/components/state-text'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { errorText } from '@/errorText'
+import { pageError } from '@/errorText'
 import { rootRoute } from './root'
 
 /** One `GET /api/rules` row (contracts: Plan 15). */
@@ -17,11 +17,12 @@ export type RuleRow = {
   error: string | null
 }
 
-/** The row's status: Red for a file that does not load, Ember when never verified or older than 30 days. */
+/** The row's status: Red for a file that does not load, Ember when never verified, future-dated or older than 30 days. */
 export function freshness(row: RuleRow): { tone: Tone; text: string } {
   if (row.error) return { tone: 'alarm', text: 'Invalid file' }
   if (row.verified_on === null || row.age_days === null) return { tone: 'caution', text: 'Never verified' }
   const age = row.age_days
+  if (age < 0) return { tone: 'caution', text: 'Verified in the future' }
   const text = age === 0 ? 'Verified today' : `Verified ${age} ${age === 1 ? 'day' : 'days'} ago`
   return { tone: row.stale ? 'caution' : 'normal', text }
 }
@@ -29,10 +30,11 @@ export function freshness(row: RuleRow): { tone: Tone; text: string } {
 function RulesPage() {
   const { account } = rulesRoute.useSearch()
   const rows = useQuery({ queryKey: ['rules'], queryFn: () => apiFetch<RuleRow[]>('/api/rules') })
+  const error = pageError(rows.error)
   return (
     <Page title="Rules">
-      {rows.error && <p className="text-red">{errorText(rows.error)}</p>}
-      {rows.data?.length === 0 && <p className="text-ink-2">No rule files in rules/.</p>}
+      {error && <p className="text-red">{error}</p>}
+      {rows.data?.length === 0 && <p className="text-ink-2">No rule files.</p>}
       {!!rows.data?.length && (
         <Table>
           <TableHeader>

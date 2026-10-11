@@ -1,5 +1,6 @@
 """Rules API (contracts: Plan 15): list accounts, read one as JSON, save a form edit."""
 
+import os
 from datetime import date
 from pathlib import Path
 
@@ -23,12 +24,17 @@ def staleness(verified_on: date | None, today: date) -> dict:
     return {
         "verified_on": verified_on.isoformat(),
         "age_days": age,
-        "stale": age > STALE_AFTER_DAYS,
+        "stale": age < 0 or age > STALE_AFTER_DAYS,  # a future date is a typo, not fresh
     }
 
 
 def _invalid(detail: str, errors: list[dict]) -> JSONResponse:
     return JSONResponse({"detail": detail, "errors": errors}, status_code=422)
+
+
+def _relative(e: ValueError, rules_dir: Path) -> str:
+    """The loader's message with file paths relative to `rules_dir`, so the UI shows `lucid/x.yaml`."""
+    return str(e).replace(f"{rules_dir}{os.sep}", "")
 
 
 def _load(aid: str, rules_dir: Path) -> tuple[dict, AccountRules | None]:
@@ -38,7 +44,7 @@ def _load(aid: str, rules_dir: Path) -> tuple[dict, AccountRules | None]:
     except ValueError as e:
         return {
             "id": aid,
-            "error": str(e),
+            "error": _relative(e, rules_dir),
             "verified_on": None,
             "age_days": None,
             "stale": None,
@@ -88,5 +94,5 @@ async def save_rules(aid: str, request: Request):
         # inline in an async handler on purpose: saves run one at a time, never sharing the tmp file
         write_account(rules_path(aid, rules_dir), rules)
     except ValueError as e:  # the file on disk is broken, or the edit would not read back
-        return _invalid(str(e), [])
+        return _invalid(_relative(e, rules_dir), [])
     return {"id": aid, "error": None, **staleness(rules.verified_on, date.today())}

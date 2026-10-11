@@ -170,11 +170,6 @@
   }
 }
 
-/* Unlayered so it beats shadcn Table's bg-muted (Unlit) on selected rows. */
-[data-slot="table-row"][data-state="selected"] {
-  background: var(--ground-deep);
-}
-
 @media (prefers-reduced-motion: reduce) {
   *,
   ::before,

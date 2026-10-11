@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './api'
-import { SESSION_EXPIRED, errorText } from './errorText'
+import { SESSION_EXPIRED, errorText, pageError } from './errorText'
 
 describe('errorText', () => {
   it.each([
@@ -18,6 +18,11 @@ describe('errorText', () => {
     ['boom', 'boom'],
   ])('%o → %s', (e, expected) => {
     expect(errorText(e)).toBe(expected)
+  })
+
+  it('pageError leaves a 401 to the shell banner and reports anything else', () => {
+    expect(pageError(new ApiError(401, ''))).toBeNull()
+    expect(pageError(new ApiError(500, 'boom'))).toBe('500: boom')
   })
 
   it('names the restart command for an expired session', () => {

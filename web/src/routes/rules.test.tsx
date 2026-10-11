@@ -20,6 +20,7 @@ describe('freshness', () => {
     [row({ age_days: 1 }), 'normal', 'Verified 1 day ago'],
     [row({ age_days: 0 }), 'normal', 'Verified today'],
     [row({ age_days: 31, stale: true }), 'caution', 'Verified 31 days ago'],
+    [row({ verified_on: '2026-10-12', age_days: -1, stale: true }), 'caution', 'Verified in the future'],
     [row({ verified_on: null, age_days: null, stale: true }), 'caution', 'Never verified'],
     [row({ verified_on: null, age_days: null, stale: null, error: 'bad yaml' }), 'alarm', 'Invalid file'],
   ] as const)('%#: %s', (r, tone, text) => {

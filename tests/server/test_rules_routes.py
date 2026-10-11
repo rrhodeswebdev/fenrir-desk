@@ -27,6 +27,15 @@ def test_staleness_boundary():
     assert staleness(today - timedelta(days=31), today)["stale"] is True
 
 
+def test_future_verification_is_stale():
+    today = date(2026, 10, 11)
+    assert staleness(today + timedelta(days=1), today) == {
+        "verified_on": "2026-10-12",
+        "age_days": -1,
+        "stale": True,
+    }
+
+
 def test_unverified_is_stale():
     assert staleness(None, date(2026, 10, 11)) == {
         "verified_on": None,
@@ -60,6 +69,8 @@ def test_list_has_every_account_and_survives_a_broken_file(env):
     assert rows[AID]["verified_on"] == "2026-10-10"
     assert "nope" in rows["lucid-broken-1k"]["error"]
     assert rows["lucid-broken-1k"]["stale"] is None
+    # paths are relative to rules_dir, never the absolute location on disk
+    assert rows["lucid-broken-1k"]["error"].startswith("lucid/broken-1k.yaml: ")
 
 
 def test_get_returns_rules_as_json(env):
@@ -170,6 +181,7 @@ def test_put_over_a_broken_file_is_422(env):
     r = client.put("/api/rules/lucid-broken-1k", json=rules, headers=WRITE)
     assert r.status_code == 422
     assert "nope" in r.json()["detail"]
+    assert r.json()["detail"].startswith("lucid/broken-1k.yaml: ")
     assert path.read_bytes() == before
 
 

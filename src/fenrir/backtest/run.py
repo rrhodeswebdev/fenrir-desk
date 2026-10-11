@@ -1,5 +1,7 @@
 """Run a backtest: load inputs, fan attempts out over CPU cores, build the report. Shell."""
 
+import json
+import multiprocessing
 from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime
@@ -65,9 +67,13 @@ def _load(
             f"{contract} trades {contract_spec.series} prices but {strategy.name} "
             f"is an {strategy.market} strategy"
         )
+    # hashed before the files are read, so the report names at most what was read
+    rules_hash = file_hash(rules_path(account_id, settings.rules_dir))
+    version = data_version(settings.data_dir)
     rules = with_dll(load_account(account_id, settings.rules_dir), dll_on)
     bars = load_bars(settings.data_dir, instruments, strategy.market)
-    return bars, strategy, rules, contract_spec
+    seen = (strategy.hash, rules_hash, version, len(bars))
+    return bars, strategy, rules, contract_spec, seen
 
 
 def _init_worker(*load_args) -> None:
@@ -75,20 +81,48 @@ def _init_worker(*load_args) -> None:
     _worker_inputs = _load(*load_args)
 
 
-def _run_chunk(ranges: tuple[tuple[int, int], ...]) -> list[tuple[tuple[int, int], AttemptResult]]:
-    bars, strategy, rules, contract_spec = _worker_inputs
+def _run_chunk(
+    expected: tuple, ranges: tuple[tuple[int, int], ...]
+) -> list[tuple[tuple[int, int], AttemptResult]]:
+    bars, strategy, rules, contract_spec, seen = _worker_inputs
+    # here, not in the initializer: a raise there would surface as a BrokenProcessPool
+    for what, want, got in zip(
+        ("strategy file", "rules file", "bar data", "bar count"), expected, seen, strict=True
+    ):
+        if want != got:
+            raise ValueError(f"{what} changed during the backtest; run it again")
     return [(r, run_attempt(bars, r[0], r[1], strategy, rules, contract_spec)) for r in ranges]
 
 
-def _run_all(ranges, load_args, on_progress) -> dict[tuple[int, int], AttemptResult]:
+def _run_all(ranges, load_args, expected, on_progress) -> dict[tuple[int, int], AttemptResult]:
     chunks = [tuple(ranges[k : k + CHUNK]) for k in range(0, len(ranges), CHUNK)]
     out: dict[tuple[int, int], AttemptResult] = {}
-    with ProcessPoolExecutor(initializer=_init_worker, initargs=load_args) as pool:
-        for future in as_completed([pool.submit(_run_chunk, c) for c in chunks]):
-            out.update(future.result())
-            if on_progress:
-                on_progress(len(out), len(ranges))
+    # spawn: fork can deadlock polars in the children, and Linux defaults to it
+    with ProcessPoolExecutor(
+        mp_context=multiprocessing.get_context("spawn"),
+        initializer=_init_worker,
+        initargs=load_args,
+    ) as pool:
+        try:
+            for future in as_completed([pool.submit(_run_chunk, expected, c) for c in chunks]):
+                out.update(future.result())
+                if on_progress:
+                    on_progress(len(out), len(ranges))
+        except BaseException:
+            pool.shutdown(cancel_futures=True)  # fail fast: don't run the queued chunks
+            raise
     return out
+
+
+def _plan(load_args, holdout_months: int):
+    """Load, split into periods, and return only what the parent needs, so the bars are freed."""
+    bars, strategy, rules, _, seen = _load(*load_args)
+    if not bars:
+        raise ValueError(
+            f"no {strategy.market} bars in {load_args[3].data_dir}; run `fenrir data pull`"
+        )
+    tuning, holdout = periods(bars, holdout_months)
+    return strategy, rules, seen, tuning, holdout
 
 
 def run_backtest(
@@ -108,10 +142,18 @@ def run_backtest(
         settings,
         dll_on,
     )  # workers get the same choice
-    bars, strategy, rules, _ = _load(*load_args)
-    tuning, holdout = periods(bars, settings.holdout_months)
+    strategy, rules, seen, tuning, holdout = _plan(load_args, settings.holdout_months)
+    try:
+        json.dumps(dict(strategy.params))
+    except TypeError as e:
+        raise ValueError(f"{strategy.name}: PARAMS must be JSON-serializable ({e})") from e
     run_periods = [tuning, holdout] if include_holdout and holdout else [tuning]
-    results = _run_all([r for p in run_periods for r in p.ranges], load_args, on_progress)
+    results = _run_all(
+        [r for p in run_periods for r in p.ranges],
+        load_args,
+        seen,
+        on_progress,
+    )
 
     def summarize(p: Period):
         return period_result([results[r] for r in p.ranges], rules, p.start, p.end)
@@ -119,9 +161,9 @@ def run_backtest(
     return build_report(
         strategy=strategy,
         account_id=account_id,
-        rules_hash=file_hash(rules_path(account_id, settings.rules_dir)),
+        rules_hash=seen[1],
         contract=contract,
-        data_version=data_version(settings.data_dir),
+        data_version=seen[2],
         holdout_months=settings.holdout_months,
         include_holdout=include_holdout,
         dll_on=dll_on,

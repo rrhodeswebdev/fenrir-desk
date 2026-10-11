@@ -1,3 +1,4 @@
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
@@ -6,6 +7,7 @@ import pytest
 import yaml
 from backtest_helpers import et, rules_data
 
+from fenrir.backtest import run as run_module
 from fenrir.backtest.attempts import periods
 from fenrir.backtest.run import AccountChoice, load_account_choices, net_per_attempt, run_backtest
 from fenrir.core.bars import Bar
@@ -193,3 +195,86 @@ def test_net_per_attempt_subtracts_the_accounts_price():
     choices = {"lucid-flex-50k": AccountChoice(eval_price=120.0)}
     assert net_per_attempt(period, "lucid-flex-50k", choices) == 450.0
     assert net_per_attempt(period, "lucid-pro-50k", choices) == 570.0  # no entry = price 0
+
+
+@pytest.fixture
+def spy_pool(monkeypatch):
+    """A real pool that records its kwargs and every shutdown's cancel_futures."""
+    seen: dict = {"kwargs": None, "cancel": []}
+
+    class Spy(ProcessPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            seen["kwargs"] = kwargs
+            super().__init__(*args, **kwargs)
+
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            seen["cancel"].append(cancel_futures)
+            super().shutdown(wait, cancel_futures=cancel_futures)
+
+    monkeypatch.setattr("fenrir.backtest.run.ProcessPoolExecutor", Spy)
+    return seen
+
+
+def test_pool_spawns_its_workers(settings, spy_pool):
+    run_backtest(ORB, ACCOUNT, "MNQ", settings, include_holdout=False)
+    assert spy_pool["kwargs"]["mp_context"].get_start_method() == "spawn"
+
+
+def no_pool_allowed(monkeypatch):
+    def no_pool(*args, **kwargs):
+        pytest.fail("a process pool started before the inputs were checked")
+
+    monkeypatch.setattr("fenrir.backtest.run.ProcessPoolExecutor", no_pool)
+
+
+def test_no_bars_names_the_series_and_the_fix(settings, monkeypatch):
+    no_pool_allowed(monkeypatch)
+    empty = replace(settings, data_dir=settings.data_dir / "empty")
+    with pytest.raises(ValueError, match=r"no NQ bars in .*empty; run `fenrir data pull`"):
+        run_backtest(ORB, ACCOUNT, "MNQ", empty, include_holdout=False)
+
+
+def test_params_must_be_json_serializable(settings, tmp_path, monkeypatch):
+    no_pool_allowed(monkeypatch)
+    strategy = tmp_path / "timed.py"
+    strategy.write_text(
+        ORB.read_text()
+        .replace("from datetime import date", "from datetime import date, time")
+        .replace('PARAMS = {"range_min": 15,', 'PARAMS = {"at": time(9, 30), "range_min": 15,')
+    )
+    with pytest.raises(ValueError, match="timed.*PARAMS.*JSON"):
+        run_backtest(strategy, ACCOUNT, "MNQ", settings, include_holdout=False)
+
+
+def test_a_worker_that_loaded_different_inputs_is_an_error(settings, tmp_path, monkeypatch):
+    strategy = tmp_path / "orb.py"
+    strategy.write_text(ORB.read_text())
+    plan = run_module._plan
+
+    def edited_after_the_parent_loaded(*args):
+        out = plan(*args)
+        strategy.write_text(strategy.read_text() + "\n# edited\n")
+        return out
+
+    monkeypatch.setattr("fenrir.backtest.run._plan", edited_after_the_parent_loaded)
+    with pytest.raises(ValueError, match="strategy file changed during the backtest"):
+        run_backtest(strategy, ACCOUNT, "MNQ", settings, include_holdout=False)
+
+
+def test_a_worker_error_cancels_the_queued_chunks(settings, tmp_path, monkeypatch, spy_pool):
+    test_a_worker_that_loaded_different_inputs_is_an_error(settings, tmp_path, monkeypatch)
+    assert True in spy_pool["cancel"]
+
+
+@pytest.mark.parametrize(
+    ("changed", "label"),
+    [(0, "strategy file"), (1, "rules file"), (2, "bar data"), (3, "bar count")],
+)
+def test_each_changed_input_is_named(settings, changed, label, monkeypatch):
+    monkeypatch.setattr(run_module, "_worker_inputs", None)  # restored after the test
+    run_module._init_worker(ORB, ACCOUNT, "MNQ", settings, False)
+    expected = list(run_module._worker_inputs[-1])
+    run_module._run_chunk(tuple(expected), ())  # untampered: passes
+    expected[changed] = "tampered" if changed < 3 else -1
+    with pytest.raises(ValueError, match=f"{label} changed during the backtest"):
+        run_module._run_chunk(tuple(expected), ())

@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react'
-import { cn } from '@/lib/utils'
 
-/** Top strip (page title, then optional strip content such as the kill switch) above the page body. `className` overrides body padding. */
+/** Top strip (page title, then optional strip content such as the kill switch) above the page body. `className` replaces the default body padding. */
 export function Page({
   title,
   strip,
@@ -19,7 +18,7 @@ export function Page({
         <h1>{title}</h1>
         {strip}
       </header>
-      <div className={cn('p-8 max-md:px-4', className)}>{children}</div>
+      <div className={className ?? 'p-8 max-md:px-4'}>{children}</div>
     </>
   )
 }

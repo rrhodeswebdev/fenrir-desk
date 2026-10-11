@@ -24,7 +24,7 @@ describe('Page', () => {
     expect(html).toMatch(/^<header [^>]*><h1>Live<\/h1><button>Kill<\/button><\/header><div class="p-8 max-md:px-4"><p>body<\/p><\/div>$/)
   })
 
-  it('lets className override the body padding', () => {
-    expect(renderToStaticMarkup(<Page title="Workbench" className="p-0 max-md:p-0" />)).toContain('<div class="p-0 max-md:p-0">')
+  it('lets className replace the body padding', () => {
+    expect(renderToStaticMarkup(<Page title="Workbench" className="p-0" />)).toContain('<div class="p-0">')
   })
 })

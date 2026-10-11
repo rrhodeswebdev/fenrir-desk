@@ -1,6 +1,6 @@
 import { type QueryClient, useQueryClient } from '@tanstack/react-query'
 import { Link, Outlet, createRootRoute, useLocation } from '@tanstack/react-router'
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import mark from '../../../assets/brand/logo/fenrir-desk-mark-on-dark.svg'
 import { ApiError } from '@/api'
 import { Page } from '@/components/page'
@@ -25,8 +25,9 @@ export const sessionExpired = (client: QueryClient): boolean =>
 
 function Shell() {
   const client = useQueryClient()
+  const subscribe = useCallback((onChange: () => void) => client.getQueryCache().subscribe(onChange), [client])
   const snapshot = () => sessionExpired(client)
-  const expired = useSyncExternalStore((onChange) => client.getQueryCache().subscribe(onChange), snapshot, snapshot)
+  const expired = useSyncExternalStore(subscribe, snapshot, snapshot)
   const nav = useRef<HTMLElement>(null)
   const { pathname } = useLocation()
   // At <= 760px the rail is a scrolling strip: keep the active page in view.

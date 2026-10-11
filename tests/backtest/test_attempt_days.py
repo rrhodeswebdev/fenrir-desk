@@ -110,3 +110,32 @@ def test_daily_loss_halt_lifts_next_day():
     assert r.equity == (
         (et(D1, "09:32"), -105.0),
     )  # D2 trades: -105 + 85 = -20 (D2 is the last day, never closed)
+
+
+def test_data_gap_day_closed_names_the_closed_day(monkeypatch):
+    from fenrir.backtest import attempt as mod
+    from fenrir.rules.state import DayClosed
+
+    seen = []
+    real = mod.apply
+
+    def spy(rule_fns, account, event):
+        if isinstance(event, DayClosed):
+            seen.append(event.day)
+        return real(rule_fns, account, event)
+
+    monkeypatch.setattr(mod, "apply", spy)
+    bars = [
+        bar("09:30", 100, 100.5, 99.5, 100),
+        bar("09:31", 100.5, 102, 100, 101),
+        bar("09:30", 102, 102.5, 101.5, 102, D2),
+    ]
+    attempt(bars, {"09:30": [LONG]})
+    assert seen == [D1]
+
+
+def test_pending_bracket_does_not_fill_past_flat_by():
+    bars = [bar("16:30", 100, 100.5, 99.5, 100), bar("16:50", 100, 100.5, 99.5, 100)]
+    r = attempt(bars, {"16:30": [LONG]})
+    assert r.fills == ()
+    assert r.outcome != "breached"

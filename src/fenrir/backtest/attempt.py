@@ -163,6 +163,8 @@ def _fill_pending(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
         if isinstance(sim, AttemptResult):
             return sim
     sim = replace(sim, exit_requested=False)
+    if _late(bar, env):  # past flat-by: never open
+        return replace(sim, pending=None)
     if sim.pending is None or sim.position is not None:
         return sim
     return _open(sim, env, sim.pending, bar)
@@ -270,11 +272,12 @@ def _roll_day(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
     day = trading_day(bar.ts)
     if day == sim.account.day:
         return sim
+    prev = sim.account.day  # a gap-close fill re-dates the account to the new day
     if sim.position is not None:  # data gap skipped flat-by: exit at the first bar we have
         sim = _close(sim, env, market_exit(sim.position.qty, bar.open, env.spec.tick), bar.ts)
         if isinstance(sim, AttemptResult):
             return sim
-    closed = DayClosed(day=sim.account.day, ts=bar.ts)
+    closed = DayClosed(day=prev, ts=bar.ts)
     sim = _event(replace(sim, pending=None, exit_requested=False), env, closed)
     if isinstance(sim, AttemptResult):
         return sim

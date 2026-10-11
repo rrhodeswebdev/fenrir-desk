@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* Dark only (DESIGN.md): the root palette is the dark palette, so every dark: variant applies. */
+@custom-variant dark (&:where(*));
+
+/* Drop Tailwind's defaults that DESIGN.md forbids: other colours (no green), radius, shadows. */
+@theme {
+  --color-*: initial;
+  --radius-*: initial;
+  --shadow-*: initial;
+  --inset-shadow-*: initial;
+  --drop-shadow-*: initial;
+  --text-shadow-*: initial;
+  --breakpoint-md: 47.5rem; /* 760px, DESIGN.md Layout */
+}
+
+/* Token block copied from DESIGN.md "shadcn/ui and Tailwind v4 mapping"; values live there. */
+:root {
+  color-scheme: dark;
+
+  /* Fenrir tokens */
+  --ground: #0E1116;
+  --ground-deep: #0A0C10;
+  --rule: #262D37;
+  --rule-strong: #3A4350;
+  --idle: #1E242D;
+  --ink: #E8EEF4;
+  --ink-2: #C9D3DD;
+  --ink-3: #8FA0B2;
+  --ember: #E0A33A;
+  --red: #E5484D;
+  --track-label: 0.24em;
+  --track-value: 0.04em;
+  --step: 90ms;
+
+  /* shadcn theme variables (dark only, no .dark block) */
+  --radius: 0rem;
+  --background: var(--ground);
+  --foreground: var(--ink);
+  --card: var(--ground);              /* Card is replaced by the sleeve; no fill */
+  --card-foreground: var(--ink);
+  --popover: var(--ground);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);              /* neutral on purpose: a stray default never adds colour */
+  --primary-foreground: var(--ground);
+  --secondary: var(--idle);
+  --secondary-foreground: var(--ink);
+  --muted: var(--idle);
+  --muted-foreground: var(--ink-3);
+  --accent: var(--ground-deep);       /* hover/selected row ground */
+  --accent-foreground: var(--ink);
+  --destructive: var(--red);
+  --destructive-foreground: var(--ground);
+  --border: var(--rule);
+  --input: var(--ink-3);              /* control outlines */
+  --ring: var(--ember);               /* focus outline */
+  --chart-1: var(--ink);              /* live trace */
+  --chart-2: var(--ink-2);            /* normal / target */
+  --chart-3: var(--ink-3);            /* rings, overnight */
+  --chart-4: var(--ember);            /* caution only */
+  --chart-5: var(--red);              /* breach only */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-ground: var(--ground);
+  --color-ground-deep: var(--ground-deep);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-idle: var(--idle);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-ember: var(--ember);
+  --color-red: var(--red);
+
+  --font-display: "Chakra Petch", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-sans: var(--font-mono);      /* body is mono */
+
+  --tracking-label: var(--track-label);
+  --tracking-value: var(--track-value);
+
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+
+  --ease-trace: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Label: 11px tracked mono caps in Slate. */
+@utility label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* Value: every data figure. */
+@utility value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: var(--track-value);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* Stepped state switch: 90ms steps(2), no easing. */
+@utility step {
+  transition-property: color, background-color, border-color, box-shadow, outline-color;
+  transition-duration: var(--step);
+  transition-timing-function: steps(2);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-strong) transparent;
+  }
+  body {
+    @apply bg-background font-mono text-[13px] leading-normal text-foreground tabular-nums antialiased;
+  }
+  h1 {
+    @apply font-display text-[15px] leading-none font-semibold tracking-[0.3em] uppercase;
+  }
+  h2,
+  h3 {
+    @apply label;
+  }
+  ::selection {
+    background: var(--ember);
+    color: var(--ground);
+  }
+  :focus-visible {
+    outline: 1px solid var(--ember);
+    outline-offset: 3px;
+  }
+}
+
+/* Unlayered so it beats shadcn Table's bg-muted (Unlit) on selected rows. */
+[data-slot="table-row"][data-state="selected"] {
+  background: var(--ground-deep);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

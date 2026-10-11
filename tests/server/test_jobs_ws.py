@@ -57,6 +57,40 @@ def test_sends_current_jobs_then_every_change(app_runner, tmp_path):
             wait_for(lambda: not runner._listeners)
 
 
+class BurstRunner:
+    """Fires a burst of changes for one job before the socket can send any of them."""
+
+    def __init__(self) -> None:
+        self.listeners: list = []
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def add_listener(self, fn) -> None:
+        self.listeners.append(fn)
+
+    def remove_listener(self, fn) -> None:
+        self.listeners.remove(fn)
+
+    def jobs(self) -> list:
+        for n in range(1000):  # on the loop thread: none is sent before the handler yields
+            self.listeners[0]({"id": "j", "n": n})
+        return []
+
+
+def test_a_burst_of_changes_sends_only_the_latest(tmp_path):
+    app = create_app(Settings(data_dir=tmp_path / "data"), KEY, "c" * 22, None, port=8000)
+    app.state.jobs = runner = BurstRunner()
+    with TestClient(app, base_url=BASE) as client:
+        with client.websocket_connect(WS, headers=GOOD) as ws:
+            assert ws.receive_json() == {"id": "j", "n": 999}
+            runner.listeners[0]({"id": "j", "n": 1000})  # from this thread
+            assert ws.receive_json() == {"id": "j", "n": 1000}  # not a stale 1..998
+            ws.close()
+            wait_for(lambda: not runner.listeners)
+
+
 @pytest.mark.parametrize(
     "headers",
     [

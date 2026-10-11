@@ -5,6 +5,7 @@ grid is expanded by `app.state.jobs.expand` in an isolated child.
 """
 
 import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,15 @@ from fenrir.settings import Settings
 
 router = APIRouter(prefix="/api/backtests")
 ws_router = APIRouter()
+_expand_slot = threading.Semaphore(1)  # one expand child at a time: each holds a thread
+
+
+def cwd_relative(path: Path) -> str:
+    """`path` relative to the cwd when it lies under it, so it passes `strategy_glob_ok`."""
+    try:
+        return str(path.relative_to(Path.cwd()))
+    except ValueError:  # already relative, or outside the cwd
+        return str(path)
 
 
 def strategy_glob_ok(pattern: str, strategies_dir: Path) -> bool:
@@ -64,7 +74,7 @@ def options(request: Request) -> dict[str, list[str]]:
     settings = request.app.state.settings
     return {
         # file names only: reading MARKET would execute the file (DEC-1)
-        "strategies": sorted(str(p) for p in settings.strategies_dir.glob("*.py")),
+        "strategies": sorted(cwd_relative(p) for p in settings.strategies_dir.glob("*.py")),
         "accounts": list_accounts(settings.rules_dir),
         "contracts": [s.symbol for s in load_instruments().specs],
     }
@@ -81,10 +91,14 @@ def submit_job(body: JobRequest, request: Request) -> dict[str, str]:
                 detail=f"{pattern!r} is not a relative path inside {settings.strategies_dir}",
             )
     runner = request.app.state.jobs
+    if not _expand_slot.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="a grid is already being expanded")
     try:
         grid = runner.expand(body.strategies, body.accounts, body.contracts)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+    finally:
+        _expand_slot.release()
     return {"job_id": runner.submit(grid, body.include_holdout).id}
 
 
@@ -131,27 +145,40 @@ def compare_reports(view: View, request: Request) -> list[dict]:
 
 @ws_router.websocket("/ws/jobs")
 async def jobs_ws(ws: WebSocket) -> None:
-    """Every current `Job`, then each `Job` again on every change."""
+    """Every current `Job`, then each `Job` again on every change.
+
+    Only the latest unsent payload per job id is kept, so a slow client costs at most one
+    payload per job and skips the stale ones.
+    """
     if not check_ws(ws):
         await ws.close()
         return
     await ws.accept()
     runner = ws.app.state.jobs
     loop = asyncio.get_running_loop()
-    changes: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    unsent: dict[str, dict[str, Any]] = {}
+    ready = asyncio.Event()
+
+    def put(job: dict[str, Any]) -> None:
+        unsent[job["id"]] = job
+        ready.set()
 
     def listener(job: dict[str, Any]) -> None:  # called on the runner or a submit thread
-        loop.call_soon_threadsafe(changes.put_nowait, job)
+        loop.call_soon_threadsafe(put, job)
 
     runner.add_listener(listener)
-    # snapshot after add_listener: a change in between is queued too, so none is lost
-    current = [to_json(j) for j in runner.jobs()]
+    # snapshot after add_listener: a later change is scheduled after it, so the newest wins
+    for job in runner.jobs():
+        put(to_json(job))
 
     async def push() -> None:
-        for job in current:
-            await ws.send_json(job)
         while True:
-            await ws.send_json(await changes.get())
+            await ready.wait()
+            ready.clear()
+            batch = list(unsent.values())
+            unsent.clear()
+            for job in batch:
+                await ws.send_json(job)
 
     pusher = asyncio.create_task(push())
     try:

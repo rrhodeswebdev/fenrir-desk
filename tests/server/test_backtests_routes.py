@@ -1,5 +1,6 @@
 import json
 import shutil
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -100,6 +101,16 @@ def test_options_lists_files_without_executing_them(settings):
     assert not (settings.strategies_dir / "side.py.pid").exists()
 
 
+def test_options_paths_pass_the_post_check_with_an_absolute_strategies_dir(settings, tmp_path):
+    absolute = replace(settings, strategies_dir=tmp_path / "strategies")
+    runner = FakeRunner()
+    client = _app(absolute, runner)[1]
+    body = client.get("/api/backtests/options", headers=COOKIE).json()
+    assert body["strategies"] == ["strategies/orb.py"]
+    post = GOOD | {"strategies": body["strategies"]}
+    assert client.post("/api/backtests/jobs", headers=WRITE, json=post).status_code == 200
+
+
 def test_create_app_holds_a_job_runner_with_the_session_key(settings, monkeypatch):
     calls = []
     monkeypatch.setattr("fenrir.server.app.JobRunner", lambda s, **kw: calls.append((s, kw)))
@@ -156,6 +167,32 @@ def test_an_expand_error_is_422_with_its_message(settings):
     r = _app(settings, runner)[1].post("/api/backtests/jobs", headers=WRITE, json=body)
     assert (r.status_code, r.json()["detail"]) == (422, runner.error)
     assert [c[0] for c in runner.calls] == ["expand"]
+
+
+def test_a_second_expand_while_one_runs_is_409(settings):
+    entered, release = threading.Event(), threading.Event()
+
+    class Slow(FakeRunner):
+        def expand(self, *args):
+            entered.set()
+            release.wait(10)
+            return super().expand(*args)
+
+    runner = Slow()
+    client = _app(settings, runner)[1]
+    first: list = []
+    post = lambda: client.post("/api/backtests/jobs", headers=WRITE, json=GOOD)  # noqa: E731
+    thread = threading.Thread(target=lambda: first.append(post()))
+    thread.start()
+    try:
+        assert entered.wait(10)
+        r = post()
+        assert (r.status_code, r.json()) == (409, {"detail": "a grid is already being expanded"})
+    finally:
+        release.set()
+        thread.join(10)
+    assert first[0].status_code == 200
+    assert post().status_code == 200  # the slot is free again
 
 
 def test_a_malformed_body_is_422(settings):

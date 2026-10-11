@@ -146,7 +146,7 @@ def test_list_reports_breaks_created_at_ties_by_key(settings):
     assert list_reports(settings) == (b, a)
 
 
-@pytest.mark.parametrize("text", ["", '{"half": ', '{"key": "k"}'])
+@pytest.mark.parametrize("text", ["", '{"half": ', '{"key": "k"}', '{"created_at": "x"}'])
 def test_a_corrupt_report_is_an_error_naming_the_file(settings, item, runs, text):
     path = settings.data_dir / "results" / f"{cache_key(item, settings, False)}.json"
     path.parent.mkdir(parents=True)

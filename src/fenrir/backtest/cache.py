@@ -35,7 +35,7 @@ def cache_key(item: GridItem, settings: Settings, include_holdout: bool) -> str:
 def _read(path: Path) -> Report:
     try:
         report = json.loads(path.read_text())
-        report["created_at"]  # noqa: B018 - every stored report has one; list_reports sorts on it
+        report["created_at"], report["key"]  # noqa: B018 - list_reports sorts on both
         return report
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise ValueError(f"{path}: corrupt cached report, delete it ({e!r})") from e

@@ -4,12 +4,13 @@ import re
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from fenrir.server.auth import SESSION_COOKIE, allowed_origins, session_ok
+from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
+from fenrir.server.routes import rules
 from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
@@ -106,6 +107,7 @@ def create_app(
 
     # Register routers here, one line each, above the SPA:
     # app.include_router(<area>.router, dependencies=[Depends(require_session)])
+    app.include_router(rules.router, dependencies=[Depends(require_session)])
 
     if static_dir is not None:
         _mount_spa(app, static_dir.resolve())

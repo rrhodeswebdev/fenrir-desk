@@ -8,8 +8,8 @@ secrets/
 config.local.*
 
 # Market data caches and backtest output (can be large and may be licensed)
-data/
-!data/.gitkeep
+data/*
+!data/CLAUDE.md
 *.parquet
 *.feather
 *.duckdb

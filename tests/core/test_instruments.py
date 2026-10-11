@@ -7,6 +7,7 @@ from fenrir.core.instruments import (
     ContractSpec,
     Roll,
     front_month,
+    in_roll_window,
     load_instruments,
     parse_instruments,
     quarterly_rolls,
@@ -75,3 +76,16 @@ def test_repo_instruments_file_matches_spec():
         "MNQ": ("NQ", 2.0, 0.25, 0.1),
     }
     assert front_month(inst, "ES", date(2026, 10, 9)) == "ESZ26"
+
+
+def test_in_roll_window_is_roll_thursday_through_expiry_tuesday():
+    # Dec 2025: expiry Fri 12-19, roll Thu 12-11; window ends Tue 12-16
+    assert [d for d in range(8, 20) if in_roll_window(date(2025, 12, d))] == [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+    ]
+    assert not in_roll_window(date(2025, 11, 13))  # not a quarterly month

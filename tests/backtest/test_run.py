@@ -9,7 +9,15 @@ from backtest_helpers import et, rules_data
 
 from fenrir.backtest import run as run_module
 from fenrir.backtest.attempts import periods
-from fenrir.backtest.run import AccountChoice, load_account_choices, net_per_attempt, run_backtest
+from fenrir.backtest.cache import cached_run
+from fenrir.backtest.grid import GridItem
+from fenrir.backtest.run import (
+    AccountChoice,
+    load_account_choices,
+    net_per_attempt,
+    run_backtest,
+    worker_cap,
+)
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import front_month, load_instruments
 from fenrir.data.store import load_bars, write_bars
@@ -47,6 +55,16 @@ def day_bars(day: date, k: int, contract: str) -> list[Bar]:
         )
         price = c
     return out
+
+
+@pytest.fixture(autouse=True)
+def fresh_process_state():
+    """Each test starts with no shared pool or memoized inputs, and leaves no workers behind."""
+    run_module._drop_pool()
+    run_module._memo.clear()
+    yield
+    run_module._drop_pool()
+    run_module._memo.clear()
 
 
 @pytest.fixture
@@ -200,11 +218,12 @@ def test_net_per_attempt_subtracts_the_accounts_price():
 @pytest.fixture
 def spy_pool(monkeypatch):
     """A real pool that records its kwargs and every shutdown's cancel_futures."""
-    seen: dict = {"kwargs": None, "cancel": []}
+    seen: dict = {"kwargs": None, "cancel": [], "pools": 0}
 
     class Spy(ProcessPoolExecutor):
         def __init__(self, *args, **kwargs):
             seen["kwargs"] = kwargs
+            seen["pools"] += 1
             super().__init__(*args, **kwargs)
 
         def shutdown(self, wait=True, *, cancel_futures=False):
@@ -285,11 +304,71 @@ def test_a_worker_error_cancels_the_queued_chunks(settings, tmp_path, monkeypatc
     ("changed", "label"),
     [(0, "strategy file"), (1, "rules file"), (2, "bar data"), (3, "bar count")],
 )
-def test_each_changed_input_is_named(settings, changed, label, monkeypatch):
-    monkeypatch.setattr(run_module, "_worker_inputs", None)  # restored after the test
-    run_module._init_worker(ORB, ACCOUNT, "MNQ", settings, False)
-    expected = list(run_module._worker_inputs[-1])
-    run_module._run_chunk(tuple(expected), ())  # untampered: passes
+def test_each_changed_input_is_named(settings, changed, label):
+    load_args = (ORB, ACCOUNT, "MNQ", settings, False)
+    expected = list(run_module._load(*load_args)[-1])
+    run_module._run_chunk(load_args, tuple(expected), ())  # untampered: passes
     expected[changed] = "tampered" if changed < 3 else -1
     with pytest.raises(ValueError, match=f"{label} changed during the backtest"):
-        run_module._run_chunk(tuple(expected), ())
+        run_module._run_chunk(load_args, tuple(expected), ())
+
+
+def counted_loads(monkeypatch) -> list[str]:
+    calls = []
+
+    def counted(data_dir, instruments, series, *a, **k):
+        calls.append(series)
+        return load_bars(data_dir, instruments, series, *a, **k)
+
+    monkeypatch.setattr("fenrir.backtest.run.load_bars", counted)
+    return calls
+
+
+def test_a_grid_loads_each_series_once_in_the_parent(settings, monkeypatch, spy_pool):
+    loads = counted_loads(monkeypatch)  # spawned workers import their own, uncounted
+    for contract in ("MNQ", "NQ"):
+        cached_run(GridItem(ORB, ACCOUNT, contract), settings, include_holdout=False)
+    assert loads == ["NQ"]
+    assert spy_pool["pools"] == 1  # the second item reused the workers
+    day = date(2025, 10, 1)
+    code = front_month(load_instruments(), "NQ", day)
+    write_bars(settings.data_dir, "NQ", code, day_bars(day, 0, code))  # a new data_version
+    run_backtest(ORB, ACCOUNT, "MNQ", settings, include_holdout=False)
+    assert loads == ["NQ", "NQ"]  # a new data_version loads again
+
+
+def test_a_worker_loads_each_series_once_across_items(settings, monkeypatch):
+    loads = counted_loads(monkeypatch)
+    for contract in ("MNQ", "NQ"):  # what a reused worker sees for two grid items
+        load_args = (ORB, ACCOUNT, contract, settings, False)
+        seen = run_module._load(*load_args)[-1]
+        run_module._run_chunk(load_args, seen, ())
+    assert loads == ["NQ"]
+
+
+FULL_NQ = 3_386_345  # bars in the full NQ series, Open Question 5
+GIB = 1 << 30
+
+
+@pytest.mark.parametrize(
+    ("memory", "cpus", "bars", "workers"),
+    [
+        (6 * GIB, 16, FULL_NQ, 2),  # the parent holds the series too: 3 processes fit
+        (64 * GIB, 16, FULL_NQ, 16),  # never more than the cores
+        (2 * GIB, 16, FULL_NQ, 1),  # always at least one
+        (6 * GIB, 4, 1_000, 4),  # small data fits every core
+        (None, 16, FULL_NQ, 2),  # unknown memory: conservative
+        (None, 1, FULL_NQ, 1),
+    ],
+)
+def test_worker_cap_fits_memory(memory, cpus, bars, workers):
+    assert worker_cap(memory, cpus, bars) == workers
+
+
+@pytest.mark.parametrize(("text", "limit"), [("6442450944\n", 6 * GIB), ("max\n", None)])
+def test_memory_limit_prefers_the_cgroup(tmp_path, monkeypatch, text, limit):
+    cgroup = tmp_path / "memory.max"
+    cgroup.write_text(text)
+    monkeypatch.setattr(run_module, "CGROUP_MEMORY_MAX", cgroup)
+    monkeypatch.setattr(run_module.os, "sysconf", lambda name: 1024)
+    assert run_module._memory_limit() == (limit or 1024 * 1024)

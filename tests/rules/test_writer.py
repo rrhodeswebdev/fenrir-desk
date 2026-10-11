@@ -172,3 +172,12 @@ def test_root_keeps_the_file_owner(rules_dir, monkeypatch):
         path, edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
     )
     assert chowned == [(".flex-50k.yaml.tmp", st.st_uid, st.st_gid)]
+
+
+def test_save_works_without_geteuid(rules_dir, monkeypatch):  # native Windows
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    path = rules_path("lucid-flex-50k", rules_dir)
+    write_account(
+        path, edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
+    )
+    assert "2027-01-02" in path.read_text()

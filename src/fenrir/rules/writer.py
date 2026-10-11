@@ -101,7 +101,8 @@ def write_account(path: Path, rules: AccountRules) -> None:
     try:
         tmp.write_text(out.getvalue(), encoding="utf-8")
         shutil.copymode(path, tmp)
-        if os.geteuid() == 0:  # a save from Docker must not leave the host user a root-owned file
+        # a save from Docker must not leave the host user a root-owned file; Windows has no geteuid
+        if getattr(os, "geteuid", lambda: -1)() == 0:
             os.chown(tmp, st.st_uid, st.st_gid)
         os.replace(tmp, path)  # atomic: readers see the old file or the new one, never half
     except BaseException:

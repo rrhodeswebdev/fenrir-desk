@@ -108,9 +108,42 @@ def test_progress_reaches_total(settings):
     assert [d for d, _ in calls] == sorted(d for d, _ in calls)
 
 
-def test_contract_must_match_strategy_market(settings):
+def test_contract_must_match_strategy_market(settings, monkeypatch):
+    def no_pool(*args, **kwargs):
+        pytest.fail("a process pool started before the contract was checked")
+
+    monkeypatch.setattr("fenrir.backtest.run.ProcessPoolExecutor", no_pool)
     with pytest.raises(ValueError, match="MES trades ES prices but orb is an NQ strategy"):
         run_backtest(ORB, ACCOUNT, "MES", settings, include_holdout=False)
+
+
+def test_completion_order_does_not_change_the_report(settings, monkeypatch):
+    natural = run_backtest(ORB, ACCOUNT, "NQ", settings, include_holdout=True)
+    monkeypatch.setattr("fenrir.backtest.run.CHUNK", 4)  # several chunks, so order can differ
+    submitted = []
+
+    def reversed_completion(futures):
+        submitted.extend(futures)
+        return reversed(futures)  # every chunk is already submitted, so this is a real order
+
+    monkeypatch.setattr("fenrir.backtest.run.as_completed", reversed_completion)
+    forced = run_backtest(ORB, ACCOUNT, "NQ", settings, include_holdout=True)
+    assert len(submitted) > 1
+    assert {**forced, "created_at": None} == {**natural, "created_at": None}
+
+
+def test_dll_on_reaches_the_workers(settings):
+    dll_account = "lucid-test-dll-50k"
+    # target 100 lets the winning synthetic ORB days pass; a $1 limit halts them on day one
+    rules = {**rules_data(target=100.0, daily_loss=1.0), "account": "test-dll-50k"}
+    (settings.rules_dir / "lucid" / "test-dll-50k.yaml").write_text(yaml.safe_dump(rules))
+    off = run_backtest(ORB, dll_account, "MNQ", settings, include_holdout=False)
+    (settings.data_dir / "accounts.yaml").write_text(f"{dll_account}: {{dll_on: true}}\n")
+    on = run_backtest(ORB, dll_account, "MNQ", settings, include_holdout=False)
+    assert off["dll_on"] is False
+    assert on["dll_on"] is True
+    assert off["periods"]["tuning"]["pass_rate"] > 0
+    assert on["periods"]["tuning"]["pass_rate"] == 0
 
 
 def test_dll_on_without_amount_refuses_to_run(settings):

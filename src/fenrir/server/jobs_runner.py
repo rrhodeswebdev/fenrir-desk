@@ -18,7 +18,7 @@ import sys
 import tempfile
 import threading
 import uuid
-from collections.abc import Callable, Container, Iterator, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
+from fenrir.server.isolation import isolation_problems
 from fenrir.server.jobs import (
     KEY,
     Job,
@@ -107,27 +108,15 @@ def parse_grid(line: str, settings: Settings) -> tuple[GridItem, ...]:
     return tuple(grid)
 
 
-def strategy_user(env: Mapping[str, str]) -> str | None:
+def strategy_user(settings: Settings) -> str | None:
     """The user strategy code runs as: `FENRIR_PTY_USER`, or None for the server's own user.
 
-    In the image (`FENRIR_BIND_ALL=1`) raises ValueError unless the server is root and that
-    user is neither root nor in group 0 (DEC-1).
+    In the image (`FENRIR_BIND_ALL=1`) raises ValueError with the reasons when the DEC-1
+    isolation check fails.
     """
-    user = env.get("FENRIR_PTY_USER") or None
-    if env.get("FENRIR_BIND_ALL") == "1":
-        # shortcut: the private_dir part of the check waits for Settings.private_dir (11.5/13)
-        import pwd  # POSIX only, and only the Linux image sets FENRIR_BIND_ALL
-
-        try:
-            ids = (pwd.getpwnam(user).pw_uid, pwd.getpwnam(user).pw_gid) if user else (0, 0)
-        except KeyError:
-            ids = (0, 0)
-        if 0 in ids or os.geteuid() != 0:
-            raise ValueError(
-                "refusing to run strategy code: the server must run as root with "
-                f"FENRIR_PTY_USER naming a user outside uid and gid 0 (got {user!r})"
-            )
-    return user
+    if problems := isolation_problems(settings):
+        raise ValueError("refusing to run strategy code: " + "; ".join(problems))
+    return os.environ.get("FENRIR_PTY_USER") or None
 
 
 def _kill_group(pid: int) -> None:
@@ -373,7 +362,7 @@ class JobRunner:
         self, args: Sequence[str], request: object, *, job: bool = False
     ) -> subprocess.Popen:
         """A child in its own session (so its whole group can be killed), as the strategy user."""
-        user = strategy_user(os.environ)
+        user = strategy_user(self._settings)
         env = terminal.child_env(os.environ, self._secret) | {
             "FENRIR_DATA_DIR": str(self._settings.data_dir),
             "FENRIR_RULES_DIR": str(self._settings.rules_dir),

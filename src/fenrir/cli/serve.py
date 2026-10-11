@@ -13,6 +13,7 @@ import uvicorn
 
 from fenrir.server.app import create_app
 from fenrir.server.auth import VITE_PORT
+from fenrir.server.isolation import isolation_problems
 from fenrir.settings import load_settings
 
 MIN_KEY_LEN = 32
@@ -26,9 +27,11 @@ def _read_session_key(path: Path) -> str:
             raise ValueError(f"{path} is a symlink; delete it and restart") from None
         raise
     with os.fdopen(fd) as f:
-        mode = os.fstat(f.fileno()).st_mode
-        if not stat.S_ISREG(mode) or mode & 0o077:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_mode & 0o077:
             raise ValueError(f"{path} must be a file only you can read: chmod 600 it or delete it")
+        if st.st_uid != os.geteuid():  # a key planted by another user is known to them
+            raise ValueError(f"{path} is owned by another user; delete it and restart")
         key = f.read().strip()
     if len(key) < MIN_KEY_LEN:
         raise ValueError(
@@ -91,6 +94,8 @@ def serve(
         key = load_session_key(settings.private_dir)
     except (ValueError, OSError) as e:
         _fail(str(e))
+    for problem in isolation_problems(settings):  # always empty natively
+        typer.echo(f"warning: not isolated, terminal and strategies disabled: {problem}", err=True)
     static = static_dir if (static_dir / "index.html").is_file() else None
     if static is None:
         typer.echo(

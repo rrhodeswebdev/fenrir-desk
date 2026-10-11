@@ -109,8 +109,18 @@ def mask_secret(value: str) -> str:
     return "" if not value else "••••" + value[-4:] if len(value) >= 12 else "••••"
 
 
-def load_settings(env_file: Path = Path(".env")) -> Settings:
-    from_file = parse_env_text(env_file.read_text()) if env_file.exists() else {}
+def env_file_path(environ: Mapping[str, str]) -> Path | None:
+    """The secrets file: `$FENRIR_ENV_FILE`, else `./.env` natively. In the image
+    (`FENRIR_BIND_ALL=1`) never the repo `.env`: the terminal can write it."""
+    if path := environ.get("FENRIR_ENV_FILE"):
+        return Path(path)
+    return None if environ.get("FENRIR_BIND_ALL") == "1" else Path(".env")
+
+
+def load_settings() -> Settings:
+    # FENRIR_ENV_FILE / FENRIR_BIND_ALL come from os.environ only; parse_settings ignores them
+    env_file = env_file_path(os.environ)
+    from_file = parse_env_text(env_file.read_text()) if env_file and env_file.exists() else {}
     # an empty env var (e.g. compose passing through an unset one) must not hide the file's value
     from_env = {k: v for k, v in os.environ.items() if v != ""}
     return parse_settings({**from_file, **from_env})

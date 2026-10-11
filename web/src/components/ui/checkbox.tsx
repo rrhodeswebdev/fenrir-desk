@@ -1,11 +1,10 @@
 import * as React from "react"
+import { cn } from "@/lib/utils"
 import { CheckIcon } from "lucide-react"
 import { Checkbox as CheckboxPrimitive } from "radix-ui"
 
-import { cn } from "@/lib/utils"
-
-// DESIGN.md: square, 1px Slate outline, no fill or shadow; checked steps the outline to Ice
-// beside the Ice mark. No ring: the base Ember focus outline shows.
+// DESIGN.md: square, 1px Slate outline, an Ice tick when checked; no fill or shadow. Checked
+// steps the outline to Ice beside the mark.
 function Checkbox({
   className,
   ...props
@@ -14,14 +13,14 @@ function Checkbox({
     <CheckboxPrimitive.Root
       data-slot="checkbox"
       className={cn(
-        "peer step size-4 shrink-0 cursor-pointer border border-input bg-transparent text-ink hover:border-ink disabled:cursor-not-allowed disabled:border-rule-strong aria-invalid:border-red data-[state=checked]:border-ink",
+        "peer step size-4 shrink-0 cursor-pointer border border-input bg-transparent text-ink hover:border-ink focus-visible:border-ink disabled:cursor-not-allowed disabled:border-rule-strong aria-invalid:border-red data-[state=checked]:border-ink",
         className
       )}
       {...props}
     >
       <CheckboxPrimitive.Indicator
         data-slot="checkbox-indicator"
-        className="grid place-content-center text-current transition-none"
+        className="grid place-content-center text-current"
       >
         <CheckIcon className="size-3.5" />
       </CheckboxPrimitive.Indicator>

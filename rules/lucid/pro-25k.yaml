@@ -1,0 +1,53 @@
+# From Lucid's help center (LucidPro collection, articles updated 2026-07-26 to 2026-10-09):
+# https://support.lucidtrading.com/en/articles/12890029-lucidpro-evaluation-account
+# https://support.lucidtrading.com/en/articles/12890069-lucidpro-funded-account
+# https://support.lucidtrading.com/en/articles/12890092-lucidpro-payouts
+# https://support.lucidtrading.com/en/articles/12890109-lucidpro-consistency-percentage
+# https://support.lucidtrading.com/en/articles/12890122-lucidpro-daily-loss-limit
+# https://support.lucidtrading.com/en/articles/12890136-lucidpro-drawdown
+# https://support.lucidtrading.com/en/articles/16226068-lucidpro-customization
+# https://support.lucidtrading.com/en/articles/16558826-new-live-structure (payout 5 is the last)
+# https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
+# daily_loss_limit is the fixed amount when the optional DLL is on.
+# Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
+# The funded page says "No simulated payout caps" but the payouts page lists caps; the caps
+# are entered as the safe side.
+# Schema gaps:
+# - Funded DLL turns into 60% of peak end-of-day profit once the balance closes above the
+#   initial trail (+$1,100); the fixed amount is kept, so it halts no later than Lucid;
+#   whether that helps or hurts the outcome depends on the strategy.
+# - A payout may not dip into the $1,100 buffer (MLL + $100). max_pct_of_profit is just under
+#   500 / 1,600: the $500 minimum request is reached within $3 of Lucid's point
+#   ($1,600 profit), and the request never exceeds profit above the buffer (it understates it).
+firm: lucid
+account: pro-25k
+verified_on: 2026-10-11
+source_url: https://support.lucidtrading.com/en/collections/16780433-lucidpro
+automation_allowed: true
+evaluation:
+  profit_target: 1250
+  max_drawdown: { amount: 1000, trailing: end_of_day, locks_at: 1100 }
+  daily_loss_limit: null  # none on the 25k evaluation, so the app refuses dll_on here
+  consistency: null  # Lucid: pass the Pro evaluation in one trading day
+  min_trading_days: 0
+funded:
+  max_drawdown: { amount: 1000, trailing: end_of_day, locks_at: 1100 }
+  daily_loss_limit: 600  # funded-account page says $600, DLL page says none; $600 is the safe side
+  consistency: { max_day_pct: 40 }
+  payout:
+    max_pct_of_profit: 31.24  # stands in for the $1,100 buffer, see above
+    split_pct: 90
+    min_days: 0
+    min_profit: 500  # the per-cycle profit goal is below buffer + $500, so it never binds
+    min_day_profit: 0
+    max_amount: 1000
+    max_payouts: 5
+  scaling: null
+session: { flat_by: "16:45", tz: America/New_York }
+contracts: { max_minis: 2, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

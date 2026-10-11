@@ -103,6 +103,8 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/live/` | Live runner: SQLite trade journal and armed table (`<private_dir>/fenrir.db`); later per-bar decisions, limits and halts. |
 | `src/fenrir/server/` | FastAPI shell and its state: `create_app` (Host guard, launch link, SPA), session-cookie/Origin/CSRF auth, pure backtest-job state; PTY and routes arrive in plans 13–16. |
 | `web/` | React UI (Vite, React 19, TypeScript strict). `src/api.ts` is the only server client (session cookie, no token); `src/errorText.ts` turns errors into text. |
+| `web/src/routes/` | One file per UI page (`<page>Route`); `root.tsx` is the index rail shell, `../router.tsx` assembles the tree. |
+| `web/src/components/` | Shared components: `Page` (top strip + body), `StateText`; `ui/` holds shadcn components edited to DESIGN.md. |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 | `.claude/skills/fenrir-strategy/` | Project skill teaching Claude the strategy loop (rules → data → strategy → backtest → report), tuning period only. |
 

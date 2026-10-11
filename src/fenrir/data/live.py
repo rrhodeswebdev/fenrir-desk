@@ -24,9 +24,14 @@ def empty_builder() -> BuilderState:
     return BuilderState()
 
 
+def _aware(ts: datetime) -> datetime:
+    if ts.tzinfo is None:
+        raise ValueError(f"naive datetime: {ts!r}")
+    return ts
+
+
 def feed(state: BuilderState, tick: Tick) -> tuple[BuilderState, tuple[Bar, ...]]:
-    if tick.ts.tzinfo is None:
-        raise ValueError(f"naive datetime: {tick.ts!r}")
+    _aware(tick.ts)
     minute = tick.ts.astimezone(UTC).replace(second=0, microsecond=0)
     current = next((b for b in state.bars if b.contract == tick.contract), None)
     others = tuple(b for b in state.bars if b.contract != tick.contract)
@@ -48,6 +53,9 @@ def feed(state: BuilderState, tick: Tick) -> tuple[BuilderState, tuple[Bar, ...]
 
 
 def close_due(state: BuilderState, now: datetime) -> tuple[BuilderState, tuple[Bar, ...]]:
+    # ticks for minutes ended by `now` are dropped afterwards: the stream must pass
+    # wall clock minus the feed's lag grace (data-gate item 3), not the raw wall clock
+    _aware(now)
     until = now if state.closed_until is None else max(now, state.closed_until)
     due = tuple(b for b in state.bars if b.ts + MINUTE <= now)
     kept = tuple(b for b in state.bars if b.ts + MINUTE > now)

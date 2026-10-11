@@ -100,3 +100,8 @@ def test_tick_time_is_floored_to_the_utc_minute():
 def test_naive_tick_time_is_rejected():
     with pytest.raises(ValueError, match="naive"):
         feed(empty_builder(), Tick(datetime(2026, 10, 12, 14, 30), 100.0, 1, "NQZ26"))
+
+
+def test_naive_close_due_time_is_rejected():
+    with pytest.raises(ValueError, match="naive"):
+        close_due(empty_builder(), datetime(2026, 10, 12, 14, 31))

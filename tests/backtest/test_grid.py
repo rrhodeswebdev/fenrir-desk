@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -14,10 +15,10 @@ def step(s, b, c): return s, []
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    s = replace(Settings(), rules_dir=tmp_path / "rules", strategies_dir=tmp_path / "strategies")
-    s.strategies_dir.mkdir()
+    s = replace(Settings(), rules_dir=tmp_path / "rules")
+    (tmp_path / "strategies").mkdir()
     for name, market in (("orb_nq", "NQ"), ("orb_es", "ES"), ("fade_nq", "NQ")):
-        (s.strategies_dir / f"{name}.py").write_text(STRATEGY.format(market=market))
+        (tmp_path / "strategies" / f"{name}.py").write_text(STRATEGY.format(market=market))
     (s.rules_dir / "lucid").mkdir(parents=True)
     for account in ("flex-25k", "flex-50k", "pro-50k"):
         (s.rules_dir / "lucid" / f"{account}.yaml").write_text("")
@@ -25,7 +26,7 @@ def settings(tmp_path) -> Settings:
 
 
 def grid(settings, strategies, accounts, contracts=None):
-    d = settings.strategies_dir
+    d = settings.rules_dir.parent / "strategies"
     items = expand_grid([str(d / s) for s in strategies], accounts, contracts, settings)
     return [(i.strategy_path.relative_to(d).as_posix(), i.account_id, i.contract) for i in items]
 
@@ -61,11 +62,16 @@ def test_overlapping_patterns_give_each_item_once(settings):
     assert len(got) == len(set(got)) == 2 * 3
 
 
-def test_returns_grid_items_in_a_stable_order(settings):
-    a = expand_grid([str(settings.strategies_dir / "*.py")], ["lucid-*"], None, settings)
-    b = expand_grid([str(settings.strategies_dir / "*.py")], ["lucid-*"], None, settings)
-    assert a == b and all(isinstance(i, GridItem) for i in a)
-    assert len(a) == 3 * 3 * 2
+def test_strategy_globs_are_relative_to_the_cwd_and_ordered(settings, tmp_path, monkeypatch):
+    (tmp_path / "instruments.yaml").symlink_to(Path("instruments.yaml").resolve())  # read from cwd
+    monkeypatch.chdir(tmp_path)
+    items = expand_grid(["strategies/*_nq.py"], ["lucid-flex-*"], None, settings)
+    assert items[:4] == tuple(
+        GridItem(Path("strategies/fade_nq.py"), a, c)
+        for a in ("lucid-flex-25k", "lucid-flex-50k")
+        for c in ("NQ", "MNQ")
+    )
+    assert len(items) == 2 * 2 * 2
 
 
 @pytest.mark.parametrize(
@@ -80,6 +86,17 @@ def test_pattern_matching_nothing_raises_naming_it(settings, strategies, account
 def test_contract_fitting_no_strategy_raises_empty_grid(settings):
     with pytest.raises(ValueError, match="empty grid"):
         grid(settings, ["orb_nq.py"], ["lucid-*"], ["MES"])
+
+
+def test_contract_fitting_no_strategy_raises_even_when_others_fit(settings):
+    with pytest.raises(ValueError, match="empty grid: MES fits no strategy"):
+        grid(settings, ["orb_nq.py"], ["lucid-*"], ["MNQ", "MES"])
+
+
+@pytest.mark.parametrize(("strategies", "accounts"), [([], ["lucid-*"]), (["orb_nq.py"], [])])
+def test_no_patterns_raises(settings, strategies, accounts):
+    with pytest.raises(ValueError, match="no patterns given"):
+        grid(settings, strategies, accounts)
 
 
 def test_unknown_contract_raises(settings):

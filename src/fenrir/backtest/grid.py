@@ -21,6 +21,8 @@ class GridItem:
 
 def _expand[T](patterns: Sequence[str], match: Callable[[str], Iterable[T]]) -> list[T]:
     """Every match of every pattern, sorted, each once; a pattern matching nothing raises."""
+    if not patterns:
+        raise ValueError("no patterns given")
     found: set[T] = set()
     for pattern in patterns:
         hits = set(match(pattern))
@@ -36,7 +38,8 @@ def expand_grid(
     contracts: Sequence[str] | None,
     settings: Settings,
 ) -> tuple[GridItem, ...]:
-    """`contracts` None = both symbols of each strategy's MARKET; otherwise those that fit it."""
+    """Strategy globs are relative to the cwd. `contracts` None = both symbols of each
+    strategy's MARKET; otherwise those that fit it, and each must fit some strategy."""
     paths = _expand(strategy_globs, lambda p: map(Path, glob.glob(p)))
     known = list_accounts(settings.rules_dir)
     accounts = _expand(account_globs, lambda p: (a for a in known if fnmatchcase(a, p)))
@@ -47,13 +50,14 @@ def expand_grid(
         else [spec(instruments, c) for c in dict.fromkeys(contracts)]
     )
     markets = {path: load_strategy(path).market for path in paths}
-    items = tuple(
+    if contracts is not None:
+        for s in specs:
+            if s.series not in markets.values():
+                raise ValueError(f"empty grid: {s.symbol} fits no strategy")
+    return tuple(
         GridItem(path, account, s.symbol)
         for path in paths
         for account in accounts
         for s in specs
         if s.series == markets[path]
     )
-    if not items:
-        raise ValueError(f"empty grid: no strategy trades any of {', '.join(contracts or ())}")
-    return items

@@ -14,10 +14,8 @@ const buttonVariants = cva(
       variant: {
         outline:
           "hover:shadow-[inset_-10px_0_var(--ember)] focus-visible:shadow-[inset_-10px_0_var(--ember)] disabled:shadow-none",
-        destructive: "shadow-[inset_-15px_0_var(--red)]",
-        // 14px Ember block behind a 1px rule that steps to Ice on hover.
-        caution:
-          "shadow-[inset_-14px_0_var(--ember),inset_-15px_0_var(--ink-3)] hover:shadow-[inset_-14px_0_var(--ember),inset_-15px_0_var(--ink)]",
+        destructive: "shadow-[inset_-14px_0_var(--red)]",
+        caution: "shadow-[inset_-14px_0_var(--ember)]",
       },
       size: {
         default: "h-11 px-6",
@@ -26,9 +24,9 @@ const buttonVariants = cva(
       },
     },
     compoundVariants: [
-      // Keep the caption's padding clear of the 15px edge block.
-      { variant: ["destructive", "caution"], size: "default", class: "pr-[39px]" },
-      { variant: ["destructive", "caution"], size: "sm", class: "pr-[31px]" },
+      // Keep the caption's padding clear of the 14px edge block.
+      { variant: ["destructive", "caution"], size: "default", class: "pr-[38px]" },
+      { variant: ["destructive", "caution"], size: "sm", class: "pr-[30px]" },
     ],
     defaultVariants: {
       variant: "outline",

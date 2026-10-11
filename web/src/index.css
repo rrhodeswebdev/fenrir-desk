@@ -13,7 +13,7 @@
   --inset-shadow-*: initial;
   --drop-shadow-*: initial;
   --text-shadow-*: initial;
-  --breakpoint-md: 47.5rem; /* 760px, DESIGN.md Layout */
+  --breakpoint-md: 47.5625rem; /* 761px: max-md is <= 760px, DESIGN.md Layout */
 }
 
 /* Token block copied from DESIGN.md "shadcn/ui and Tailwind v4 mapping"; values live there. */

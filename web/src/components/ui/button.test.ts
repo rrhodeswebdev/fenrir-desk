@@ -9,9 +9,9 @@ describe('buttonVariants', () => {
   })
 
   it('draws a red edge for destructive and an ember edge for caution, clear of the caption', () => {
-    expect(buttonVariants({ variant: 'destructive' })).toContain('shadow-[inset_-15px_0_var(--red)]')
-    expect(buttonVariants({ variant: 'caution' })).toContain('shadow-[inset_-14px_0_var(--ember)')
-    expect(buttonVariants({ variant: 'caution', size: 'sm' })).toContain('pr-[31px]')
+    expect(buttonVariants({ variant: 'destructive' })).toContain('shadow-[inset_-14px_0_var(--red)]')
+    expect(buttonVariants({ variant: 'caution' })).toContain('shadow-[inset_-14px_0_var(--ember)]')
+    expect(buttonVariants({ variant: 'caution', size: 'sm' })).toContain('pr-[30px]')
   })
 
   it('has no filled variant', () => {

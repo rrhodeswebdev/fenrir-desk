@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 TAIL_LINES = 20
+LINE_CHARS = 500
 
 
 def pull_status(
@@ -30,8 +31,9 @@ def pull_status(
 
 
 def pull_command() -> list[str]:
-    # the server's own interpreter: the same install under `uv run` and in the image
-    return [sys.executable, "-c", "from fenrir.cli.main import app; app()", "data", "pull"]
+    # the server's own interpreter: the same install under `uv run` and in the image.
+    # -P keeps the cwd (the terminal-writable repo) off sys.path: repo files cannot shadow fenrir.
+    return [sys.executable, "-P", "-c", "from fenrir.cli.main import app; app()", "data", "pull"]
 
 
 def pull_env(environ: Mapping[str, str], lse_api_key: str) -> dict[str, str]:
@@ -49,8 +51,8 @@ def _now() -> str:
 class PullRunner:
     """start() and status() never wait on the child, so both are safe on the event loop."""
 
-    # shortcut: state lives in memory, so a server restart forgets a pull still running;
-    # persist the pid if that bites
+    # shortcut: state lives in memory, so after a server restart an orphaned pull keeps running
+    # and a new one can overlap it (same Parquet files); persist the pid or a lock if that bites
     def __init__(self, cmd: Sequence[str], env: Mapping[str, str] | None = None) -> None:
         self._cmd = list(cmd)
         self._env = env
@@ -82,7 +84,7 @@ class PullRunner:
         assert proc.stdout is not None
         for line in proc.stdout:
             with self._lock:
-                self._tail.append(line.rstrip("\n"))
+                self._tail.append(line.rstrip("\n")[:LINE_CHARS])
         returncode = proc.wait()
         with self._lock:
             self._finished_at, self._returncode = _now(), returncode

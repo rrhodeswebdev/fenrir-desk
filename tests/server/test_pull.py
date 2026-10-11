@@ -39,6 +39,18 @@ def test_pull_command_runs_the_cli():
     assert "--since" in out
 
 
+def test_pull_command_ignores_modules_in_the_cwd(tmp_path):
+    fake = tmp_path / "fenrir" / "cli"
+    fake.mkdir(parents=True)
+    (tmp_path / "fenrir" / "__init__.py").write_text("")  # regular packages, or the real one wins
+    (fake / "__init__.py").write_text("")
+    (fake / "main.py").write_text("print('PLANTED'); app = lambda: None")
+    out = subprocess.run(
+        [*pull_command(), "--help"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout
+    assert "--since" in out and "PLANTED" not in out
+
+
 def test_pull_env_passes_the_lse_key_but_not_the_nt_token():
     env = pull_env({"PATH": "/bin", "FENRIR_NT_TOKEN": "nt", "FENRIR_DATA_DIR": "d"}, "lse")
     assert env["FENRIR_LSE_API_KEY"] == "lse" and env["FENRIR_DATA_DIR"] == "d"
@@ -82,6 +94,13 @@ def test_log_tail_is_last_20_lines():
     runner.start()
     wait_for(lambda: runner.status()["state"] == "done")
     assert runner.status()["log_tail"] == [str(i) for i in range(30, 50)]
+
+
+def test_long_lines_are_clipped():
+    runner = PullRunner(py("print('x' * 2000)"))
+    runner.start()
+    wait_for(lambda: runner.status()["state"] == "done")
+    assert runner.status()["log_tail"] == ["x" * 500]
 
 
 def test_child_gets_the_env_it_is_given():

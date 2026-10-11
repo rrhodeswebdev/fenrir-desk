@@ -49,7 +49,7 @@ Result: PASS, with a roll-date mismatch that plan 03 must handle (see below)
 ## Item 3 — Live WebSocket is real-time ES and NQ
 
 Result: NO TICKS RECEIVED (a fail: the current LSE tier streams no futures)
-- Run 2026-10-11 (Sunday), Globex open (ES and NQ trade from 18:00 ET): `live ES.F NQ.F --minutes 30` from 18:10:27 ET. 0 ticks for `ES.F` and `NQ.F`, so 0 without volume; lag n/a. `data/gate/ticks-2026-10-11T221027.jsonl` is empty. The Mac idle-slept from 18:21:07 to 18:50:12 ET (`pmset -g log`), so about 10.5 minutes were actually recorded; the process was killed at 18:50 before it printed its summary (see the run note below).
+- Run 2026-10-11 (Sunday), Globex open (ES and NQ trade from 18:00 ET): `live ES.F NQ.F --minutes 30` from 18:10:27 ET. 0 ticks for `ES.F` and `NQ.F`, so 0 without volume; lag n/a. `data/gate/ticks-2026-10-11T221027.jsonl` is empty. The Mac idle-slept from 18:21:07 to 18:50:12 ET (`pmset -g log`), so about 10.7 minutes were actually recorded; the process was killed at 18:50 before it printed its summary (see the run note below).
 - Re-checks the same evening, Globex still open:
   - 18:53 ET, 60 s, subscribed to `ES.F`, `NQ.F`, `MES.F`, `MNQ.F`, `ESZ26`, `ESZ6`, `NQZ26`, `NQZ6`, `ES`, `NQ`, `MES`, `MNQ`, `/ES`, `/NQ`: 0 ticks and no error reply (the server ignores a symbol it does not serve).
   - 18:56–18:58 ET, `live ES.F NQ.F BTC/USD --minutes 2`: 121 ticks, all `BTC/USD`, 0 for `ES.F`/`NQ.F`; ended on time (120 s). So the socket and the script work and futures are simply not served. Control lag: median −0.53 s, p95 −0.52 s with the local clock 0.64 s slow (`sntp time.apple.com`), so about +0.1 s.
@@ -76,7 +76,7 @@ Deferred to plan 22 (needs the add-on and a sim account).
 | LSE symbol for our code `NQZ26` | 03, 04 | None per contract. History uses `NQ.F` / `ES.F` (continuous, unadjusted, LSE's own roll dates; see "Roll mismatch") |
 | Timestamp shift to bar OPEN in UTC | 03 | none (timestamps are already bar open, UTC) |
 | Roll-window days to skip | 03, 08, 21 | Every trading day from the `instruments.yaml` roll day (third Friday − 8 days, a Thursday) through the Tuesday of expiry week, inclusive |
-| Live message → `Tick(ts, price, size, contract)` mapping | 04 | Cannot be filled: no futures ticks arrive on the current tier. From the SDK and the `BTC/USD` control only: `tick.datetime` (aware UTC) → `ts`, `price` → `price`, `volume` (float, may be `None`) → `size`; the message has no contract field. To be filled for the source DEC-7 picks |
+| Live message → `Tick(ts, price, size, contract)` mapping | 04 | Cannot be filled: no futures ticks arrive on the current tier. From the SDK and the `BTC/USD` control only: `tick.datetime.astimezone(UTC)` → `ts` (ticks with `replay=True` or no `datetime` are dropped), `price` → `price`, `volume` (float, may be `None`) → `size`; the message has no contract field. To be filled for the source DEC-7 picks |
 
 ## Decision
 

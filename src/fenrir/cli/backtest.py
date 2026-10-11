@@ -66,7 +66,7 @@ def _run(
             for account in accounts
         ]
     except (ValueError, OSError) as e:
-        typer.echo(f"error: {e}", err=True)
+        typer.echo(f"\nerror: {e}", err=True)  # \n ends a partial progress line
         raise typer.Exit(1) from e
     typer.echo(
         json.dumps(reports, indent=2)

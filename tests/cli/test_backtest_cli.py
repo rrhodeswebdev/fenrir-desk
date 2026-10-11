@@ -37,6 +37,7 @@ def fake_runs(monkeypatch):
 
     def fake(path, account, contract, settings, *, include_holdout, on_progress=None):
         calls.append((str(path), account, contract, include_holdout))
+        on_progress(1, 1)
         return REPORT
 
     monkeypatch.setattr(cli_backtest, "run_backtest", fake)
@@ -73,7 +74,8 @@ def test_evaluate_includes_holdout_and_json(monkeypatch):
     result = CliRunner().invoke(app, args)
     assert result.exit_code == 0, result.output
     assert calls == [("a.py", "lucid-flex-50k", "MNQ", True)]
-    assert json.loads(result.output) == [REPORT]
+    assert json.loads(result.stdout) == [REPORT]  # progress goes to stderr
+    assert "a.py lucid-flex-50k: 1/1 attempts\n" in result.stderr
 
 
 def test_errors_exit_1_with_message(monkeypatch):

@@ -104,7 +104,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | Module id | Responsibility | Depends on | Plans | Status |
 |---|---|---|---|---|
 | `core` | Types, instruments, rollover, sessions, settings, CLI root | — | 01 | Done |
-| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04 not started |
+| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex files only) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09 done; 10 not started |
@@ -113,7 +113,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `skill` | Claude project skill | backtest | 17 | Not started |
 | `docker` | Image and compose | server, web | 18 | Not started |
 | `addon` | NinjaTrader C# add-on | — | 19 | Not started |
-| `bridge` | Python add-on client, reconciliation | addon (contract only), core | 20 | Not started |
+| `bridge` | Python add-on client, reconciliation | addon (contract only), core | 20 | 20.1 instrument names done |
 | `live` | Runner, journal, safety, orders, arming, kill switch | data, strategy, backtest, server, bridge | 21–24 | Not started |
 
 Build order: core → data, rules → strategy → backtest → server → web, skill → docker. In parallel: addon → bridge. Then live (needs both chains). A plan may start once every plan it needs is merged.

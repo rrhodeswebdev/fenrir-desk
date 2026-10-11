@@ -272,7 +272,7 @@ def test_a_strategy_broken_after_the_parent_loaded_is_an_error(settings, tmp_pat
         return out
 
     monkeypatch.setattr("fenrir.backtest.run._plan", broken_after_the_parent_loaded)
-    with pytest.raises(ValueError, match="inputs changed during the backtest"):
+    with pytest.raises(ValueError, match="could not load the inputs"):
         run_backtest(strategy, ACCOUNT, "MNQ", settings, include_holdout=False)
 
 

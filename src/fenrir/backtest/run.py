@@ -23,7 +23,7 @@ from fenrir.strategy.loader import file_hash, load_strategy
 
 CHUNK = 16  # attempts per task: amortizes pickling without starving cores
 
-_worker_inputs: tuple | None = None  # set once per worker process by _init_worker
+_worker_inputs: tuple | Exception | None = None  # set once per worker process by _init_worker
 
 
 class AccountChoice(BaseModel):
@@ -90,7 +90,9 @@ def _run_chunk(
 ) -> list[tuple[tuple[int, int], AttemptResult]]:
     # here, not in the initializer: a raise there would surface as a BrokenProcessPool
     if isinstance(_worker_inputs, Exception):
-        raise ValueError(f"inputs changed during the backtest: {_worker_inputs}")
+        raise ValueError(
+            f"a worker could not load the inputs (did a file change?): {_worker_inputs}"
+        )
     bars, strategy, rules, contract_spec, seen = _worker_inputs
     for what, want, got in zip(
         ("strategy file", "rules file", "bar data", "bar count"), expected, seen, strict=True

@@ -2,6 +2,8 @@
 
 import os
 import re
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -11,8 +13,9 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
+from fenrir.server.jobs_runner import JobRunner
 from fenrir.server.pull import PullRunner, pull_command, pull_env
-from fenrir.server.routes import data, rules, terminal
+from fenrir.server.routes import backtests, data, rules, terminal
 from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
@@ -69,6 +72,16 @@ class HostGuard:
         await response(scope, receive, send)
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # the job child runs in its own session, so it would outlive a server that never stops it
+    app.state.jobs.start()
+    try:
+        yield
+    finally:
+        app.state.jobs.stop()
+
+
 def create_app(
     settings: Settings,
     session_key: str,
@@ -78,11 +91,14 @@ def create_app(
     port: int = 8000,
     dev: bool = False,
 ) -> FastAPI:
-    app = FastAPI(title="Fenrir Desk", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(
+        title="Fenrir Desk", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan
+    )
     app.state.settings = settings
     app.state.session_key = session_key
     app.state.allowed_origins = allowed_origins(port, dev)
     app.state.pull = PullRunner(pull_command(), pull_env(os.environ, settings.lse_api_key))
+    app.state.jobs = JobRunner(settings, secret=session_key)  # started by _lifespan
     app.add_middleware(HostGuard)
     unspent = [launch_code]
 
@@ -112,6 +128,8 @@ def create_app(
     # app.include_router(<area>.router, dependencies=[Depends(require_session)])
     app.include_router(rules.router, dependencies=[Depends(require_session)])
     app.include_router(data.router, dependencies=[Depends(require_session)])
+    app.include_router(backtests.router, dependencies=[Depends(require_session)])
+    app.include_router(backtests.ws_router)  # check_ws in the handler, before accept()
     app.include_router(terminal.router)  # WebSockets call check_ws themselves, before accept()
 
     if static_dir is not None:

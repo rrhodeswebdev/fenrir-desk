@@ -70,12 +70,12 @@ Web dev:     npm --prefix web run dev            # proxies /api, /ws, /launch to
 Typecheck:   npm --prefix web run typecheck
 Web test:    npm --prefix web test -- --run      # Vitest unit tests
 Web build:   npm --prefix web run build          # writes web/dist/
+E2E:         npm --prefix web run e2e            # builds, then Playwright against fenrir serve on :8799; once: npx --prefix web playwright install chromium
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
-E2E:         npx --prefix web playwright test                                                     # (12)
 Run app:     docker compose up        → http://localhost:8000                                     # (18)
 ```
 
@@ -111,7 +111,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | Module id | Responsibility | Depends on | Plans | Status |
 |---|---|---|---|---|
 | `core` | Types, instruments, rollover, sessions, settings, CLI root | — | 01 | Done |
-| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
+| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed; Gate 3 failed: no live futures on the current LSE tier; 4–5 open; 03 done; 04.1 bar builder done |
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex, Pro, Direct, Daily files) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3, 10.5 done; 10.4 not started |
@@ -182,7 +182,7 @@ One Python file in `strategies/` exporting `MARKET`, `PARAMS`, `init(params) -> 
 ### Claude Code workflow
 
 - **Terminal:** xterm.js on the Workbench page over WebSocket to a PTY in the server, started in the repo. Claude Code is installed in the image; its login is kept in a named volume.
-- **Security:** binds the loopback addresses `127.0.0.1` and `::1`, so no other local process can take the `localhost` port and catch the launch link (Docker publishes `127.0.0.1:8000:8000`); Host header checked. A random session key is kept in the private directory. `fenrir serve` prints a one-time launch link (`/launch?code=…`, a fresh single-use code per start); opening it sets an HttpOnly, SameSite=Strict session cookie that every REST and WebSocket request needs. No page, header, query string or API returns the session key. Every non-GET `/api` request whose `Origin` is missing or not the app's own, or whose `Sec-Fetch-Site` is present and not `same-origin`, gets 403 (SameSite does not separate localhost ports). WebSocket `Origin` checked; a bad cookie or Origin is refused at the handshake (HTTP 403). `127.0.0.1` redirects to `localhost` so the cookie has one host. A lost session is recovered by restarting the server and opening its new launch link; deleting `session.key` signs every browser out.
+- **Security:** binds the loopback addresses `127.0.0.1` and `::1`, so no other local process can take the `localhost` port and catch the launch link; inside the Docker image alone (`FENRIR_BIND_ALL=1`) it binds `0.0.0.0`, refusing to start unless the isolation check passes, and Docker publishes `127.0.0.1:8000:8000`; Host header checked. A random session key is kept in the private directory. `fenrir serve` prints a one-time launch link (`/launch?code=…`, a fresh single-use code per start); opening it sets an HttpOnly, SameSite=Strict session cookie that every REST and WebSocket request needs. No page, header, query string or API returns the session key. Every non-GET `/api` request whose `Origin` is missing or not the app's own, or whose `Sec-Fetch-Site` is present and not `same-origin`, gets 403 (SameSite does not separate localhost ports). WebSocket `Origin` checked; a bad cookie or Origin is refused at the handshake (HTTP 403). `127.0.0.1` redirects to `localhost` so the cookie has one host. A lost session is recovered by restarting the server and opening its new launch link; deleting `session.key` signs every browser out.
 - **Terminal isolation (Docker):** the PTY runs as the unprivileged `claude` user, with every `FENRIR_*` var dropped. It can read and write the repo, `data/bars`, `data/results` and `data/jobs`, and run `uv run fenrir backtest`; it cannot read the private volume (secrets, `fenrir.db`, session key), the server's environment or its logs. Nothing it can write runs as root: the server runs its own code and UI from the image (`/opt/fenrir`, outside `/app`), and every strategy load or `step` (the strategy list, backtest jobs, the live runner) runs in a child process as `claude` with no secrets in its environment, talking to the server over a pipe. So the terminal cannot arm, reach the session or reach NinjaTrader. Natively (`uv run fenrir serve`) the terminal runs as you and can read what you can; `fenrir serve` says so at start.
 - **Project skill:** `.claude/skills/fenrir-strategy/SKILL.md` teaches read rules → inspect data → write strategy → `fenrir backtest` → read report → iterate, on the tuning period only.
 - **Arming is user-only:** no CLI command arms; the PTY cannot reach the session or the `armed` table (see Terminal isolation); arming needs a backtest of the current strategy and rules file hashes against the account type, contract and current `dll_on`; arming a live account needs a confirmation showing the backtest summary, `dll_on`, the rules hash and the computed liquidation level. The backtest match is process evidence, not a security control: reports and `accounts.yaml` are files the terminal can write. The user's confirmation is the control.
@@ -331,7 +331,7 @@ def daily_loss_limit(limit: float) -> Rule:
 
 ## Open Questions
 
-1. **Live futures on LSE (gate item 3).** On 2026-10-10 the socket reported tier `registered` with no `ES.F`/`NQ.F` among its streamable symbols. If futures ticks don't arrive in market hours, what's the live source: an LSE tier upgrade, Databento, or something else? This blocks plans 04, 21 and 22.
+1. **Live futures on LSE (gate item 3): failed.** On 2026-10-11, with Globex open, the LSE socket sent no `ES.F`/`NQ.F` ticks (NO TICKS RECEIVED; details in `docs/data-gate.md` Item 3). Tier `registered` lists 4,173 streamable symbols and no futures in any form; a `BTC/USD` control streamed normally. What's the live source: an LSE tier with futures (then re-run the gate), Databento, or something else? That is DEC-7 (#18), now needed. Plans 04.2, 21.5, 21.8 and 22.7 stay blocked until it is decided. A weekday re-run would only matter if the LSE tier changes.
 2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills) have not been run.
 3. **ES 2023-03 roll** is ambiguous in the data; the fixed roll window covers it, but it isn't confirmed.
 4. **Pro, Direct and Daily rules** were entered on 2026-10-11 from Lucid's help center; automation is allowed on all three. Some of their mechanics have no schema field, so the files use conservative stand-ins named in their headers: the 60% scaling DLL (fixed DLL kept), the payout buffer (Pro, Daily) and payout profit goal (Direct), encoded through `max_pct_of_profit`; Daily's choice of end-of-day evaluation drawdown (intraday entered), its news-window hard breach and its maximum daily profit are not modelled. Direct's DLL is mandatory but only applies with `dll_on: true`, and Pro 25k cannot run with `dll_on` (no evaluation DLL). Should the schema grow fields for these (ask first)?

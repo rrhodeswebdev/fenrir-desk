@@ -60,6 +60,60 @@ def test_binds_both_loopback_addresses_only(runs, tmp_path, port):
     assert "UI not built" not in result.output
 
 
+@pytest.mark.parametrize("value", [None, "", "0", "true", "yes", " 1"])
+def test_bind_hosts_is_loopback_unless_bind_all_is_exactly_1(value):
+    environ = {} if value is None else {"FENRIR_BIND_ALL": value}
+    assert serve_mod.bind_hosts(environ) == ("127.0.0.1", "::1")
+
+
+def test_bind_hosts_is_all_ipv4_for_bind_all_1():
+    assert serve_mod.bind_hosts({"FENRIR_BIND_ALL": "1"}) == ("0.0.0.0",)
+
+
+def test_bind_all_binds_0000_and_still_prints_the_localhost_link(runs, monkeypatch, port):
+    asked = []
+    create_server = socket.create_server
+
+    def record(address, **kw):  # bind loopback for real: no 0.0.0.0 listener on the dev box
+        asked.append(address)
+        return create_server(("127.0.0.1", address[1]), **kw)
+
+    monkeypatch.setattr(serve_mod.socket, "create_server", record)
+    monkeypatch.setattr(serve_mod, "isolation_problems", lambda s: [])
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    result = invoke("--port", str(port))
+    assert result.exit_code == 0, result.output
+    assert [a for a in asked if a[1] == port] == [("0.0.0.0", port)]  # invoke's free_port asks 0
+    assert len(runs) == 1
+    assert f"Open http://localhost:{port}/launch?code=" in result.output
+
+
+def test_bind_all_outside_an_isolated_image_exits_1_before_binding(runs, monkeypatch, port):
+    monkeypatch.setattr(serve_mod, "isolation_problems", lambda s: ["first", "second"])
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    result = invoke("--port", str(port))
+    assert result.exit_code == 1
+    assert "FENRIR_BIND_ALL=1 outside an isolated image: first; second" in result.output
+    assert "launch?code=" not in result.output
+    assert runs == []
+    socket.create_server(("127.0.0.1", port)).close()  # never bound, so still free
+
+
+def test_bind_all_in_dotenv_is_ignored(runs, monkeypatch, tmp_path, port):
+    asked = []
+    create_server = socket.create_server
+
+    def record(address, **kw):
+        asked.append(address)
+        return create_server(address, **kw)
+
+    monkeypatch.setattr(serve_mod.socket, "create_server", record)
+    (tmp_path / ".env").write_text("FENRIR_BIND_ALL=1\n")
+    result = invoke("--port", str(port))
+    assert result.exit_code == 0, result.output
+    assert [a for a in asked if a[1] == port] == [("127.0.0.1", port), ("::1", port)]
+
+
 def test_no_ipv6_loopback_falls_back_to_127_with_a_warning(runs, monkeypatch, port):
     create_server = socket.create_server
 
@@ -206,3 +260,17 @@ def test_refuses_static_dir_exposing_secrets(runs, tmp_path, static, private):
     assert result.exit_code == 1
     assert "refusing to serve" in result.output
     assert runs == []
+
+
+def test_shuts_down_within_5_seconds(runs, monkeypatch):
+    configs = []
+
+    def run(self, sockets=None):
+        configs.append(self.config)
+        for s in sockets:
+            s.close()
+
+    monkeypatch.setattr(serve_mod.uvicorn.Server, "run", run)
+    assert invoke().exit_code == 0
+    # the lifespan stop() (which kills the job child) waits on open sockets otherwise
+    assert configs[0].timeout_graceful_shutdown == 5

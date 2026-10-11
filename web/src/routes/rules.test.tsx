@@ -40,6 +40,7 @@ describe('rules list', () => {
       </QueryClientProvider>,
     )
     expect(html).toContain('Verified 10 days ago')
+    expect(html).not.toContain('>null<')  // a successful query renders no error line
     expect(html).toMatch(/text-red[^"]*">Invalid file</)
     expect(html).toContain('bad yaml')
     expect(html).toMatch(/aria-label="Edit lucid-flex-50k"[^>]*href="\/rules\?account=lucid-flex-50k"/)

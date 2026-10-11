@@ -21,6 +21,8 @@ describe('errorText', () => {
   })
 
   it('pageError leaves a 401 to the shell banner and reports anything else', () => {
+    expect(pageError(null)).toBeNull()
+    expect(pageError(undefined)).toBeNull()
     expect(pageError(new ApiError(401, ''))).toBeNull()
     expect(pageError(new ApiError(500, 'boom'))).toBe('500: boom')
   })

@@ -20,8 +20,9 @@ function detail(body: string): string {
 }
 
 /** errorText for a page body; null for a 401, which only the root shell's banner reports. */
+// null when there is no error (React Query's `error` on success) or for a 401 (the shell banner)
 export const pageError = (e: unknown): string | null =>
-  e instanceof ApiError && e.status === 401 ? null : errorText(e)
+  e == null || (e instanceof ApiError && e.status === 401) ? null : errorText(e)
 
 export function errorText(e: unknown): string {
   if (e instanceof ApiError) return e.status === 401 ? SESSION_EXPIRED : `${e.status}: ${detail(e.body) || 'no details'}`

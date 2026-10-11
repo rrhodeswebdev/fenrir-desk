@@ -60,6 +60,11 @@ def test_holdout_covering_all_data_is_an_error():
         periods(weekday_bars(date(2025, 1, 1), date(2025, 3, 31)), 12)
 
 
+def test_negative_holdout_is_an_error():
+    with pytest.raises(ValueError, match="holdout_months must be >= 0, got -1"):
+        periods(weekday_bars(date(2025, 1, 1), date(2025, 3, 31)), -1)
+
+
 def test_no_bars_is_an_error():
     with pytest.raises(ValueError, match="no bars"):
         periods((), 12)

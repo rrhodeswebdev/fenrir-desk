@@ -31,6 +31,8 @@ def day_starts(bars: tuple[Bar, ...]) -> tuple[tuple[date, int], ...]:
 
 
 def periods(bars: tuple[Bar, ...], holdout_months: int) -> tuple[Period, Period | None]:
+    if holdout_months < 0:
+        raise ValueError(f"holdout_months must be >= 0, got {holdout_months}")
     starts = day_starts(bars)
     if not starts:
         raise ValueError("no bars")

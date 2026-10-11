@@ -310,7 +310,6 @@ def expand_grid(strategy_globs: Sequence[str], account_globs: Sequence[str],
 def cache_key(item: GridItem, settings: Settings, include_holdout: bool) -> str   # sha256(strategy bytes, rules bytes, data_version, contract, holdout_months, include_holdout, dll_on from data/accounts.yaml); not eval_price
 def cached_run(item: GridItem, settings: Settings, *, include_holdout: bool,
                on_progress: Callable[[int, int], None] | None = None) -> Report   # reads/writes data/results/<key>.json
-def find_report(settings: Settings, strategy_hash: str, account_id: str) -> Report | None  # newest matching, any contract
 def list_reports(settings: Settings) -> tuple[Report, ...]                        # newest first
 ```
 

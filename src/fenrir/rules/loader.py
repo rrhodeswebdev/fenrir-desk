@@ -1,4 +1,4 @@
-"""Account id <-> rules file. The only rules code that touches disk."""
+"""Account id <-> rules file. Reads rules files; `writer.py` writes them."""
 
 import re
 from pathlib import Path

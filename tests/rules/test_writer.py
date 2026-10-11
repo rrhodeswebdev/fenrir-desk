@@ -129,7 +129,7 @@ def test_added_tier_keeps_the_flow_style(rules_dir):
 def test_invalid_result_writes_nothing(rules_dir, field, value):
     path = rules_path("lucid-flex-50k", rules_dir)
     before = path.read_bytes()
-    with pytest.raises(ValueError, match="flex-50k.yaml"):
+    with pytest.raises(ValueError, match="can't be saved as YAML: .*flex-50k.yaml"):
         write_account(path, edit(load_account("lucid-flex-50k", rules_dir), field, value))
     assert path.read_bytes() == before
     assert sorted(p.name for p in path.parent.iterdir()) == sorted(
@@ -150,3 +150,25 @@ def test_write_is_an_atomic_replace(rules_dir, monkeypatch):
             path, edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
         )
     assert path.read_bytes() == before
+    assert not [p.name for p in path.parent.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_write_keeps_the_file_mode(rules_dir):
+    path = rules_path("lucid-flex-50k", rules_dir)
+    path.chmod(0o640)
+    write_account(
+        path, edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
+    )
+    assert path.stat().st_mode & 0o777 == 0o640
+
+
+def test_root_keeps_the_file_owner(rules_dir, monkeypatch):
+    path = rules_path("lucid-flex-50k", rules_dir)
+    st = path.stat()
+    chowned = []
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "chown", lambda p, uid, gid: chowned.append((Path(p).name, uid, gid)))
+    write_account(
+        path, edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
+    )
+    assert chowned == [(".flex-50k.yaml.tmp", st.st_uid, st.st_gid)]

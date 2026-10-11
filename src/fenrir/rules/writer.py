@@ -2,6 +2,7 @@
 
 import io
 import os
+import shutil
 from functools import reduce
 from operator import getitem
 from pathlib import Path
@@ -89,8 +90,20 @@ def write_account(path: Path, rules: AccountRules) -> None:
         _set(doc, at, _plain(value))
     out = io.StringIO()
     y.dump(doc, out)
-    if changes(parse_account(out.getvalue(), aid, path).model_dump(), rules.model_dump()):
-        raise ValueError(f"{path}: the saved file would not read back as these rules")
+    try:
+        saved = parse_account(out.getvalue(), aid, path)
+    except ValueError as e:
+        raise ValueError(f"the value can't be saved as YAML: {e}") from e
+    if changes(saved.model_dump(), rules.model_dump()):
+        raise ValueError(f"the value can't be saved as YAML: {path} would not read back the same")
+    st = path.stat()
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(out.getvalue(), encoding="utf-8")
-    os.replace(tmp, path)  # atomic: readers see the old file or the new one, never half
+    try:
+        tmp.write_text(out.getvalue(), encoding="utf-8")
+        shutil.copymode(path, tmp)
+        if os.geteuid() == 0:  # a save from Docker must not leave the host user a root-owned file
+            os.chown(tmp, st.st_uid, st.st_gid)
+        os.replace(tmp, path)  # atomic: readers see the old file or the new one, never half
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

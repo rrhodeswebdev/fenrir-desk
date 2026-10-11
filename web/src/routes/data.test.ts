@@ -35,11 +35,15 @@ describe('pollMs', () => {
     ({ pull: { state, started_at: null, finished_at: null, returncode: null, log_tail: [] } }) as unknown as Overview
 
   it('polls every 2 s only while a pull runs', () => {
-    expect(pollMs(at('running'))).toBe(2000)
-    expect(pollMs(at('idle'))).toBe(false)
-    expect(pollMs(at('done'))).toBe(false)
-    expect(pollMs(at('error'))).toBe(false)
-    expect(pollMs(undefined)).toBe(false)
+    expect(pollMs({ data: at('running'), status: 'success' })).toBe(2000)
+    expect(pollMs({ data: at('idle'), status: 'success' })).toBe(false)
+    expect(pollMs({ data: at('done'), status: 'success' })).toBe(false)
+    expect(pollMs({ data: at('error'), status: 'success' })).toBe(false)
+    expect(pollMs({ data: undefined, status: 'pending' })).toBe(false)
+  })
+
+  it('stops polling after a failed GET, even mid-pull', () => {
+    expect(pollMs({ data: at('running'), status: 'error' })).toBe(false)
   })
 })
 

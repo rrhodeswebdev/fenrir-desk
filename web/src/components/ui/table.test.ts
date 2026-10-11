@@ -8,6 +8,7 @@ describe('Table', () => {
     const row = renderToStaticMarkup(createElement(TableRow))
     expect(row).not.toMatch(/bg-muted|rounded/)
     expect(row).toContain('hover:bg-accent')
+    expect(row).toContain('data-[state=selected]:bg-accent')
   })
 
   it('sets heads in Label type', () => {

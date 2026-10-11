@@ -6,7 +6,7 @@ import { Page } from '@/components/page'
 import { StateText, type Tone } from '@/components/state-text'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { errorText } from '@/errorText'
+import { errorText, pageError } from '@/errorText'
 import { rootRoute } from './root'
 
 // GET /api/data (docs/contracts.md "Plan 16 — data API")
@@ -38,8 +38,9 @@ export function rollRows(rolls: Roll[], front: Overview['front']): RollRow[] {
   }))
 }
 
-/** Poll every 2 s only while a pull runs. */
-export const pollMs = (data: Overview | undefined): number | false => (data?.pull.state === 'running' ? 2000 : false)
+/** Poll every 2 s only while a pull runs; stop on a failed GET (a window refocus retries). */
+export const pollMs = ({ data, status }: { data?: Overview; status: string }): number | false =>
+  status !== 'error' && data?.pull.state === 'running' ? 2000 : false
 
 export const gapText = (gaps: Coverage['gaps']): string =>
   gaps.length === 0 ? 'None' : gaps.map(([a, b]) => (a === b ? a : `${a} → ${b}`)).join(', ')
@@ -57,12 +58,20 @@ function DataPage() {
   const data = useQuery({
     queryKey: ['data'],
     queryFn: () => apiFetch<Overview>('/api/data'),
-    refetchInterval: (q) => pollMs(q.state.data),
+    refetchInterval: (q) => pollMs(q.state),
   })
+  // A failed refetch keeps the last data on screen, so the error shows above it too.
+  const message = pageError(data.error)
+  const error = message && (
+    <p role="alert" className="text-red">
+      {message}
+    </p>
+  )
   if (!data.data)
     return (
       <Page title="Data">
-        <p className={data.error ? 'text-red' : 'text-ink-3'}>{data.error ? errorText(data.error) : 'Loading…'}</p>
+        {error}
+        {data.isPending && <p className="text-ink-3">Loading…</p>}
       </Page>
     )
   const { series, rolls, front, pull } = data.data
@@ -77,6 +86,7 @@ function DataPage() {
       ))}
     >
       <div className="grid gap-8">
+        {error}
         <section aria-labelledby="coverage" className="grid gap-3">
           <h2 id="coverage">Coverage · 1-minute bars</h2>
           <Table>
@@ -120,6 +130,12 @@ function PullSection({ pull }: { pull: Pull }) {
     mutationFn: () => apiFetch<void>('/api/data/pull', { method: 'POST' }),
     onSettled: () => qc.invalidateQueries({ queryKey: ['data'] }),
   })
+  // A 409 or other POST error is stale once the pull state moves on.
+  useEffect(() => start.reset(), [pull.state])
+  return <PullView pull={pull} error={start.error} pending={start.isPending} onPull={() => start.mutate()} />
+}
+
+export function PullView({ pull, error, pending, onPull }: { pull: Pull; error: unknown; pending: boolean; onPull: () => void }) {
   const running = pull.state === 'running'
   return (
     <section aria-labelledby="pull" className="grid gap-3 border-t pt-8">
@@ -143,17 +159,17 @@ function PullSection({ pull }: { pull: Pull }) {
             <span className="value">{pull.finished_at}</span>
           </span>
         )}
-        <Button className="ml-auto" onClick={() => start.mutate()} disabled={running || start.isPending}>
+        <Button className="ml-auto" onClick={onPull} disabled={running || pending}>
           {running ? 'Pulling' : 'Pull'}
         </Button>
       </div>
-      {start.error && (
+      {error != null && (
         <p role="alert" className="text-red">
-          {errorText(start.error)}
+          {errorText(error)}
         </p>
       )}
       {pull.log_tail.length > 0 && (
-        <pre className="max-h-80 overflow-auto border p-4 text-[12px] text-ink-2">{pull.log_tail.join('\n')}</pre>
+        <pre role="region" aria-label="Pull log" tabIndex={0} className="max-h-80 overflow-auto border p-4 text-[12px] text-ink-2">{pull.log_tail.join('\n')}</pre>
       )}
     </section>
   )
@@ -164,20 +180,30 @@ function Rollover({ rolls, front }: Pick<Overview, 'rolls' | 'front'>) {
   const series = Object.keys(front)
   const current = rows.find((r) => r.mark === 'front')?.start
   const box = useRef<HTMLDivElement>(null)
-  // The calendar spans decades: open it scrolled to today's front month.
+  // The calendar spans decades: open it with today's front month near the middle, on a
+  // whole row so no part row peeks out under the sticky head.
   useEffect(() => {
-    const row = box.current?.querySelector<HTMLElement>('[aria-current]')
-    if (box.current && row) box.current.scrollTop = row.offsetTop - box.current.clientHeight / 2
+    const el = box.current
+    const rows = [...(el?.querySelectorAll<HTMLElement>('tbody tr') ?? [])]
+    const i = rows.findIndex((r) => r.hasAttribute('aria-current'))
+    const row = rows[i]
+    if (!el || !row) return
+    const head = el.querySelector('thead')?.offsetHeight ?? 0
+    const above = Math.floor((el.clientHeight - head) / 2 / row.offsetHeight)
+    el.scrollTop = (rows[Math.max(0, i - above)]?.offsetTop ?? 0) - head
   }, [current])
   return (
-    <section aria-labelledby="rollover" className="grid gap-3 border-t pt-8">
-      <h2 id="rollover">Rollover calendar</h2>
+    <section className="grid gap-3 border-t pt-8">
+      <h2>Rollover calendar</h2>
       {Object.values(front).some((c) => c === null) && (
         <p className="text-ember">Today is outside the rollover calendar: raise last_year in instruments.yaml.</p>
       )}
       {/* The box scrolls, not the table's own container, so the head can stick (inset hairline: collapsed borders do not stick). */}
       <div
         ref={box}
+        role="region"
+        aria-label="Rollover calendar"
+        tabIndex={0}
         className="max-h-96 overflow-y-auto border-b [&_thead]:sticky [&_thead]:top-0 [&_thead]:bg-ground [&_thead]:shadow-[inset_0_-1px_var(--rule)] [&>[data-slot=table-container]]:overflow-visible"
       >
         <Table>
@@ -198,7 +224,7 @@ function Rollover({ rolls, front }: Pick<Overview, 'rolls' | 'front'>) {
             {rows.map((r) => (
               <TableRow
                 key={r.start}
-                aria-current={r.mark === 'front' ? 'true' : undefined}
+                aria-current={r.mark === 'front' ? 'date' : undefined}
                 data-state={r.mark === 'front' ? 'selected' : undefined}
               >
                 <TableCell>{r.start}</TableCell>

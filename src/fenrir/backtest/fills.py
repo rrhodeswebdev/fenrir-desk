@@ -44,8 +44,12 @@ def gross_pnl(qty: int, entry: float, exit: float, point_value: float) -> float:
 
 
 def worst_open_pnl(pos: OpenPosition, bar: Bar, point_value: float) -> float:
-    return gross_pnl(pos.qty, pos.entry, bar.low if pos.qty > 0 else bar.high, point_value)
+    """Adverse extreme, capped at the stop: past it the position is already out."""
+    price = max(bar.low, pos.stop) if pos.qty > 0 else min(bar.high, pos.stop)
+    return gross_pnl(pos.qty, pos.entry, price, point_value)
 
 
 def best_open_pnl(pos: OpenPosition, bar: Bar, point_value: float) -> float:
-    return gross_pnl(pos.qty, pos.entry, bar.high if pos.qty > 0 else bar.low, point_value)
+    """Favorable extreme, capped at the target."""
+    price = min(bar.high, pos.target) if pos.qty > 0 else max(bar.low, pos.target)
+    return gross_pnl(pos.qty, pos.entry, price, point_value)

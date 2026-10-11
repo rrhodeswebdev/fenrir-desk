@@ -28,13 +28,14 @@ def rules_data(
     target: float = 3000.0,
     drawdown: float = 2000.0,
     daily_loss: float | None = None,
+    trailing: str = "end_of_day",
     commission: float = 0.0,
     evaluation: bool = True,
     activation_fee: float = 0.0,
 ) -> dict:
     """A Lucid-shaped rules dict (spec §4 + plan 05 `locks_at`)."""
     phase = {
-        "max_drawdown": {"amount": drawdown, "trailing": "end_of_day", "locks_at": None},
+        "max_drawdown": {"amount": drawdown, "trailing": trailing, "locks_at": None},
         "daily_loss_limit": daily_loss,
         "consistency": None,
         "min_trading_days": 0,

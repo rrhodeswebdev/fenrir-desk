@@ -92,6 +92,7 @@ def run_attempt(
         rules=rules,
         spec=spec,
         commission=getattr(rules.costs.commission_per_side, spec.symbol),
+        # shortcut: compares HH:MM in rules.session.tz with ET, upgrade when a firm is not in ET
         flat_at=min(rules.session.flat_by, ADDON_FLATTEN),
         start=day0,
     )
@@ -179,11 +180,10 @@ def _check_bracket(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
 
 
 def _mark(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
+    """Mark the position before any exit this bar: the adverse extreme may have come first."""
     bar, pos = env.bars[i], sim.position
     if pos is None:
-        # a fill this bar moved the balance: the rules must check it against the floor
-        quiet = sim.account.open_pnl == 0 and not (sim.fills and sim.fills[-1].ts == bar.ts)
-        return sim if quiet else _event(sim, env, Mark(bar.ts, 0.0, 0.0, 0.0))
+        return sim
     pv = env.spec.point_value
     mark = Mark(
         bar.ts,
@@ -194,9 +194,16 @@ def _mark(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
     sim = _event(sim, env, mark)
     if isinstance(sim, AttemptResult) or not sim.account.halted_today:
         return sim
-    sim = _close(sim, env, _dll_exit(sim, env, bar), bar.ts)
-    # the exit's slippage and commission are realized now: check them against the floor this bar
-    return sim if isinstance(sim, AttemptResult) else _event(sim, env, Mark(bar.ts, 0.0, 0.0, 0.0))
+    return _close(sim, env, _dll_exit(sim, env, bar), bar.ts)
+
+
+def _mark_fills(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
+    """An exit this bar realized its slippage and commission: check them against the floor."""
+    bar = env.bars[i]
+    if sim.position is not None:
+        return sim
+    quiet = sim.account.open_pnl == 0 and not (sim.fills and sim.fills[-1].ts == bar.ts)
+    return sim if quiet else _event(sim, env, Mark(bar.ts, 0.0, 0.0, 0.0))
 
 
 def _dll_exit(sim: _Sim, env: _Env, bar: Bar) -> float:
@@ -259,10 +266,7 @@ def _late(bar: Bar, env: _Env) -> bool:
 
 def _flat_time(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
     bar = env.bars[i]
-    if not _late(bar, env):
-        return sim
-    sim = replace(sim, pending=None)
-    if sim.position is None:
+    if not _late(bar, env) or sim.position is None:
         return sim
     return _close(sim, env, market_exit(sim.position.qty, bar.close, env.spec.tick), bar.ts)
 
@@ -304,4 +308,4 @@ def _phase_check(sim: _Sim, env: _Env, day: date) -> _Sim | AttemptResult:
     return sim if amount is None else _end(sim, env, "payout", first_payout=amount)
 
 
-_STAGES = (_roll_day, _fill_pending, _check_bracket, _flat_time, _mark, _decide)
+_STAGES = (_roll_day, _fill_pending, _mark, _check_bracket, _flat_time, _mark_fills, _decide)

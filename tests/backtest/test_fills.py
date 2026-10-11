@@ -67,3 +67,10 @@ def test_worst_open_pnl_uses_adverse_extreme():
 def test_best_open_pnl_uses_favorable_extreme():
     assert best_open_pnl(LONG, b(100, 104, 97, 101), 20.0) == 80.0
     assert best_open_pnl(SHORT, b(100, 103, 97, 101), 20.0) == 60.0
+
+
+def test_open_pnl_extremes_stop_at_the_bracket():
+    assert worst_open_pnl(LONG, b(100, 106, 94, 101), 20.0) == -100.0
+    assert worst_open_pnl(SHORT, b(100, 106, 94, 101), 20.0) == -100.0
+    assert best_open_pnl(LONG, b(100, 106, 94, 101), 20.0) == 100.0
+    assert best_open_pnl(SHORT, b(100, 106, 94, 101), 20.0) == 100.0

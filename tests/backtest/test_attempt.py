@@ -172,3 +172,48 @@ def test_daily_loss_limit_exit_slippage_can_breach_drawdown():
         "max_drawdown",
         bar("09:32", 0, 0, 0, 0).ts,
     )
+
+
+def test_target_bar_low_is_checked_against_the_daily_loss_limit():
+    # entry gaps to 102.25; the target bar's low 97.25 is worth -100 (stop 96 untouched):
+    # the low may have come first, so the DLL halts the day whether or not the high reached 105
+    dll_long = Bracket("long", 1, 96.0, 105.0)
+    for high in (105.5, 104.5):
+        r = attempt(
+            [DECIDE, bar("09:31", 102, 102.5, 101.5, 102), bar("09:32", 102, high, 97.25, 104)],
+            {"09:30": [dll_long]},
+            daily_loss=100.0,
+        )
+        assert fills(r) == [(1, 102.25), (-1, 97.0)]  # the DLL level 97.25 - 1 tick
+        assert (r.outcome, r.breach) == ("no_result", None)
+
+
+def test_target_bar_low_is_checked_against_an_intraday_floor():
+    # 09:31 high 105.5 trails the floor to 95.5, above the stop 95; 09:32 dips to 95.25
+    # before hitting the target 108: live that breaches first
+    r = attempt(
+        [
+            DECIDE,
+            bar("09:31", 100.5, 105.5, 100.25, 105),
+            bar("09:32", 105, 108.5, 95.25, 108),
+        ],
+        {"09:30": [Bracket("long", 1, 95.0, 108.0)]},
+        drawdown=200.0,
+        trailing="intraday",
+    )
+    assert (r.outcome, r.breach.rule) == ("breached", "max_drawdown")
+    assert fills(r) == [(1, 100.75)]
+
+
+def test_flat_by_bar_low_is_checked_against_the_daily_loss_limit():
+    # the 16:39 bar closes at flat-by (16:40); its low 96.75 is worth -80 (stop 96.5 untouched)
+    r = attempt(
+        [
+            bar("16:30", 100, 100.5, 99.5, 100),
+            bar("16:31", 100.5, 101, 100.25, 100.5),
+            bar("16:39", 100.5, 101, 96.75, 100.5),
+        ],
+        {"16:30": [Bracket("long", 1, 96.5, 105.0)]},
+        daily_loss=80.0,
+    )
+    assert fills(r) == [(1, 100.75), (-1, 96.5)]  # DLL level 96.75 - 1 tick, not the 100.25 close

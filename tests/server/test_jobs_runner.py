@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -384,6 +385,25 @@ def test_describe_times_out_kills_the_child_and_keeps_what_it_said(make, tmp_pat
     wait_for(lambda: gone(int(Path(f"{paths[1]}.pid").read_text())))
 
 
+def test_stop_kills_a_running_describe_child_and_forgets_it(make, tmp_path):
+    s = real_settings(tmp_path)
+    (s.strategies_dir / "a.py").write_text(SIDE_EFFECT)
+    (s.strategies_dir / "b.py").write_text(SIDE_EFFECT + "while True:\n    pass\n")
+    runner = make(s, child=CHILD, describe_timeout=60)
+    assert runner.describe([str(s.strategies_dir / "a.py")])[0]["error"] is None
+    assert not runner._expanding  # a finished describe child is no longer stop()'s to kill
+    out: list = []
+    thread = threading.Thread(
+        target=lambda: out.extend(runner.describe([str(s.strategies_dir / "b.py")]))
+    )
+    thread.start()
+    wait_for((s.strategies_dir / "b.py.pid").exists)
+    runner.stop()
+    thread.join(10)
+    assert not thread.is_alive() and out[0]["error"].startswith("the strategy loader stopped")
+    wait_for(lambda: gone(int((s.strategies_dir / "b.py.pid").read_text())))
+
+
 def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):
     s = real_settings(tmp_path)
     runner = make(s, child=CHILD)
@@ -434,6 +454,27 @@ def test_parse_description_clips_the_error():
 def test_parse_description_rejects_anything_else(line):
     with pytest.raises(ValueError):
         parse_description(line, ("/s/a.py",))
+
+
+def test_stop_kills_a_running_expand_child(make, tmp_path):
+    runner = make(expand_timeout=60)
+    errors: list = []
+
+    def expand() -> None:
+        try:
+            runner.expand(["hang", str(tmp_path / "x.py")], [], None)
+        except ValueError as e:
+            errors.append(e)
+
+    thread = threading.Thread(target=expand)
+    thread.start()
+    wait_for((tmp_path / "x.json").exists)
+    runner.stop()
+    thread.join(10)
+    assert not thread.is_alive() and "without an answer" in str(errors[0])
+    wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
+    with pytest.raises(RuntimeError, match="stopping"):  # nothing new spawns after stop
+        runner.expand(["[]"], [], None)
 
 
 def test_parse_grid(tmp_path):

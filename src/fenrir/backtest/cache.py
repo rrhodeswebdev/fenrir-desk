@@ -77,6 +77,11 @@ def cached_run(
     return json.loads(text)  # same types as a later hit (tuples come back as lists)
 
 
+def read_report(settings: Settings, key: str) -> Report:
+    """The cached report `key` (FileNotFoundError when absent); the caller vets `key`."""
+    return _read(_results(settings) / f"{key}.json")
+
+
 def list_reports(settings: Settings) -> tuple[Report, ...]:
     reports = [_read(p) for p in _results(settings).glob("*.json")]
     # key breaks created_at ties (one-second resolution) so the order is the same everywhere

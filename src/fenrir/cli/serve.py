@@ -1,10 +1,12 @@
-"""`fenrir serve`: the web app on loopback, entered through a one-time launch link. Shell."""
+"""`fenrir serve`: the web app on loopback (all interfaces only inside the isolated Docker
+image), entered through a one-time launch link. Shell."""
 
 import errno
 import os
 import secrets
 import socket
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -17,6 +19,7 @@ from fenrir.server.isolation import isolation_problems
 from fenrir.settings import load_settings
 
 MIN_KEY_LEN = 32
+LOOPBACK = ("127.0.0.1", "::1")
 
 
 def _read_session_key(path: Path) -> str:
@@ -59,6 +62,12 @@ def exposes_secrets(static_dir: Path, private_dir: Path) -> bool:
     return private_dir.resolve().is_relative_to(root) or any(root.rglob(".env*"))
 
 
+def bind_hosts(environ: Mapping[str, str]) -> tuple[str, ...]:
+    # FENRIR_BIND_ALL=1 is set by the Docker image alone, whose compose file publishes the port
+    # on host loopback; the Host guard still refuses any Host but localhost/127.0.0.1
+    return ("0.0.0.0",) if environ.get("FENRIR_BIND_ALL") == "1" else LOOPBACK
+
+
 def bind_loopback(port: int) -> list[socket.socket]:
     # localhost resolves to ::1 first on macOS: leave it unbound and any local process can
     # take [::1]:port and catch the launch link
@@ -82,11 +91,13 @@ def _fail(message: str) -> NoReturn:
 
 
 def serve(
-    port: Annotated[int, typer.Option(help="Port on 127.0.0.1 and ::1")] = 8000,
+    port: Annotated[
+        int, typer.Option(help="Port on 127.0.0.1 and ::1 (0.0.0.0 in the image)")
+    ] = 8000,
     dev: Annotated[bool, typer.Option(help="Also accept the Vite dev server on :5173")] = False,
     static_dir: Annotated[Path, typer.Option(help="Built web UI directory")] = Path("web/dist"),
 ) -> None:
-    """Start the Fenrir Desk server on the loopback addresses and print its launch link."""
+    """Start the server on loopback (all interfaces in the isolated image); print the link."""
     try:
         settings = load_settings()
         if exposes_secrets(static_dir, settings.private_dir):
@@ -94,7 +105,11 @@ def serve(
         key = load_session_key(settings.private_dir)
     except (ValueError, OSError) as e:
         _fail(str(e))
-    for problem in isolation_problems(settings):  # always empty natively
+    hosts = bind_hosts(os.environ)  # process env only, never a file
+    problems = isolation_problems(settings)  # always empty natively
+    if problems and hosts != LOOPBACK:  # fail closed: all interfaces only when isolated
+        _fail("FENRIR_BIND_ALL=1 outside an isolated image: " + "; ".join(problems))
+    for problem in problems:
         typer.echo(f"warning: not isolated, terminal and strategies disabled: {problem}", err=True)
     static = static_dir if (static_dir / "index.html").is_file() else None
     if static is None:
@@ -103,7 +118,11 @@ def serve(
             "Build it with: npm --prefix web run build"
         )
     try:
-        sockets = bind_loopback(port)  # before the link is printed
+        sockets = (  # before the link is printed
+            bind_loopback(port)
+            if hosts == LOOPBACK
+            else [socket.create_server((h, port)) for h in hosts]
+        )
     except OSError as e:
         _fail(f"cannot listen on port {port}: {e}")
     code = secrets.token_urlsafe(16)
@@ -113,4 +132,6 @@ def serve(
             "Note: running natively, the Workbench terminal runs as you and is not isolated."
         )
     typer.echo(f"Open http://localhost:{VITE_PORT if dev else port}/launch?code={code}")
-    uvicorn.Server(uvicorn.Config(app, port=port)).run(sockets=sockets)
+    # an open /ws/jobs socket would otherwise hold off the lifespan (and the job child's kill)
+    config = uvicorn.Config(app, port=port, timeout_graceful_shutdown=5)
+    uvicorn.Server(config).run(sockets=sockets)

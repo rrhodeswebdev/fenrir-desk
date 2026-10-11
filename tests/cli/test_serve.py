@@ -260,3 +260,17 @@ def test_refuses_static_dir_exposing_secrets(runs, tmp_path, static, private):
     assert result.exit_code == 1
     assert "refusing to serve" in result.output
     assert runs == []
+
+
+def test_shuts_down_within_5_seconds(runs, monkeypatch):
+    configs = []
+
+    def run(self, sockets=None):
+        configs.append(self.config)
+        for s in sockets:
+            s.close()
+
+    monkeypatch.setattr(serve_mod.uvicorn.Server, "run", run)
+    assert invoke().exit_code == 0
+    # the lifespan stop() (which kills the job child) waits on open sockets otherwise
+    assert configs[0].timeout_graceful_shutdown == 5

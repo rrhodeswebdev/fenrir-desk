@@ -132,4 +132,6 @@ def serve(
             "Note: running natively, the Workbench terminal runs as you and is not isolated."
         )
     typer.echo(f"Open http://localhost:{VITE_PORT if dev else port}/launch?code={code}")
-    uvicorn.Server(uvicorn.Config(app, port=port)).run(sockets=sockets)
+    # an open /ws/jobs socket would otherwise hold off the lifespan (and the job child's kill)
+    config = uvicorn.Config(app, port=port, timeout_graceful_shutdown=5)
+    uvicorn.Server(config).run(sockets=sockets)

@@ -13,6 +13,7 @@ import uvicorn
 
 from fenrir.server.app import create_app
 from fenrir.server.auth import VITE_PORT
+from fenrir.server.isolation import isolation_problems
 from fenrir.settings import load_settings
 
 MIN_KEY_LEN = 32
@@ -91,6 +92,8 @@ def serve(
         key = load_session_key(settings.private_dir)
     except (ValueError, OSError) as e:
         _fail(str(e))
+    for problem in isolation_problems(settings):  # always empty natively
+        typer.echo(f"warning: not isolated, terminal and strategies disabled: {problem}", err=True)
     static = static_dir if (static_dir / "index.html").is_file() else None
     if static is None:
         typer.echo(

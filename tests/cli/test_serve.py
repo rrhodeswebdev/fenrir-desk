@@ -25,6 +25,8 @@ def runs(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
     monkeypatch.delenv("FENRIR_PRIVATE_DIR", raising=False)
+    monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
+    monkeypatch.delenv("FENRIR_ENV_FILE", raising=False)
     calls = []
 
     def run(self, sockets=None):
@@ -166,6 +168,15 @@ def test_notice_when_terminal_not_isolated(runs, monkeypatch):
     assert "not isolated" in invoke().output
     monkeypatch.setenv("FENRIR_PTY_USER", "claude")
     assert "not isolated" not in invoke().output
+
+
+def test_logs_each_isolation_problem_in_the_image(runs, monkeypatch):
+    assert "not isolated, terminal" not in invoke().output
+    monkeypatch.setattr(serve_mod, "isolation_problems", lambda s: ["first", "second"])
+    result = invoke()
+    assert result.exit_code == 0, result.output
+    assert "terminal and strategies disabled: first" in result.output
+    assert "terminal and strategies disabled: second" in result.output
 
 
 @pytest.mark.parametrize(

@@ -2,20 +2,24 @@
 
 import json
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from fenrir.backtest.cache import cached_run
+from fenrir.backtest.grid import GridItem, expand_grid
 from fenrir.backtest.report import PeriodResult, Report
-from fenrir.backtest.run import AccountChoice, load_account_choices, net_per_attempt, run_backtest
+from fenrir.backtest.run import AccountChoice, load_account_choices, net_per_attempt
 from fenrir.settings import load_settings
 
-Strategies = Annotated[list[Path], typer.Argument(help="Strategy files")]
+Strategies = Annotated[list[str], typer.Argument(help="Strategy file globs, relative to the cwd")]
 Accounts = Annotated[
-    list[str], typer.Option("--account", help="Rules account id, e.g. lucid-flex-50k")
+    list[str], typer.Option("--account", help="Rules account id glob, e.g. 'lucid-*'")
 ]
-Contract = Annotated[str, typer.Option("--contract", help="ES, MES, NQ or MNQ")]
+Contracts = Annotated[
+    list[str] | None,
+    typer.Option("--contract", help="ES, MES, NQ or MNQ; default both of the strategy's market"),
+]
 AsJson = Annotated[bool, typer.Option("--json", help="Print report JSON")]
 
 
@@ -38,32 +42,30 @@ def format_summary(report: Report, choices: Mapping[str, AccountChoice]) -> str:
     return line
 
 
-def _progress(path: Path, account: str):
+def _progress(item: GridItem):
+    label = f"{item.strategy_path.name} {item.account_id} {item.contract}"
+
     # stderr, so --json output stays clean; real runs take long enough to look hung
     def show(done: int, total: int) -> None:
         end = "\n" if done == total else ""
-        typer.echo(f"\r{path.name} {account}: {done}/{total} attempts{end}", err=True, nl=False)
+        typer.echo(f"\r{label}: {done}/{total} attempts{end}", err=True, nl=False)
 
     return show
 
 
 def _run(
-    strategies: list[Path], accounts: list[str], contract: str, as_json: bool, include_holdout: bool
+    strategies: list[str],
+    accounts: list[str],
+    contracts: list[str] | None,
+    as_json: bool,
+    include_holdout: bool,
 ) -> None:
     settings = load_settings()
     try:
         choices = load_account_choices(settings.data_dir)
         reports = [
-            run_backtest(
-                path,
-                account,
-                contract,
-                settings,
-                include_holdout=include_holdout,
-                on_progress=_progress(path, account),
-            )
-            for path in strategies
-            for account in accounts
+            cached_run(item, settings, include_holdout=include_holdout, on_progress=_progress(item))
+            for item in expand_grid(strategies, accounts, contracts, settings)
         ]
     except (ValueError, OSError) as e:
         typer.echo(f"\nerror: {e}", err=True)  # \n ends a partial progress line
@@ -76,14 +78,20 @@ def _run(
 
 
 def backtest(
-    strategies: Strategies, account: Accounts, contract: Contract, as_json: AsJson = False
+    strategies: Strategies,
+    account: Accounts,
+    contract: Contracts = None,
+    as_json: AsJson = False,
 ) -> None:
     """Backtest on the tuning period only (never sees the hold-out)."""
     _run(strategies, account, contract, as_json, include_holdout=False)
 
 
 def evaluate(
-    strategies: Strategies, account: Accounts, contract: Contract, as_json: AsJson = False
+    strategies: Strategies,
+    account: Accounts,
+    contract: Contracts = None,
+    as_json: AsJson = False,
 ) -> None:
     """Backtest on the tuning and hold-out periods, side by side."""
     _run(strategies, account, contract, as_json, include_holdout=True)

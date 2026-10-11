@@ -352,7 +352,7 @@ def list_reports(settings: Settings) -> tuple[Report, ...]                      
 
 `failure_reasons` keys are `"max_drawdown"`, `"flat_by"` and `"no_result"` (data ran out first); it counts every attempt without a payout. Hitting the daily loss limit is not a failure: that day halts and the attempt continues. `median_days_to_payout` counts from the attempt's start. `expected_gross_per_attempt` = mean over attempts of (payout or 0) − (activation_fee if passed); fee-free, because the evaluation price varies with coupons and is user data (`AccountChoice.eval_price`). Net per attempt = gross − that price, computed on read (`net_per_attempt`) and added by the API as `expected_net_per_attempt`; it is never in a cached report. `dll_on` records whether the daily loss limit was simulated (the user's choice, part of the key). One live/backtest rule: a new `Bracket` is rejected while a position is open. Medians are `null` when there is nothing to take a median of. `sample_equity` holds at most 6 attempts (2 passed+paid, 2 passed only, 2 breached; first by start date).
 
-CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ] [--json]` (tuning only); `fenrir evaluate <same>` (tuning + hold-out).
+CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ ...] [--json]` (tuning only); `fenrir evaluate <same>` (tuning + hold-out).
 
 ### Plan 11 — server
 

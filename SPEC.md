@@ -57,14 +57,13 @@ Format:      uv run ruff format .
 Pull data:   uv run fenrir data pull [--series ES --series NQ] [--since YYYY-MM-DD]
 Data info:   uv run fenrir data summary --json
 Data gate:   uv run --with lse-data python scripts/lse_gate.py <command>
-Backtest:    uv run fenrir backtest <strategy files...> --account <id> [--account ...] --contract MNQ [--json]   # tuning only
-Evaluate:    uv run fenrir evaluate <same args>                                                              # tuning + hold-out
+Backtest:    uv run fenrir backtest '<strategy glob>'... --account '<glob>' [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached; quote globs (zsh)
+Evaluate:    uv run fenrir evaluate <same args>                                                                      # tuning + hold-out
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
-Backtest:    uv run fenrir backtest <strategy globs...> --account <glob> [--contract MNQ] [--json]   # globs, optional --contract (10)
 Serve:       uv run fenrir serve [--port 8000] [--dev] [--static-dir web/dist]                    # (11)
 Web dev:     npm --prefix web run dev                                                             # (12)
 Typecheck:   npm --prefix web run typecheck                                                       # (12)
@@ -107,7 +106,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex files only) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
-| `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09 done; 10 not started |
+| `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3 done; 10.4–10.5 not started |
 | `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
 | `web` | React UI, every page | server | 12–16, 23, 24 | Not started |
 | `skill` | Claude project skill | backtest | 17 | Not started |

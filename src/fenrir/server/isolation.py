@@ -4,6 +4,7 @@ import os
 import stat
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from fenrir.settings import Settings
 
@@ -59,6 +60,20 @@ def check(
         if not env_file_path.is_relative_to(private_dir_path):
             reasons.append(f"FENRIR_ENV_FILE {env_file_path} is outside the private dir")
     return reasons
+
+
+def drop_to(user: str) -> tuple[dict[str, str], dict[str, Any]]:
+    """The env overlay and `Popen` kwargs that run a child as `user` (KeyError: no such user).
+
+    `user=` does not reset HOME, USER, LOGNAME or SHELL, so they come from its passwd entry.
+    """
+    import pwd  # POSIX only; FENRIR_PTY_USER is never set natively on Windows
+
+    pw = pwd.getpwnam(user)
+    return (
+        {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell},
+        {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []},
+    )
 
 
 def isolation_problems(settings: Settings) -> list[str]:

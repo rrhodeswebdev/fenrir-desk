@@ -12,7 +12,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
 from fenrir.server.pull import PullRunner, pull_command, pull_env
-from fenrir.server.routes import data, rules
+from fenrir.server.routes import data, rules, terminal
 from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
@@ -112,6 +112,7 @@ def create_app(
     # app.include_router(<area>.router, dependencies=[Depends(require_session)])
     app.include_router(rules.router, dependencies=[Depends(require_session)])
     app.include_router(data.router, dependencies=[Depends(require_session)])
+    app.include_router(terminal.router)  # WebSockets call check_ws themselves, before accept()
 
     if static_dir is not None:
         _mount_spa(app, static_dir.resolve())

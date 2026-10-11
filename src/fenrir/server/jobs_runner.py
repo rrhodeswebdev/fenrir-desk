@@ -27,7 +27,7 @@ from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
-from fenrir.server.isolation import isolation_problems
+from fenrir.server.isolation import drop_to, isolation_problems
 from fenrir.server.jobs import (
     KEY,
     Job,
@@ -371,11 +371,8 @@ class JobRunner:
         }
         as_user: dict[str, Any] = {}
         if user:
-            import pwd  # POSIX only; unset natively on Windows
-
-            pw = pwd.getpwnam(user)
-            env |= {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell}
-            as_user = {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []}
+            overlay, as_user = drop_to(user)
+            env |= overlay
         with self._lock:
             if job and self._stopping:
                 raise RuntimeError("the job runner is stopping")

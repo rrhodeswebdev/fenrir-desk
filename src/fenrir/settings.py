@@ -72,6 +72,41 @@ def parse_env_text(text: str) -> dict[str, str]:
     }
 
 
+def _env_key(line: str) -> str | None:
+    k, sep, _ = line.strip().partition("=")
+    return k.strip().removeprefix("export ").strip() if sep and not k.startswith("#") else None
+
+
+def _env_line(key: str, value: str) -> str:
+    if not key.isidentifier():
+        raise ValueError(f"{key!r}: not a valid env key")
+    if value.splitlines() not in ([], [value]):
+        raise ValueError(f"{key}: value must be a single line")
+    # parse_env_text strips one pair of matching quotes, so quoting always round-trips
+    return f'{key}="{value}"' if _env_value(value) != value else f"{key}={value}"
+
+
+def _replace_line(line: str, updates: Mapping[str, str]) -> str:
+    key = _env_key(line)
+    if key not in updates:
+        return line
+    # keep whatever separator splitlines cut on, not just \r and \n
+    return _env_line(key, updates[key]) + line[len(line.splitlines()[0]) :]
+
+
+def update_env_text(text: str, updates: Mapping[str, str]) -> str:
+    lines = text.splitlines(keepends=True)
+    present = {_env_key(line) for line in lines}
+    out = "".join(_replace_line(line, updates) for line in lines)
+    added = "".join(_env_line(k, v) + "\n" for k, v in updates.items() if k not in present)
+    return out + ("\n" if added and out and not out.endswith("\n") else "") + added
+
+
+def mask_secret(value: str) -> str:
+    # last 4 only once that is at most a third of the secret
+    return "" if not value else "••••" + value[-4:] if len(value) >= 12 else "••••"
+
+
 def load_settings(env_file: Path = Path(".env")) -> Settings:
     from_file = parse_env_text(env_file.read_text()) if env_file.exists() else {}
     # an empty env var (e.g. compose passing through an unset one) must not hide the file's value

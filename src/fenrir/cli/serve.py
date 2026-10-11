@@ -5,6 +5,7 @@ import os
 import secrets
 import socket
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, NoReturn
 
@@ -17,6 +18,7 @@ from fenrir.server.isolation import isolation_problems
 from fenrir.settings import load_settings
 
 MIN_KEY_LEN = 32
+LOOPBACK = ("127.0.0.1", "::1")
 
 
 def _read_session_key(path: Path) -> str:
@@ -57,6 +59,12 @@ def exposes_secrets(static_dir: Path, private_dir: Path) -> bool:
     # static files are served without the session cookie, so nothing secret may sit under them
     root = static_dir.resolve()
     return private_dir.resolve().is_relative_to(root) or any(root.rglob(".env*"))
+
+
+def bind_hosts(environ: Mapping[str, str]) -> tuple[str, ...]:
+    # FENRIR_BIND_ALL=1 is set by the Docker image alone, whose compose file publishes the port
+    # on host loopback; the Host guard still refuses any Host but localhost/127.0.0.1
+    return ("0.0.0.0",) if environ.get("FENRIR_BIND_ALL") == "1" else LOOPBACK
 
 
 def bind_loopback(port: int) -> list[socket.socket]:
@@ -103,7 +111,12 @@ def serve(
             "Build it with: npm --prefix web run build"
         )
     try:
-        sockets = bind_loopback(port)  # before the link is printed
+        hosts = bind_hosts(os.environ)  # process env only, never a file
+        sockets = (  # before the link is printed
+            bind_loopback(port)
+            if hosts == LOOPBACK
+            else [socket.create_server((h, port)) for h in hosts]
+        )
     except OSError as e:
         _fail(f"cannot listen on port {port}: {e}")
     code = secrets.token_urlsafe(16)

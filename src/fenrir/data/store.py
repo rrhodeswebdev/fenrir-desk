@@ -20,6 +20,7 @@ SCHEMA = {
     "close": pl.Float64,
     "volume": pl.Int64,
 }
+SERIES = ("ES", "NQ")  # price series with bars; MES and MNQ use ES and NQ prices
 
 
 @dataclass(frozen=True, slots=True)

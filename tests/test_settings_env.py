@@ -34,6 +34,20 @@ def test_update_rejects_multiline_value():
         update_env_text("", {"K": "a\nINJECTED=1"})
 
 
+def test_update_keeps_unusual_line_separators():
+    assert update_env_text("K=old\x85B=1\n", {"K": "new"}) == "K=new\x85B=1\n"
+
+
+def test_update_rewrites_every_duplicate_key():
+    assert update_env_text("K=1\nexport K=2\n", {"K": "3"}) == "K=3\nK=3\n"
+
+
+@pytest.mark.parametrize("key", ["A\nEVIL", "A=B", "#A", ""])
+def test_update_rejects_bad_key(key):
+    with pytest.raises(ValueError):
+        update_env_text("", {key: "1"})
+
+
 def test_mask_shows_last_four_of_long_secret():
     assert mask_secret("sk-abcdefgh1234") == "••••1234"
 

@@ -78,6 +78,8 @@ def _env_key(line: str) -> str | None:
 
 
 def _env_line(key: str, value: str) -> str:
+    if not key.isidentifier():
+        raise ValueError(f"{key!r}: not a valid env key")
     if value.splitlines() not in ([], [value]):
         raise ValueError(f"{key}: value must be a single line")
     # parse_env_text strips one pair of matching quotes, so quoting always round-trips
@@ -88,7 +90,8 @@ def _replace_line(line: str, updates: Mapping[str, str]) -> str:
     key = _env_key(line)
     if key not in updates:
         return line
-    return _env_line(key, updates[key]) + line[len(line.rstrip("\r\n")) :]
+    # keep whatever separator splitlines cut on, not just \r and \n
+    return _env_line(key, updates[key]) + line[len(line.splitlines()[0]) :]
 
 
 def update_env_text(text: str, updates: Mapping[str, str]) -> str:

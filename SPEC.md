@@ -116,7 +116,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3, 10.5 done; 10.4 not started |
 | `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
-| `web` | React UI, every page | server | 12–16, 23, 24 | 12.1 scaffold and API client done |
+| `web` | React UI, every page | server | 12–16, 23, 24 | 12.1 scaffold and API client, 12.2 theme and Button done |
 | `skill` | Claude project skill | backtest | 17 | Not started |
 | `docker` | Image and compose | server, web | 18 | Not started |
 | `addon` | NinjaTrader C# add-on | — | 19 | Not started |

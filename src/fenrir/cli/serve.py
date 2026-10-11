@@ -1,4 +1,5 @@
-"""`fenrir serve`: the web app on loopback, entered through a one-time launch link. Shell."""
+"""`fenrir serve`: the web app on loopback (all interfaces only inside the isolated Docker
+image), entered through a one-time launch link. Shell."""
 
 import errno
 import os
@@ -90,11 +91,13 @@ def _fail(message: str) -> NoReturn:
 
 
 def serve(
-    port: Annotated[int, typer.Option(help="Port on 127.0.0.1 and ::1")] = 8000,
+    port: Annotated[
+        int, typer.Option(help="Port on 127.0.0.1 and ::1 (0.0.0.0 in the image)")
+    ] = 8000,
     dev: Annotated[bool, typer.Option(help="Also accept the Vite dev server on :5173")] = False,
     static_dir: Annotated[Path, typer.Option(help="Built web UI directory")] = Path("web/dist"),
 ) -> None:
-    """Start the Fenrir Desk server on the loopback addresses and print its launch link."""
+    """Start the server on loopback (all interfaces in the isolated image); print the link."""
     try:
         settings = load_settings()
         if exposes_secrets(static_dir, settings.private_dir):
@@ -102,7 +105,11 @@ def serve(
         key = load_session_key(settings.private_dir)
     except (ValueError, OSError) as e:
         _fail(str(e))
-    for problem in isolation_problems(settings):  # always empty natively
+    hosts = bind_hosts(os.environ)  # process env only, never a file
+    problems = isolation_problems(settings)  # always empty natively
+    if problems and hosts != LOOPBACK:  # fail closed: all interfaces only when isolated
+        _fail("FENRIR_BIND_ALL=1 outside an isolated image: " + "; ".join(problems))
+    for problem in problems:
         typer.echo(f"warning: not isolated, terminal and strategies disabled: {problem}", err=True)
     static = static_dir if (static_dir / "index.html").is_file() else None
     if static is None:
@@ -111,7 +118,6 @@ def serve(
             "Build it with: npm --prefix web run build"
         )
     try:
-        hosts = bind_hosts(os.environ)  # process env only, never a file
         sockets = (  # before the link is printed
             bind_loopback(port)
             if hosts == LOOPBACK

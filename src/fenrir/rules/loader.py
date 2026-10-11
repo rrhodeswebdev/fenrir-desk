@@ -1,4 +1,4 @@
-"""Account id <-> rules file. The only rules code that touches disk."""
+"""Account id <-> rules file. Reads rules files; `writer.py` writes them."""
 
 import re
 from pathlib import Path
@@ -41,13 +41,20 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
 def load_account(aid: str, rules_dir: Path) -> AccountRules:
     path = rules_path(aid, rules_dir)
     try:
-        rules = AccountRules.model_validate(
-            yaml.load(path.read_text(encoding="utf-8"), _UniqueKeyLoader)
-        )
+        text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         raise ValueError(f"unknown account {aid!r}: {path} not found") from None
-    # ValueError also covers ValidationError, bad YAML dates and non-UTF-8 files
-    except (yaml.YAMLError, ValueError, OSError) as e:
+    except (ValueError, OSError) as e:  # ValueError: not UTF-8
+        raise ValueError(f"{path}: {e}") from e
+    return parse_account(text, aid, path)
+
+
+def parse_account(text: str, aid: str, path: Path) -> AccountRules:
+    """`text` as the rules for `aid`; `path` only names the file in errors."""
+    try:
+        rules = AccountRules.model_validate(yaml.load(text, _UniqueKeyLoader))
+    # ValueError also covers ValidationError and bad YAML dates
+    except (yaml.YAMLError, ValueError) as e:
         raise ValueError(f"{path}: {e}") from e
     if account_id(rules) != aid:
         raise ValueError(f"{path}: file says {account_id(rules)}, path says {aid}")

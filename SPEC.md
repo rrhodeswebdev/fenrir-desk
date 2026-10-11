@@ -106,7 +106,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex files only) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
-| `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09 done; 10 not started |
+| `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3 done; 10.4–10.5 not started |
 | `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
 | `web` | React UI, every page | server | 12–16, 23, 24 | Not started |
 | `skill` | Claude project skill | backtest | 17 | Not started |

@@ -15,13 +15,18 @@ TICK = NQ.tick
 MINUTE = timedelta(minutes=1)
 
 
-def walk(moves: list[tuple[int, int, int]]) -> tuple[Bar, ...]:
-    """Random walk from 14:00 ET, skipping the 17:00 ET hour (crosses flat-by, a day)."""
+def walk(moves: list[tuple[int, int, int, int]]) -> tuple[Bar, ...]:
+    """Random walk from 14:00 ET, skipping the 17:00 ET hour (crosses flat-by, a day).
+
+    Opens can gap from the last close: without gaps no stop-out exceeds what pretrade allowed,
+    so the daily loss limit could never fire.
+    """
     out, ts, price = [], et(D1, "14:00"), 20000.0
-    for close_ticks, up, down in moves:
+    for gap, close_ticks, up, down in moves:
         while ts.astimezone(NY).hour == 17:
             ts += MINUTE
-        o, c = price, price + close_ticks * TICK
+        o = price + gap * TICK
+        c = o + close_ticks * TICK
         out.append(Bar(ts, o, max(o, c) + up * TICK, min(o, c) - down * TICK, c, 1, "NQZ25"))
         price, ts = c, ts + MINUTE
     return tuple(out)
@@ -43,7 +48,7 @@ def toy(every: int, stop: int, target: int) -> Strategy:
 
 inputs = given(
     moves=st.lists(
-        st.tuples(st.integers(-8, 8), st.integers(0, 6), st.integers(0, 6)),
+        st.tuples(st.integers(-4, 4), st.integers(-8, 8), st.integers(0, 6), st.integers(0, 6)),
         min_size=2,
         max_size=400,
     ),
@@ -51,20 +56,24 @@ inputs = given(
     stop=st.integers(1, 40),
     target=st.integers(1, 40),
     drawdown=st.sampled_from([150.0, 2000.0]),
+    trailing=st.sampled_from(["end_of_day", "intraday"]),
+    daily_loss=st.sampled_from([None, 150.0]),
 )
 
 
-def run(moves, every, stop, target, drawdown):
+def run(moves, every, stop, target, drawdown, trailing, daily_loss):
     bars = walk(moves)
-    rules = make_rules(drawdown=drawdown)
+    rules = make_rules(drawdown=drawdown, trailing=trailing, daily_loss=daily_loss)
     result = run_attempt(bars, 0, len(bars), toy(every, stop, target), rules, NQ)
     return bars, result
 
 
 @inputs
 @settings(max_examples=200, deadline=None)
-def test_fills_never_better_than_the_bar_allows(moves, every, stop, target, drawdown):
-    bars, r = run(moves, every, stop, target, drawdown)
+def test_fills_never_better_than_the_bar_allows(
+    moves, every, stop, target, drawdown, trailing, daily_loss
+):
+    bars, r = run(moves, every, stop, target, drawdown, trailing, daily_loss)
     by_ts = {b.ts: b for b in bars}
     for n, f in enumerate(r.fills):
         b = by_ts[f.ts]
@@ -78,8 +87,8 @@ def test_fills_never_better_than_the_bar_allows(moves, every, stop, target, draw
 
 @inputs
 @settings(max_examples=200, deadline=None)
-def test_no_fills_after_breach(moves, every, stop, target, drawdown):
-    _, r = run(moves, every, stop, target, drawdown)
+def test_no_fills_after_breach(moves, every, stop, target, drawdown, trailing, daily_loss):
+    _, r = run(moves, every, stop, target, drawdown, trailing, daily_loss)
     if r.breach is not None:
         assert r.outcome == "breached"
         assert all(f.ts <= r.breach.ts for f in r.fills)
@@ -87,15 +96,17 @@ def test_no_fills_after_breach(moves, every, stop, target, drawdown):
 
 @inputs
 @settings(max_examples=100, deadline=None)
-def test_same_input_same_result(moves, every, stop, target, drawdown):
-    args = (moves, every, stop, target, drawdown)
+def test_same_input_same_result(moves, every, stop, target, drawdown, trailing, daily_loss):
+    args = (moves, every, stop, target, drawdown, trailing, daily_loss)
     assert run(*args)[1] == run(*args)[1]
 
 
 @inputs
 @settings(max_examples=200, deadline=None)
-def test_positions_never_span_trading_days(moves, every, stop, target, drawdown):
-    _, r = run(moves, every, stop, target, drawdown)
+def test_positions_never_span_trading_days(
+    moves, every, stop, target, drawdown, trailing, daily_loss
+):
+    _, r = run(moves, every, stop, target, drawdown, trailing, daily_loss)
     entries, exits = r.fills[0::2], r.fills[1::2]
     for entry, exit_ in zip(entries, exits, strict=False):
         assert trading_day(entry.ts) == trading_day(exit_.ts)

@@ -12,13 +12,13 @@ You write deterministic strategy code whose only goal is passing a Lucid evaluat
 - **Never arm or disarm a strategy.** Arming is user-only, from the UI. No CLI command arms; do not try the API with `curl` or anything else.
 - **Never read `.env`, the session token or `data/fenrir.db`.**
 - **Never tune on the hold-out.** Use `uv run fenrir backtest` (tuning period only) while designing. Run `uv run fenrir evaluate` once, at the end, when tuning is frozen or the user asks. Never change a strategy, its idea or its `PARAMS` because of hold-out results; report them instead.
-- **`step` must be pure: no I/O, no clock, no randomness.** No `datetime.now()`, `random`, files or network. Time comes from `bar.ts` / `ctx.ts`. The loader rejects such imports and calls.
+- **`step` must be pure: no I/O, no clock, no randomness.** No `datetime.now()`, `random`, files or network. Time comes from `bar.ts` / `ctx.ts`. The loader only blocks a fixed list of imports (`os`, `time`, `random`, ...) and `.now()`/`.today()` calls; it is a static check, not a sandbox, so purity is on you.
 - **Every entry has a stop.** The only entry action is `Bracket(side, qty, stop, target)`.
 - Edit only `strategies/*.py` unless the user asks for something else.
 
 ## The loop
 
-1. **Read the account's rules.** `rules/lucid/<type>-<size>.yaml` (account id `lucid-<type>-<size>`, e.g. `lucid-flex-50k`). Note the profit target, drawdown amount and whether it trails end-of-day or intraday, daily loss limit, consistency, `flat_by`, contract limits and costs. Semantics: `docs/lucid-mechanics.md`.
+1. **Read the account's rules.** `rules/lucid/<type>-<size>.yaml` (account id `lucid-<type>-<size>`, e.g. `lucid-flex-50k`). Note the profit target, drawdown amount and whether it trails end-of-day or intraday, consistency, `flat_by`, contract limits and costs. The `daily_loss_limit` applies only when the user turned the DLL on for that account (`dll_on`, shown in every report); otherwise there is none. Semantics: `docs/lucid-mechanics.md`.
 2. **Inspect data coverage.** `uv run fenrir data summary --json` shows coverage and gaps for ES and NQ. Do not form ideas from the hold-out window (the most recent `holdout_months`, 12 by default, as shown in every report).
 3. **Write the strategy** in `strategies/<name>.py` per the contract below (full example: `strategies/orb.py`; contract: `strategies/CLAUDE.md`).
 4. **Backtest the tuning period.** `uv run fenrir backtest 'strategies/<name>.py' --account 'lucid-flex-50k' --json`. Grids take several strategy globs, account globs and contracts: `uv run fenrir backtest 'strategies/*.py' --account 'lucid-*' --contract MNQ --json` (contract repeatable; default both contracts of `MARKET`). Quote globs. Results are cached by file hash, so re-running an unchanged file is instant.
@@ -29,8 +29,8 @@ You write deterministic strategy code whose only goal is passing a Lucid evaluat
 ## How the engine behaves
 
 - **Fills are conservative:** entry at the next bar's open plus 1 tick; if stop and target are both in one bar, the stop fills first; stops and market exits get 1 tick slippage.
-- **A new `Bracket` is rejected while a position is open,** and so is one whose stop-out would breach the drawdown, the daily loss limit or the contract limit. Check `ctx.position.qty == 0` and size the stop inside `ctx.account.drawdown_remaining` and `daily_loss_remaining`.
-- **The daily loss limit halts the day, not the attempt:** the position is flattened, no more entries that day, and the attempt continues next session.
+- **A new `Bracket` is rejected while a position is open,** and so is one whose stop-out would breach the drawdown, the daily loss limit or the contract limit. Rejections are silent: also when another bracket is still pending (it fills on the next bar), when stop and target are not on either side of this bar's close (stop below and target above for a long), on a bar closing at or past flat-by, and on a DLL-halted day. Check `ctx.position.qty == 0` and size the stop inside `ctx.account.drawdown_remaining` and, when it is not `None`, `daily_loss_remaining`.
+- **The daily loss limit (when `dll_on`) halts the day, not the attempt:** the position is flattened, no more entries that day, and the attempt continues next session.
 - **Roll window:** from the Thursday 8 days before quarterly expiry through the Tuesday of expiry week there are no bars in backtests and no entries live.
 - Open positions are flattened at the account's `flat_by` (16:40 ET at the latest); do not plan to hold overnight.
 
@@ -39,7 +39,7 @@ You write deterministic strategy code whose only goal is passing a Lucid evaluat
 `step(state, bar, ctx) -> (state, actions)` runs once per closed 1-minute bar.
 
 - `bar`: `ts` (open time, UTC), `open`, `high`, `low`, `close`, `volume`, `contract` (unadjusted front month, e.g. `NQZ26`).
-- `ctx`: `ts`; `bars` (last <= 500, ending with this bar); `position` (`qty` signed, `entry`, `stop`, `target`); `account` (`phase`, `drawdown_remaining`, `daily_loss_remaining`, `today_pnl`, `target_remaining`); `spec` (`symbol`, `tick`, `point_value`, `minis`).
+- `ctx`: `ts`; `bars` (last <= 500, ending with this bar); `position` (`qty` signed, `entry`, `stop`, `target`); `account` (`phase`, `drawdown_remaining`, `daily_loss_remaining` (`None` when the DLL is off), `today_pnl`, `target_remaining` (`None` once funded)); guard both before doing arithmetic with them; `spec` (`symbol`, `tick`, `point_value`, `minis`).
 - Actions (`fenrir.core.actions`): `Bracket(side, qty, stop, target)` with absolute prices, `Flatten()`, `Cancel(order_id)`.
 - Keep state in frozen dataclasses and put the params in it (`step` does not receive them).
 

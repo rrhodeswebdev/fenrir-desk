@@ -60,11 +60,9 @@ def day_bars(day: date, k: int, contract: str) -> list[Bar]:
 @pytest.fixture(autouse=True)
 def fresh_process_state():
     """Each test starts with no shared pool or memoized inputs, and leaves no workers behind."""
-    run_module._drop_pool()
-    run_module._memo.clear()
+    run_module.release()
     yield
-    run_module._drop_pool()
-    run_module._memo.clear()
+    run_module.release()
 
 
 @pytest.fixture
@@ -306,7 +304,7 @@ def test_a_worker_error_cancels_the_queued_chunks(settings, tmp_path, monkeypatc
 )
 def test_each_changed_input_is_named(settings, changed, label):
     load_args = (ORB, ACCOUNT, "MNQ", settings, False)
-    expected = list(run_module._load(*load_args)[-1])
+    expected = list(run_module._plan(load_args, settings.holdout_months)[2])
     run_module._run_chunk(load_args, tuple(expected), ())  # untampered: passes
     expected[changed] = "tampered" if changed < 3 else -1
     with pytest.raises(ValueError, match=f"{label} changed during the backtest"):
@@ -338,12 +336,24 @@ def test_a_grid_loads_each_series_once_in_the_parent(settings, monkeypatch, spy_
 
 
 def test_a_worker_loads_each_series_once_across_items(settings, monkeypatch):
+    items = [(ORB, ACCOUNT, contract, settings, False) for contract in ("MNQ", "NQ")]
+    seen = [run_module._plan(a, settings.holdout_months)[2] for a in items]  # keeps no bars
     loads = counted_loads(monkeypatch)
-    for contract in ("MNQ", "NQ"):  # what a reused worker sees for two grid items
-        load_args = (ORB, ACCOUNT, contract, settings, False)
-        seen = run_module._load(*load_args)[-1]
-        run_module._run_chunk(load_args, seen, ())
+    for load_args, expected in zip(items, seen, strict=True):  # what a reused worker sees
+        run_module._run_chunk(load_args, expected, ())
     assert loads == ["NQ"]
+
+
+def test_switching_contracts_and_releasing_do_not_change_reports(settings):
+    def run(contract):
+        r = run_backtest(ORB, ACCOUNT, contract, settings, include_holdout=True)
+        return {**r, "created_at": None}
+
+    first = run("NQ")
+    run("MNQ")
+    assert run("NQ") == first
+    run_module.release()
+    assert run("NQ") == first
 
 
 FULL_NQ = 3_386_345  # bars in the full NQ series, Open Question 5
@@ -351,18 +361,26 @@ GIB = 1 << 30
 
 
 @pytest.mark.parametrize(
-    ("memory", "cpus", "bars", "workers"),
+    ("memory", "cpus", "bars", "cap"),
     [
-        (6 * GIB, 16, FULL_NQ, 2),  # the parent holds the series too: 3 processes fit
-        (64 * GIB, 16, FULL_NQ, 16),  # never more than the cores
-        (2 * GIB, 16, FULL_NQ, 1),  # always at least one
-        (6 * GIB, 4, 1_000, 4),  # small data fits every core
-        (None, 16, FULL_NQ, 2),  # unknown memory: conservative
-        (None, 1, FULL_NQ, 1),
+        (6 * GIB, 16, FULL_NQ, (2, 0)),  # 70% of 6 GiB, less the parent, fits 2
+        (12 * GIB, 16, FULL_NQ, (4, 0)),
+        (64 * GIB, 16, FULL_NQ, (16, 0)),  # never more than the cores
+        (4 * GIB, 16, FULL_NQ, (1, 0)),
+        (2 * GIB, 16, FULL_NQ, (1, 657_660_847)),  # always at least one, and the shortfall
+        (6 * GIB, 4, 1_000, (4, 0)),  # small data fits every core
+        (None, 16, FULL_NQ, (2, 0)),  # unknown memory: conservative
+        (None, 1, FULL_NQ, (1, 0)),
     ],
 )
-def test_worker_cap_fits_memory(memory, cpus, bars, workers):
-    assert worker_cap(memory, cpus, bars) == workers
+def test_worker_cap_fits_memory(memory, cpus, bars, cap):
+    assert worker_cap(memory, cpus, bars) == cap
+
+
+def test_too_little_memory_warns_and_runs_one(monkeypatch, capsys):
+    monkeypatch.setattr(run_module, "_memory_limit", lambda: 2 * GIB)
+    assert run_module._workers(FULL_NQ) == 1
+    assert "0.7 GB more than 70% of the 2.1 GB memory limit" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(("text", "limit"), [("6442450944\n", 6 * GIB), ("max\n", None)])

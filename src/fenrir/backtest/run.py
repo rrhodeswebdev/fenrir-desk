@@ -3,6 +3,8 @@
 import json
 import multiprocessing
 import os
+import sys
+import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
@@ -23,14 +25,17 @@ from fenrir.settings import Settings
 from fenrir.strategy.loader import file_hash, load_strategy
 
 CHUNK = 16  # attempts per task: amortizes pickling without starving cores
-# measured (SPEC Open Question 5): a process holding the full 3.4M-bar NQ series is about 1.9 GB
+# measured (SPEC Open Question 5): a worker holding the full 3.4M-bar NQ series is about 1.9 GB
 PROCESS_BYTES = 200_000_000  # interpreter, polars and the fenrir imports
 BYTES_PER_BAR = 520
+BUDGET_PCT = 70  # of the memory limit: headroom for load peaks, the OS and other processes
+# cgroup v2 only (Docker Desktop's); a v1 limit is not read and physical memory is used instead
 CGROUP_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
 
 # per process: name -> (key, value). One value per name, so a new series replaces the old one
 _memo: dict[str, tuple] = {}
 _pool: tuple[tuple, ProcessPoolExecutor] | None = None  # ((workers, cwd), pool), kept across runs
+_lock = threading.Lock()  # one run at a time per process: the pool and memo are shared
 
 
 class AccountChoice(BaseModel):
@@ -64,12 +69,16 @@ def net_per_attempt(
     )
 
 
-def worker_cap(memory: int | None, cpus: int, bars: int) -> int:
-    """Workers that fit in `memory` bytes beside the parent, which holds the same bars. Pure."""
+def worker_cap(memory: int | None, cpus: int, bars: int) -> tuple[int, int]:
+    """(workers, bytes one worker lacks) within BUDGET_PCT of `memory`, beside the parent.
+
+    The parent keeps only periods, so it counts as PROCESS_BYTES. Never fewer than 1 worker. Pure.
+    """
     if memory is None:
-        return min(2, cpus)  # unknown limit: stay small rather than swap
-    per_process = PROCESS_BYTES + BYTES_PER_BAR * bars
-    return max(1, min(cpus, memory // per_process - 1))
+        return min(2, cpus), 0  # unknown limit: stay small rather than swap
+    free = memory * BUDGET_PCT // 100 - PROCESS_BYTES
+    per_worker = PROCESS_BYTES + BYTES_PER_BAR * bars
+    return max(1, min(cpus, free // per_worker)), max(0, per_worker - free)
 
 
 def _memory_limit() -> int | None:
@@ -86,6 +95,18 @@ def _memory_limit() -> int | None:
         return None
 
 
+def _workers(bars: int) -> int:
+    memory = _memory_limit()
+    workers, short = worker_cap(memory, os.cpu_count() or 1, bars)
+    if short:
+        print(
+            f"warning: one backtest worker for {bars:,} bars needs about {short / 1e9:.1f} GB more "
+            f"than {BUDGET_PCT}% of the {memory / 1e9:.1f} GB memory limit; running 1 anyway",
+            file=sys.stderr,
+        )
+    return workers
+
+
 def _once(name: str, key, make: Callable):
     """make() once per process per key; the old value is dropped first, so two never coexist."""
     if name not in _memo or _memo[name][0] != key:
@@ -94,9 +115,17 @@ def _once(name: str, key, make: Callable):
     return _memo[name][1]
 
 
+def release() -> None:
+    """Shut the shared workers down and forget the memoized inputs, freeing their memory."""
+    with _lock:
+        _drop_pool()
+        _memo.clear()
+
+
 def _load(
     strategy_path: Path, account_id: str, contract: str, settings: Settings, dll_on: bool
 ) -> tuple:
+    """Everything but the bars, plus the key the bars are loaded (and memoized) by."""
     strategy = load_strategy(strategy_path)
     instruments = load_instruments()
     contract_spec = spec(instruments, contract)
@@ -109,13 +138,19 @@ def _load(
     rules_hash = file_hash(rules_path(account_id, settings.rules_dir))
     version = data_version(settings.data_dir)
     rules = with_dll(load_account(account_id, settings.rules_dir), dll_on)
-    bars = _once(
-        "bars",
-        (settings.data_dir.resolve(), strategy.market, version),
-        lambda: load_bars(settings.data_dir, instruments, strategy.market),
-    )
-    seen = (strategy.hash, rules_hash, version, len(bars))
-    return bars, strategy, rules, contract_spec, seen
+    bars_key = (settings.data_dir.resolve(), strategy.market, version, instruments)
+    return strategy, rules, contract_spec, rules_hash, bars_key
+
+
+def _load_bars(bars_key: tuple) -> tuple:
+    data_dir, series, _, instruments = bars_key
+    return load_bars(data_dir, instruments, series)
+
+
+def _worker_inputs(load_args: tuple) -> tuple:
+    strategy, rules, contract_spec, rules_hash, bars_key = _load(*load_args)
+    bars = _once("bars", bars_key, lambda: _load_bars(bars_key))
+    return bars, strategy, rules, contract_spec, (strategy.hash, rules_hash, bars_key[2], len(bars))
 
 
 def _run_chunk(
@@ -124,7 +159,7 @@ def _run_chunk(
     # workers outlive a run: a later grid item reloads strategy and rules, and reuses the bars
     try:
         bars, strategy, rules, contract_spec, seen = _once(
-            "inputs", (load_args, expected), lambda: _load(*load_args)
+            "inputs", (load_args, expected, load_instruments()), lambda: _worker_inputs(load_args)
         )
     except Exception as e:
         raise ValueError(f"a worker could not load the inputs (did a file change?): {e}") from e
@@ -180,15 +215,19 @@ def _run_all(
 
 
 def _plan(load_args, holdout_months: int):
-    """Load and split into periods; the bars and periods stay memoized for the next grid item."""
-    bars, strategy, rules, _, seen = _load(*load_args)
-    if not bars:
-        raise ValueError(
-            f"no {strategy.market} bars in {load_args[3].data_dir}; run `fenrir data pull`"
-        )
-    tuning, holdout = _once(
-        "periods", (_memo["bars"][0], holdout_months), lambda: periods(bars, holdout_months)
-    )
+    """Load and split into periods; only the periods and bar count stay memoized, not the bars."""
+    strategy, rules, _, rules_hash, bars_key = _load(*load_args)
+
+    def split():
+        bars = _load_bars(bars_key)
+        if not bars:
+            raise ValueError(
+                f"no {strategy.market} bars in {load_args[3].data_dir}; run `fenrir data pull`"
+            )
+        return *periods(bars, holdout_months), len(bars)
+
+    tuning, holdout, count = _once("plan", (bars_key, holdout_months), split)
+    seen = (strategy.hash, rules_hash, bars_key[2], count)
     return strategy, rules, seen, tuning, holdout
 
 
@@ -201,6 +240,10 @@ def run_backtest(
     include_holdout: bool,
     on_progress: Callable[[int, int], None] | None = None,
 ) -> Report:
+    """Runs are serialized per process: a second thread waits for the first to finish.
+
+    The process keeps a spawn pool and memoized inputs afterwards; `release()` frees them.
+    """
     dll_on = load_account_choices(settings.data_dir).get(account_id, AccountChoice()).dll_on
     load_args = (
         strategy_path,
@@ -209,19 +252,20 @@ def run_backtest(
         settings,
         dll_on,
     )  # workers get the same choice
-    strategy, rules, seen, tuning, holdout = _plan(load_args, settings.holdout_months)
-    try:
-        json.dumps(dict(strategy.params))
-    except TypeError as e:
-        raise ValueError(f"{strategy.name}: PARAMS must be JSON-serializable ({e})") from e
-    run_periods = [tuning, holdout] if include_holdout and holdout else [tuning]
-    results = _run_all(
-        [r for p in run_periods for r in p.ranges],
-        load_args,
-        seen,
-        worker_cap(_memory_limit(), os.cpu_count() or 1, seen[3]),
-        on_progress,
-    )
+    with _lock:
+        strategy, rules, seen, tuning, holdout = _plan(load_args, settings.holdout_months)
+        try:
+            json.dumps(dict(strategy.params))
+        except TypeError as e:
+            raise ValueError(f"{strategy.name}: PARAMS must be JSON-serializable ({e})") from e
+        run_periods = [tuning, holdout] if include_holdout and holdout else [tuning]
+        results = _run_all(
+            [r for p in run_periods for r in p.ranges],
+            load_args,
+            seen,
+            _workers(seen[3]),
+            on_progress,
+        )
 
     def summarize(p: Period):
         return period_result([results[r] for r in p.ranges], rules, p.start, p.end)

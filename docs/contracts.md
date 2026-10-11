@@ -296,6 +296,10 @@ def load_account_choices(data_dir: Path) -> dict[str, AccountChoice]
 def net_per_attempt(period: PeriodResult, account_id: str, choices: Mapping[str, AccountChoice]) -> float
     # pure: expected_gross_per_attempt − eval_price. Every net figure shown, ranked or compared uses this,
     # with choices loaded once per command/request. Never stored in a report.
+def release() -> None
+    # shell: shut the shared spawn pool down and clear the memoized inputs. run_backtest keeps both
+    # between runs (one at a time per process, under a lock); a long-lived process (#43) calls this
+    # when its queue is idle so idle workers stop holding a series
 # fenrir.backtest.report
 def report_key(strategy_hash, rules_hash, data_version, contract, holdout_months, include_holdout, dll_on) -> str
     # cache_key = report_key over the file sha256s and the account's dll_on; eval_price is never in it

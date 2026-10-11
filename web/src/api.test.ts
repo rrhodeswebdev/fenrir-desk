@@ -28,6 +28,18 @@ describe('apiFetch', () => {
     expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
   })
 
+  it.each([204, 202])('returns undefined for an empty %i body', async (status) => {
+    mockFetch(new Response(null, { status }))
+    expect(await apiFetch('/api/x', { method: 'POST' })).toBeUndefined()
+  })
+
+  it('leaves Content-Type to fetch for a non-string body', async () => {
+    const fetch = mockFetch(new Response('{}'))
+    await apiFetch('/api/x', { method: 'POST', body: new FormData() })
+    const [, init] = fetch.mock.calls[0]!
+    expect(new Headers(init.headers).has('Content-Type')).toBe(false)
+  })
+
   it('throws ApiError with status and body text on non-2xx', async () => {
     mockFetch(new Response('Internal Server Error', { status: 500 }))
     const err = await apiFetch('/api/x').catch((e: unknown) => e)

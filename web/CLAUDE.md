@@ -7,4 +7,5 @@ The browser UI: Vite + React 19 + TypeScript (strict). Built to `web/dist/`, ser
 - Style: function components + hooks; server state only in TanStack Query (keys `['<area>', ...args]`). Visual rules: root `PRODUCT.md` and `DESIGN.md`. Import from `src` as `@/...`.
 - Dev: `uv run fenrir serve --dev` + `npm --prefix web run dev` (port 5173, proxies `/api`, `/ws` and `/launch` to `127.0.0.1:8000`); open the `:5173` launch link the server prints.
 - Checks: `npm --prefix web run typecheck`; unit tests `npm --prefix web test -- --run` (Vitest, `src/*.test.ts`); `npm --prefix web run build`.
+- TypeScript 7 (native `tsc`). typescript-eslint does not support it: if ESLint is ever added, pin `typescript@~6.0.3`.
 - Not here: business logic. Rules, backtests and live trading live in the Python package `src/fenrir/`.

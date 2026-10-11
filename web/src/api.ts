@@ -12,10 +12,12 @@ export class ApiError extends Error {
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   // fetch sends a string body as text/plain; FastAPI only parses JSON bodies.
-  if (init.body !== undefined && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (typeof init.body === 'string' && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   const res = await fetch(path, { ...init, headers, credentials: 'same-origin' })
-  if (!res.ok) throw new ApiError(res.status, await res.text())
-  return (await res.json()) as T
+  const text = await res.text()
+  if (!res.ok) throw new ApiError(res.status, text)
+  // 204, or a 202 with no body: nothing to parse.
+  return (text ? JSON.parse(text) : undefined) as T
 }
 
 export const wsUrl = (path: string): string =>

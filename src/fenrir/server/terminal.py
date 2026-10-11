@@ -48,7 +48,7 @@ def parse_message(text: str) -> Input | Resize | None:
     """A client frame, or None for anything malformed."""
     try:
         msg = json.loads(text)
-    except ValueError:  # also covers ints past Python's digit limit
+    except (ValueError, RecursionError):  # ValueError also covers ints past the digit limit
         return None
     if not isinstance(msg, dict):
         return None

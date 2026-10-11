@@ -55,3 +55,4 @@ def test_parse_message_rejects_garbage():
     assert parse_message('{"type":"resize","cols":' + "9" * 5000 + ',"rows":2}') is None
     assert parse_message("[]") is None
     assert parse_message("") is None
+    assert parse_message("[" * 100_000) is None  # RecursionError, not a crash

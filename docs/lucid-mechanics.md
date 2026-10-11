@@ -11,7 +11,7 @@ The rules YAML holds Lucid's numbers; these are the **semantics** the code in `s
 | Consistency | Largest single day ≤ `max_day_pct`% of total net profit over all traded days (today included). It blocks passing or payout; it never fails the attempt. | `consistency.py` |
 | Minimum days | Counts days with at least one fill. | `account.py` |
 | Pass | Realized `balance >= profit_target`, flat, and the gates above. | `account.py` |
-| First payout | `balance × max_pct_of_profit% × split_pct%`, once `min_days`, `min_profit` and consistency hold, while flat. No buffer rule. | `account.py` |
+| First payout | `balance × max_pct_of_profit% × split_pct%`, once `min_days`, `min_profit` and consistency hold, while flat. No buffer field: Pro and Daily's payout buffer (and Direct's profit goal) are encoded through `max_pct_of_profit` and `min_profit`, explained in each file's header. | `account.py` |
 | Microscalp | 1-minute bars cannot show 5-second holds, so same-bar winners are only **flagged** (`possible_microscalp_pnl`); they never breach or block payout. | `microscalp.py` |
 | Contract limit | Enforced as a pre-trade rejection, never as an account breach. | `contracts.py`, `pretrade.py` |
 | Flat-by | Holding a position on any bar starting at or after `flat_by` breaches; so does a day close while not flat. | `flat_by.py` |

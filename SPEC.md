@@ -112,7 +112,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 |---|---|---|---|---|
 | `core` | Types, instruments, rollover, sessions, settings, CLI root | — | 01 | Done |
 | `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
-| `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex files only) |
+| `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex, Pro, Direct, Daily files) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3, 10.5 done; 10.4 not started |
 | `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
@@ -323,6 +323,8 @@ def daily_loss_limit(limit: float) -> Rule:
 | Overfitting from many strategies on the same data | Hold-out; ranking never uses it; `holdout_gap` flag. |
 | Backtest fills better than live | Conservative fill model; dry run and sim first; journal for live vs backtest. |
 | Python fold too slow | Estimated from a sample (Open Question 5): about 3 h for one ORB backtest. 10.4 loads bars once and caps workers by memory; the attempt length is Open Question 6. |
+| Lucid Direct's daily loss limit is mandatory | Set `dll_on: true` for `direct-*` in `data/accounts.yaml`, or backtests ignore it. |
+| LucidDaily news-window hard breach (flat from 1 min before to 1 min after high-impact USD news) is not modelled | Daily pass/payout rates are overstated for strategies holding through releases; the skill tells Claude to stay flat around them. |
 | Worker memory | About 1.5 GB per spawn worker (24 GB on 16 cores) would exceed a typical Docker Desktop memory limit; 10.4 caps the worker count. |
 | Browser terminal as attack surface | Loopback binding, Host check, one-time launch link → HttpOnly cookie, Origin checks; in Docker the terminal runs as `claude` and nothing it writes runs as root. |
 | Host goes down with a position open | Broker-side brackets; add-on flattens at 16:40 on its own. |
@@ -332,6 +334,6 @@ def daily_loss_limit(limit: float) -> Rule:
 1. **Live futures on LSE (gate item 3).** On 2026-10-10 the socket reported tier `registered` with no `ES.F`/`NQ.F` among its streamable symbols. If futures ticks don't arrive in market hours, what's the live source: an LSE tier upgrade, Databento, or something else? This blocks plans 04, 21 and 22.
 2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills) have not been run.
 3. **ES 2023-03 roll** is ambiguous in the data; the fixed roll window covers it, but it isn't confirmed.
-4. **Pro, Direct and Daily rules** are not entered yet, and `automation_allowed` has not been checked for them on Lucid's site.
+4. **Pro, Direct and Daily rules** were entered on 2026-10-11 from Lucid's help center; automation is allowed on all three. Some of their mechanics have no schema field, so the files use conservative stand-ins named in their headers: the 60% scaling DLL (fixed DLL kept), the payout buffer (Pro, Daily) and payout profit goal (Direct), encoded through `max_pct_of_profit`; Daily's choice of end-of-day evaluation drawdown (intraday entered), its news-window hard breach and its maximum daily profit are not modelled. Direct's DLL is mandatory but only applies with `dll_on: true`, and Pro 25k cannot run with `dll_on` (no evaluation DLL). Should the schema grow fields for these (ask first)?
 5. **Fold performance** (09.2, sampled 2026-10-11 on a 16-core, 64 GB Mac; the full 3 h run was skipped). `fenrir backtest strategies/orb.py --account lucid-flex-50k --contract MNQ`: 3,386,345 NQ bars load in 12.2 s; tuning 2016-06-01 → 2025-10-09 is 2,265 attempts, hold-out 2025-10-10 → 2026-10-09 is 243. ORB risks about $20 to make $40 against a $3,000 target and $2,000 drawdown, so most attempts run to the end of the data (`no_result`); two sampled attempts took 160–170 s each, about 52 µs per bar, so about 50 CPU-hours, about 3 h wall on 16 workers. 16 spawn workers held about 24 GB RSS (largest 1.65 GB). Parent RSS was not sampled; it holds one full series while planning (about 2.2 GB, see Market data), so the total is about 26 GB. **No-go** on both thresholds: 60 s wall time and 6 GB total memory (chosen to fit a modest Docker Desktop limit). Follow-up is folded into 10.4 (#27): load once per process and cap workers to fit memory. Load is not the bottleneck, though: the fold over years of bars per attempt is.
 6. **Attempt length.** An attempt runs until pass, payout or breach, or the end of the data, so a slow strategy costs O(trading days × bars). Capping each attempt at a horizon (say 120 trading days, then `no_result`) would cut a full run from hours to minutes and match how long a trader keeps paying for one evaluation, but it changes the report's meaning and the cache key (ask first).

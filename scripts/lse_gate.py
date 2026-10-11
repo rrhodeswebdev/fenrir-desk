@@ -9,7 +9,10 @@ Run: uv run --with lse-data python scripts/lse_gate.py history ES.F --start 2010
 import argparse
 import asyncio
 import json
+import os
+import shutil
 import statistics
+import subprocess
 import time
 from collections import Counter
 from collections.abc import AsyncIterator
@@ -196,6 +199,9 @@ async def _record(symbols: list[str], minutes: float, out: Path) -> tuple[list[f
 
 
 def cmd_live(args: argparse.Namespace) -> None:
+    # macOS idle sleep pauses time.monotonic, so the deadline stalls (2026-10-11 run)
+    if shutil.which("caffeinate"):
+        subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
     OUT.mkdir(parents=True, exist_ok=True)
     out = OUT / f"ticks-{datetime.now(UTC):%Y-%m-%dT%H%M%S}.jsonl"  # one file per run
     lags, quotes = asyncio.run(_record(args.symbols, args.minutes, out))

@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc",
-    "test": "vitest"
+    "test": "vitest",
+    "e2e": "npm run build && playwright test"
   },
   "dependencies": {
     "@fontsource/chakra-petch": "^5.3.0",
@@ -24,6 +25,7 @@
     "react-dom": "^19.3.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^22.20.5",
     "@types/react": "^19.3.0",

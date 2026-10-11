@@ -70,12 +70,12 @@ Web dev:     npm --prefix web run dev            # proxies /api, /ws, /launch to
 Typecheck:   npm --prefix web run typecheck
 Web test:    npm --prefix web test -- --run      # Vitest unit tests
 Web build:   npm --prefix web run build          # writes web/dist/
+E2E:         npm --prefix web run e2e            # builds, then Playwright against fenrir serve on :8799; once: npx --prefix web playwright install chromium
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
-E2E:         npx --prefix web playwright test                                                     # (12)
 Run app:     docker compose up        → http://localhost:8000                                     # (18)
 ```
 
@@ -111,7 +111,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | Module id | Responsibility | Depends on | Plans | Status |
 |---|---|---|---|---|
 | `core` | Types, instruments, rollover, sessions, settings, CLI root | — | 01 | Done |
-| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed, 3–5 open; 03 done; 04.1 bar builder done |
+| `data` | LSE gate, history pull, store, live bars | core | 02, 03, 04 | Gate 1–2 passed; Gate 3 failed: no live futures on the current LSE tier; 4–5 open; 03 done; 04.1 bar builder done |
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex, Pro, Direct, Daily files) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3, 10.5 done; 10.4 not started |
@@ -331,7 +331,7 @@ def daily_loss_limit(limit: float) -> Rule:
 
 ## Open Questions
 
-1. **Live futures on LSE (gate item 3).** On 2026-10-10 the socket reported tier `registered` with no `ES.F`/`NQ.F` among its streamable symbols. If futures ticks don't arrive in market hours, what's the live source: an LSE tier upgrade, Databento, or something else? This blocks plans 04, 21 and 22.
+1. **Live futures on LSE (gate item 3): failed.** On 2026-10-11, with Globex open, the LSE socket sent no `ES.F`/`NQ.F` ticks (NO TICKS RECEIVED; details in `docs/data-gate.md` Item 3). Tier `registered` lists 4,173 streamable symbols and no futures in any form; a `BTC/USD` control streamed normally. What's the live source: an LSE tier with futures (then re-run the gate), Databento, or something else? That is DEC-7 (#18), now needed. Plans 04.2, 21.5, 21.8 and 22.7 stay blocked until it is decided. A weekday re-run would only matter if the LSE tier changes.
 2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills) have not been run.
 3. **ES 2023-03 roll** is ambiguous in the data; the fixed roll window covers it, but it isn't confirmed.
 4. **Pro, Direct and Daily rules** were entered on 2026-10-11 from Lucid's help center; automation is allowed on all three. Some of their mechanics have no schema field, so the files use conservative stand-ins named in their headers: the 60% scaling DLL (fixed DLL kept), the payout buffer (Pro, Daily) and payout profit goal (Direct), encoded through `max_pct_of_profit`; Daily's choice of end-of-day evaluation drawdown (intraday entered), its news-window hard breach and its maximum daily profit are not modelled. Direct's DLL is mandatory but only applies with `dll_on: true`, and Pro 25k cannot run with `dll_on` (no evaluation DLL). Should the schema grow fields for these (ask first)?

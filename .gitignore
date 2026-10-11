@@ -34,6 +34,8 @@ build/
 .next/
 .vite/
 coverage/
+test-results/
+playwright-report/
 
 # Python
 __pycache__/

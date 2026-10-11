@@ -99,6 +99,46 @@ def test_json_round_trip_matches_contract_shape():
     assert from_json(data) == job
 
 
+GOOD_ITEM = {
+    "strategy": "s.py",
+    "account": "a",
+    "contract": "NQ",
+    "status": "done",
+    "key": "a" * 64,
+    "error": None,
+    "progress": [1, 2],
+}
+
+
+def job_data(**item) -> dict:
+    return {"id": "j", "created_at": "t", "include_holdout": True, "items": [GOOD_ITEM | item]}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        [],
+        {"id": 1, "created_at": "t", "include_holdout": True, "items": []},
+        {"id": "j", "created_at": "t", "include_holdout": 1, "items": []},
+        {"id": "j", "created_at": "t", "include_holdout": True, "items": [], "extra": 1},
+        job_data(status="paused"),
+        job_data(key="../x"),
+        job_data(error=3),
+        job_data(progress=[1]),
+        job_data(progress=[True, 2]),
+        job_data(strategy=None),
+        job_data(extra=1),
+    ],
+)
+def test_from_json_rejects_what_to_json_never_writes(data):
+    with pytest.raises(ValueError):
+        from_json(data)
+
+
+def test_from_json_accepts_a_valid_item():
+    assert from_json(job_data()).items[0].progress == (1, 2)
+
+
 def test_progress_step_only_on_whole_percent():
     assert progress_step((0, 0), (1, 1000)) is True  # total became known
     assert progress_step((1, 1000), (5, 1000)) is False  # still 0%

@@ -17,6 +17,7 @@ class Settings:
     data_dir: Path = Path("data")
     rules_dir: Path = Path("rules")
     strategies_dir: Path = Path("strategies")
+    private_dir: Path = Path("data/private")
 
 
 def _policy(value: str) -> str:
@@ -37,6 +38,7 @@ _FIELDS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "data_dir": ("FENRIR_DATA_DIR", Path),
     "rules_dir": ("FENRIR_RULES_DIR", Path),
     "strategies_dir": ("FENRIR_STRATEGIES_DIR", Path),
+    "private_dir": ("FENRIR_PRIVATE_DIR", Path),
 }
 
 

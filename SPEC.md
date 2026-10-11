@@ -64,6 +64,7 @@ Data gate:   uv run --with lse-data python scripts/lse_gate.py <command>
 Backtest:    uv run fenrir backtest '<strategy glob>'... --account '<glob>' [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached; quote globs (zsh)
 Evaluate:    uv run fenrir evaluate <same args>                                                                      # tuning + hold-out
 Compare:     uv run fenrir compare --view account|strategy [--json]                                                  # latest cached reports, ranked by tuning
+Serve:       uv run fenrir serve [--port 8000] [--dev] [--static-dir web/dist]                                       # 127.0.0.1 only; open the launch link it prints
 Web install: npm --prefix web ci
 Web dev:     npm --prefix web run dev            # proxies /api, /ws, /launch to :8000
 Typecheck:   npm --prefix web run typecheck
@@ -74,7 +75,6 @@ Web build:   npm --prefix web run build          # writes web/dist/
 Planned (the plan that adds each one adds it here):
 
 ```
-Serve:       uv run fenrir serve [--port 8000] [--dev] [--static-dir web/dist]                    # (11)
 E2E:         npx --prefix web playwright test                                                     # (12)
 Run app:     docker compose up        → http://localhost:8000                                     # (18)
 ```

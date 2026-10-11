@@ -22,6 +22,7 @@ def test_parse_settings_reads_every_key():
             "FENRIR_DATA_DIR": "/tmp/d",
             "FENRIR_RULES_DIR": "/tmp/r",
             "FENRIR_STRATEGIES_DIR": "/tmp/s",
+            "FENRIR_PRIVATE_DIR": "/tmp/p",
         }
     )
     assert s == Settings(
@@ -35,6 +36,7 @@ def test_parse_settings_reads_every_key():
         data_dir=Path("/tmp/d"),
         rules_dir=Path("/tmp/r"),
         strategies_dir=Path("/tmp/s"),
+        private_dir=Path("/tmp/p"),
     )
 
 

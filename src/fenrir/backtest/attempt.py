@@ -1,7 +1,7 @@
 """One attempt: a fold over 1-minute bars until breach, first payout or end of data. Pure."""
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from fenrir.backtest.fills import (
@@ -16,15 +16,24 @@ from fenrir.backtest.fills import (
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import ContractSpec
-from fenrir.core.sessions import trading_day
-from fenrir.rules.account import apply, build_rules, initial_state, phase_rules, view
+from fenrir.core.sessions import at_or_after, trading_day
+from fenrir.rules.account import (
+    apply,
+    build_rules,
+    initial_state,
+    passed,
+    payout,
+    phase_rules,
+    view,
+)
 from fenrir.rules.pretrade import check
 from fenrir.rules.schema import AccountRules
-from fenrir.rules.state import AccountState, Breach, Fill, Mark, Rule, TradeClosed
+from fenrir.rules.state import AccountState, Breach, DayClosed, Fill, Mark, Rule, TradeClosed
 from fenrir.strategy import FLAT, Ctx, Position, Strategy
 
 WINDOW = 500  # bars of history in Ctx.bars
 ADDON_FLATTEN = "16:40"  # the add-on flattens at 16:40 ET on its own (spec §8–9)
+MINUTE = timedelta(minutes=1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,7 +223,7 @@ def _decide(sim: _Sim, env: _Env, i: int) -> _Sim:
     )
     strat, actions = env.strategy.step(sim.strat, bar, ctx)
     sim = replace(sim, strat=strat)
-    late = False  # replaced by the flat-by check in Task 3
+    late = _late(bar, env)
     for action in actions:
         sim = _act(sim, env, action, bar.close, late)
     return sim
@@ -241,4 +250,55 @@ def _accept(sim: _Sim, env: _Env, b: Bracket, ref: float) -> bool:
     return b.qty > 0 and ordered and check(sim.account, env.rules, b, env.spec, ref, 0.0) is None
 
 
-_STAGES = (_fill_pending, _check_bracket, _mark, _decide)
+def _late(bar: Bar, env: _Env) -> bool:
+    """True once this bar closes at or after the flat-by time of its trading day."""
+    return at_or_after(bar.ts + MINUTE, env.flat_at, env.rules.session.tz)
+
+
+def _flat_time(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
+    bar = env.bars[i]
+    if not _late(bar, env):
+        return sim
+    sim = replace(sim, pending=None)
+    if sim.position is None:
+        return sim
+    return _close(sim, env, market_exit(sim.position.qty, bar.close, env.spec.tick), bar.ts)
+
+
+def _roll_day(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
+    bar = env.bars[i]
+    day = trading_day(bar.ts)
+    if day == sim.account.day:
+        return sim
+    if sim.position is not None:  # data gap skipped flat-by: exit at the first bar we have
+        sim = _close(sim, env, market_exit(sim.position.qty, bar.open, env.spec.tick), bar.ts)
+        if isinstance(sim, AttemptResult):
+            return sim
+    closed = DayClosed(day=sim.account.day, ts=bar.ts)
+    sim = _event(replace(sim, pending=None, exit_requested=False), env, closed)
+    if isinstance(sim, AttemptResult):
+        return sim
+    sim = replace(
+        sim,
+        days=sim.days + 1,
+        equity=sim.equity + ((env.bars[i - 1].ts, sim.account.balance),),
+        account=replace(sim.account, day=day),
+    )
+    return _phase_check(sim, env, day)
+
+
+def _phase_check(sim: _Sim, env: _Env, day: date) -> _Sim | AttemptResult:
+    if sim.account.phase == "evaluation":
+        if not passed(sim.account, env.rules):
+            return sim
+        return replace(
+            sim,
+            days_to_pass=sim.days,
+            account=initial_state(env.rules, "funded", day),
+            rule_fns=build_rules(env.rules, "funded"),
+        )
+    amount = payout(sim.account, env.rules)
+    return sim if amount is None else _end(sim, env, "payout", first_payout=amount)
+
+
+_STAGES = (_roll_day, _fill_pending, _check_bracket, _flat_time, _mark, _decide)

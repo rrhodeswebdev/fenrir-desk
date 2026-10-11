@@ -316,8 +316,10 @@ View = Literal["account", "strategy"]
 def summarize(report: Report) -> dict             # the report without sample_equity in any period
 def with_net(report: Report, choices: Mapping[str, AccountChoice]) -> dict
     # every non-null period also carries expected_net_per_attempt (net_per_attempt)
-def latest_only(reports: Sequence[Report]) -> tuple[Report, ...]
-    # input newest first; keeps the newest per (strategy, account, contract), in input order
+def latest_only(reports: Sequence[Report], choices: Mapping[str, AccountChoice]) -> tuple[Report, ...]
+    # input newest first; drops reports whose dll_on differs from the account's current choice, then keeps
+    # the newest per (strategy, account, contract), in input order; a newest report without a hold-out gives
+    # way to an older one with a hold-out and the same strategy_hash, rules_hash, data_version, holdout_months
 def compare(reports: Sequence[Report], view: View, choices: Mapping[str, AccountChoice]) -> list[dict]
     # [{"group": account or strategy name, "rows": [with_net(summarize(r)), ...]}]; groups sorted by name;
     # rows by tuning p_pass_and_payout desc, then tuning net per attempt desc, then strategy, account, contract
@@ -362,7 +364,7 @@ def compare(reports: Sequence[Report], view: View, choices: Mapping[str, Account
 
 `failure_reasons` keys are `"max_drawdown"`, `"flat_by"` and `"no_result"` (data ran out first); it counts every attempt without a payout. Hitting the daily loss limit is not a failure: that day halts and the attempt continues. `median_days_to_payout` counts from the attempt's start. `expected_gross_per_attempt` = mean over attempts of (payout or 0) − (activation_fee if passed); fee-free, because the evaluation price varies with coupons and is user data (`AccountChoice.eval_price`). Net per attempt = gross − that price, computed on read (`net_per_attempt`) and added by the API as `expected_net_per_attempt`; it is never in a cached report. `dll_on` records whether the daily loss limit was simulated (the user's choice, part of the key). One live/backtest rule: a new `Bracket` is rejected while a position is open. Medians are `null` when there is nothing to take a median of. `sample_equity` holds at most 6 attempts (2 passed+paid, 2 passed only, 2 breached; first by start date).
 
-CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ ...] [--json]` (tuning only); `fenrir evaluate <same>` (tuning + hold-out); `fenrir compare --view account|strategy [--json]` prints `compare(latest_only(list_reports(settings)), view, choices)` (`--json`: `[{group, rows}]`).
+CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ ...] [--json]` (tuning only); `fenrir evaluate <same>` (tuning + hold-out); `fenrir compare --view account|strategy [--json]` prints `compare(latest_only(list_reports(settings), choices), view, choices)` (`--json`: `[{group, rows}]`).
 
 ### Plan 11 — server
 
@@ -393,7 +395,7 @@ CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--co
 - `GET /api/backtests/jobs` → `Job[]`; `GET /api/backtests/jobs/{id}` → `Job` where `Job = {id, created_at, include_holdout, items: {strategy, account, contract, status: "pending"|"running"|"done"|"error", key: string|null, error: string|null, progress: [done, total]}[]}`. Jobs persist in `data/jobs/<id>.json`; on server start, unfinished items re-run. `app.state.jobs` is a `JobRunner`; `fenrir serve` calls `app.state.jobs.start()`.
 - `WS /ws/jobs` pushes `Job` on every change.
 - `GET /api/backtests/results` → `Report[]` (without `sample_equity`); `GET /api/backtests/results/{key}` → full `Report`. In these and `/compare`, every period also carries `expected_net_per_attempt` (`fenrir.backtest.compare.with_net`, from `data/accounts.yaml` read per request).
-- `GET /api/backtests/compare?view=account|strategy` → `[{group, rows: Report[]}]` from `fenrir.backtest.compare.compare` (plan 10), ranked by tuning results only: `p_pass_and_payout`, then net per attempt.
+- `GET /api/backtests/compare?view=account|strategy` → `[{group, rows: Report[]}]` = `compare(latest_only(list_reports(settings), choices), view, choices)` (`fenrir.backtest.compare`, plan 10), ranked by tuning results only: `p_pass_and_payout`, then net per attempt.
 
 ### Plan 15 — rules API
 

@@ -29,16 +29,33 @@ def with_net(report: Report, choices: Mapping[str, AccountChoice]) -> dict:
     return {**report, "periods": periods}
 
 
-def latest_only(reports: Sequence[Report]) -> tuple[Report, ...]:
-    """Input newest first; keeps the newest per (strategy, account, contract), in input order."""
-    seen: set[tuple[str, str, str]] = set()
-    out = []
+def _inputs(r: Report) -> tuple:
+    return (r["strategy_hash"], r["rules_hash"], r["data_version"], r["holdout_months"])
+
+
+def latest_only(
+    reports: Sequence[Report], choices: Mapping[str, AccountChoice]
+) -> tuple[Report, ...]:
+    """Input newest first; keeps the newest per (strategy, account, contract), in input order.
+
+    Only reports run with the account's current dll_on count. A tuning-only newest report gives
+    way to an older one with a hold-out run on the same inputs.
+    shortcut: a cache hit keeps its old created_at, so a reverted strategy edit can still show
+    the edited version's report; upgrade by keeping only the report whose key is today's cache_key.
+    """
+    out: dict[tuple[str, str, str], Report] = {}
     for r in reports:
+        if r.get("dll_on", False) != choices.get(r["account"], AccountChoice()).dll_on:
+            continue
         triple = (r["strategy"], r["account"], r["contract"])
-        if triple not in seen:
-            seen.add(triple)
-            out.append(r)
-    return tuple(out)
+        kept = out.setdefault(triple, r)
+        if (
+            kept["periods"]["holdout"] is None
+            and r["periods"]["holdout"] is not None
+            and _inputs(r) == _inputs(kept)
+        ):
+            out[triple] = r
+    return tuple(out.values())
 
 
 def compare(

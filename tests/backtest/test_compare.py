@@ -19,13 +19,20 @@ def report(
     tuning=(0.2, 50.0),
     holdout=(0.2, 50.0),
     created="2026-10-10T00:00:00Z",
+    dll_on=False,
+    data_version="d",
 ):
     return {
         "key": f"{strategy}-{account}-{contract}-{created}",
         "created_at": created,
         "strategy": strategy,
+        "strategy_hash": "h",
         "account": account,
+        "rules_hash": "r",
         "contract": contract,
+        "data_version": data_version,
+        "holdout_months": 12,
+        "dll_on": dll_on,
         "periods": {
             "tuning": period(*tuning),
             "holdout": None if holdout is None else period(*holdout),
@@ -59,7 +66,25 @@ def test_latest_only_keeps_newest_per_triple():
     newer = report("orb", "a", created="2026-10-10T02:00:00Z")
     older = report("orb", "a", created="2026-10-10T01:00:00Z")
     other = report("orb", "a", contract="MNQ")
-    assert latest_only([newer, older, other]) == (newer, other)
+    assert latest_only([newer, older, other], {}) == (newer, other)
+
+
+def test_latest_only_keeps_only_the_accounts_current_dll_setting():
+    dll = report("orb", "a", created="2026-10-10T02:00:00Z", dll_on=True)
+    no_dll = report("orb", "a", created="2026-10-10T01:00:00Z")
+    only_dll = report("orb", "b", dll_on=True)
+    assert latest_only([dll, no_dll, only_dll], {}) == (no_dll,)  # b has no current report
+    on = {"a": AccountChoice(dll_on=True)}
+    assert latest_only([dll, no_dll, only_dll], on) == (dll,)
+
+
+def test_latest_only_keeps_holdout_over_a_newer_tuning_only_run_of_the_same_inputs():
+    tuning_only = report("orb", "a", holdout=None, created="2026-10-10T03:00:00Z")
+    evaluated = report("orb", "a", created="2026-10-10T02:00:00Z")
+    older = report("orb", "a", created="2026-10-10T01:00:00Z")
+    assert latest_only([tuning_only, evaluated, older], {}) == (evaluated,)
+    stale = report("orb", "a", created="2026-10-10T02:00:00Z", data_version="old")
+    assert latest_only([tuning_only, stale], {}) == (tuning_only,)  # other inputs: newest wins
 
 
 def test_by_account_ranks_by_tuning_then_net():

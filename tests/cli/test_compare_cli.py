@@ -73,3 +73,14 @@ def test_corrupt_report_exits_1_with_message(monkeypatch, tmp_path):
     result = CliRunner().invoke(app, ["compare", "--view", "account"], env=env)
     assert result.exit_code == 1
     assert "error: data/results/x.json: corrupt cached report" in result.output
+
+
+def test_text_with_no_reports_says_so_on_stderr(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_compare, "list_reports", lambda settings: ())
+    env = {"FENRIR_DATA_DIR": str(tmp_path)}
+    text = CliRunner().invoke(app, ["compare", "--view", "account"], env=env)
+    assert text.exit_code == 0
+    assert text.stdout == ""
+    assert "no cached reports; run fenrir backtest" in text.stderr
+    as_json = CliRunner().invoke(app, ["compare", "--view", "account", "--json"], env=env)
+    assert json.loads(as_json.stdout) == []

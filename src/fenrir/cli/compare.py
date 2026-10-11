@@ -20,13 +20,15 @@ def compare_command(
     settings = load_settings()
     try:
         choices = load_account_choices(settings.data_dir)
-        groups = compare(latest_only(list_reports(settings)), view, choices)
+        groups = compare(latest_only(list_reports(settings), choices), view, choices)
     except (ValueError, OSError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     if as_json:
         typer.echo(json.dumps(groups, indent=2))
         return
+    if not groups:
+        typer.echo("no cached reports; run fenrir backtest", err=True)
     for g in groups:
         typer.echo(g["group"])
         for row in g["rows"]:

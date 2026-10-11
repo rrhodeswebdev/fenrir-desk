@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from dataclasses import replace
@@ -261,6 +262,15 @@ def test_parse_event(line, event):
 def test_parse_event_rejects_anything_else(line):
     with pytest.raises(ValueError):
         parse_event(line, (0, 1))
+
+
+def test_the_child_ignores_modules_planted_in_the_cwd(tmp_path):
+    (tmp_path / "fenrir").mkdir()
+    (tmp_path / "fenrir" / "__init__.py").write_text('print("planted")')
+    (tmp_path / "json.py").write_text('print("planted")')
+    job = json.dumps({"include_holdout": False, "items": []})
+    done = subprocess.run(CHILD, input=job, cwd=tmp_path, capture_output=True, text=True)
+    assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
 
 
 def test_real_job_produces_a_cached_report(make, tmp_path):

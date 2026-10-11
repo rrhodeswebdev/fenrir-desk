@@ -38,7 +38,9 @@ from fenrir.settings import Settings
 
 log = logging.getLogger(__name__)
 
-CHILD = (sys.executable, "-m", "fenrir.server.job_child")
+# -P: no cwd on sys.path, so a planted fenrir/ or polars.py in the repo (writable by the
+# terminal) is never imported in place of the installed module
+CHILD = (sys.executable, "-P", "-m", "fenrir.server.job_child")
 KEY = re.compile(r"[0-9a-f]{64}")  # report_key's sha256 hex; it becomes a file name later
 
 Listener = Callable[[dict[str, Any]], None]

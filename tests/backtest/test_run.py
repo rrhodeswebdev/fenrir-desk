@@ -261,6 +261,21 @@ def test_a_worker_that_loaded_different_inputs_is_an_error(settings, tmp_path, m
         run_backtest(strategy, ACCOUNT, "MNQ", settings, include_holdout=False)
 
 
+def test_a_strategy_broken_after_the_parent_loaded_is_an_error(settings, tmp_path, monkeypatch):
+    strategy = tmp_path / "orb.py"
+    strategy.write_text(ORB.read_text())
+    plan = run_module._plan
+
+    def broken_after_the_parent_loaded(*args):
+        out = plan(*args)
+        strategy.write_text("def oops(:\n")
+        return out
+
+    monkeypatch.setattr("fenrir.backtest.run._plan", broken_after_the_parent_loaded)
+    with pytest.raises(ValueError, match="inputs changed during the backtest"):
+        run_backtest(strategy, ACCOUNT, "MNQ", settings, include_holdout=False)
+
+
 def test_a_worker_error_cancels_the_queued_chunks(settings, tmp_path, monkeypatch, spy_pool):
     test_a_worker_that_loaded_different_inputs_is_an_error(settings, tmp_path, monkeypatch)
     assert True in spy_pool["cancel"]

@@ -4,6 +4,7 @@ import json
 import multiprocessing
 from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -78,20 +79,29 @@ def _load(
 
 def _init_worker(*load_args) -> None:
     global _worker_inputs
-    _worker_inputs = _load(*load_args)
+    try:
+        _worker_inputs = _load(*load_args)
+    except Exception as e:  # raised from _run_chunk instead: see there
+        _worker_inputs = e
 
 
 def _run_chunk(
     expected: tuple, ranges: tuple[tuple[int, int], ...]
 ) -> list[tuple[tuple[int, int], AttemptResult]]:
-    bars, strategy, rules, contract_spec, seen = _worker_inputs
     # here, not in the initializer: a raise there would surface as a BrokenProcessPool
+    if isinstance(_worker_inputs, Exception):
+        raise ValueError(f"inputs changed during the backtest: {_worker_inputs}")
+    bars, strategy, rules, contract_spec, seen = _worker_inputs
     for what, want, got in zip(
         ("strategy file", "rules file", "bar data", "bar count"), expected, seen, strict=True
     ):
         if want != got:
             raise ValueError(f"{what} changed during the backtest; run it again")
-    return [(r, run_attempt(bars, r[0], r[1], strategy, rules, contract_spec)) for r in ranges]
+    # fills are not in the report; dropping them saves pickling every fill back to the parent
+    return [
+        (r, replace(run_attempt(bars, r[0], r[1], strategy, rules, contract_spec), fills=()))
+        for r in ranges
+    ]
 
 
 def _run_all(ranges, load_args, expected, on_progress) -> dict[tuple[int, int], AttemptResult]:

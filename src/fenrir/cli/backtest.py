@@ -38,6 +38,15 @@ def format_summary(report: Report, choices: Mapping[str, AccountChoice]) -> str:
     return line
 
 
+def _progress(path: Path, account: str):
+    # stderr, so --json output stays clean; real runs take long enough to look hung
+    def show(done: int, total: int) -> None:
+        end = "\n" if done == total else ""
+        typer.echo(f"\r{path.name} {account}: {done}/{total} attempts{end}", err=True, nl=False)
+
+    return show
+
+
 def _run(
     strategies: list[Path], accounts: list[str], contract: str, as_json: bool, include_holdout: bool
 ) -> None:
@@ -45,7 +54,14 @@ def _run(
     try:
         choices = load_account_choices(settings.data_dir)
         reports = [
-            run_backtest(path, account, contract, settings, include_holdout=include_holdout)
+            run_backtest(
+                path,
+                account,
+                contract,
+                settings,
+                include_holdout=include_holdout,
+                on_progress=_progress(path, account),
+            )
             for path in strategies
             for account in accounts
         ]

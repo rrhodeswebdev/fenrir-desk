@@ -38,6 +38,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-q --import-mode=importlib"
 pythonpath = ["tests/backtest", "tests/live"]  # importlib mode adds no sys.path; tests import *_helpers by name
+markers = ["socket: starts a real uvicorn server on a loopback port"]
 
 [tool.ruff]
 line-length = 100

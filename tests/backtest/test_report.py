@@ -59,6 +59,22 @@ def test_period_result():
     assert p["sample_equity"][0]["points"] == [["2025-10-06T20:00:00Z", 500.0]]
 
 
+def test_sample_equity_keeps_the_earliest_two_per_outcome():
+    days = [date(2025, 10, d) for d in range(1, 10)]
+    outcomes = ["breached", "passed", "payout"] * 3  # interleaved, so order is not by outcome
+    extra = {"payout": {"dtp": 2, "dtpay": 5, "payout": 100.0}, "passed": {"dtp": 2}}
+    results = [res(d, o, **extra.get(o, {})) for d, o in zip(days, outcomes, strict=True)]
+    p = period_result(results, make_rules(), days[0], days[-1])
+    assert [(s["start"], s["outcome"]) for s in p["sample_equity"]] == [
+        ("2025-10-01", "breached"),
+        ("2025-10-02", "passed"),
+        ("2025-10-03", "payout"),
+        ("2025-10-04", "breached"),
+        ("2025-10-05", "passed"),
+        ("2025-10-06", "payout"),
+    ]
+
+
 def test_empty_medians_are_null():
     p = period_result([res(DAYS[0], "no_result")], make_rules(), DAYS[0], DAYS[0])
     assert p["days_to_pass"] == {"median": None, "histogram": []}

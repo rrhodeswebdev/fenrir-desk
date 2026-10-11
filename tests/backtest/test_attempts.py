@@ -56,7 +56,9 @@ def test_zero_months_means_no_holdout():
 
 
 def test_holdout_covering_all_data_is_an_error():
-    with pytest.raises(ValueError, match="hold-out of 12 months covers all data"):
+    with pytest.raises(
+        ValueError, match=r"hold-out of 12 months covers all data \(2025-01-01 to 2025-03-31\)"
+    ):
         periods(weekday_bars(date(2025, 1, 1), date(2025, 3, 31)), 12)
 
 

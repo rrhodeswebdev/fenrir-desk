@@ -25,6 +25,7 @@ packages = ["src/fenrir"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.168.5",
     "pytest>=8",
     "ruff>=0.6",
 ]
@@ -32,6 +33,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --import-mode=importlib"
+pythonpath = ["tests/backtest"]  # importlib mode adds no sys.path; tests import backtest_helpers by name
 
 [tool.ruff]
 line-length = 100

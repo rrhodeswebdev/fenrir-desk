@@ -100,6 +100,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/data/` | LSE history pull, Parquet store, front-month bar loading, live bar building. Only `lse.py` knows LSE. |
 | `src/fenrir/backtest/` | Fill model, single-attempt fold, attempts across days, report JSON, grid expansion and result cache. |
 | `src/fenrir/bridge/` | Python side of the NinjaTrader add-on: instrument names, add-on client, reconciliation. |
+| `src/fenrir/live/` | Live runner: SQLite trade journal and armed table (`data/fenrir.db`); later per-bar decisions, limits and halts. |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).

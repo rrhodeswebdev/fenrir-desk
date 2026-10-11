@@ -84,3 +84,13 @@ def test_errors_exit_1_with_message(monkeypatch):
     result = CliRunner().invoke(app, ["backtest", "a.py", "--account", "x", "--contract", "MES"])
     assert result.exit_code == 1
     assert "error: MES trades ES prices" in result.output
+
+
+def test_missing_strategy_file_error(tmp_path):
+    missing = tmp_path / "nonexistent.py"
+    result = CliRunner().invoke(
+        app, ["backtest", str(missing), "--account", "x", "--contract", "MNQ"]
+    )
+    assert result.exit_code == 1
+    assert "error:" in result.output
+    assert str(missing) in result.output

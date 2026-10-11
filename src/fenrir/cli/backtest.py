@@ -49,7 +49,7 @@ def _run(
             for path in strategies
             for account in accounts
         ]
-    except ValueError as e:
+    except (ValueError, OSError) as e:
         typer.echo(f"error: {e}", err=True)
         raise typer.Exit(1) from e
     typer.echo(

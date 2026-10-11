@@ -103,6 +103,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/live/` | Live runner: SQLite trade journal and armed table (`data/fenrir.db`); later per-bar decisions, limits and halts. |
 | `src/fenrir/server/` | FastAPI shell and its state: pure backtest-job state now; app, auth, PTY and routes arrive in plans 11–16. |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
+| `.claude/skills/fenrir-strategy/` | Project skill teaching Claude the strategy loop (rules → data → strategy → backtest → report), tuning period only. |
 
 All UI work follows root `PRODUCT.md` (who it is for, voice, principles) and `DESIGN.md` (tokens, components, colour and motion rules).
 

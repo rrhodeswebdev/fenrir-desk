@@ -87,7 +87,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `assets/brand/` | Logo, app icon and brand guide (palette, type). Source of truth for visual identity. |
 | `docs/` | Design specs and implementation plans. Not runtime code. |
 | `design/` | Static design prototypes (synthetic data) that set the visual system; `DESIGN.md` at the root records it. |
-| `docs/superpowers/` | Local only (gitignored). `specs/` holds the v1 design spec; `plans/` holds the implementation plans, with `plans/README.md` as the index and cross-plan contracts. |
+| `docs/superpowers/` | Local only (gitignored). `specs/` holds the superseded v1 design (root `SPEC.md` replaces it); `plans/` holds the implementation plans, with `plans/README.md` as the index and cross-plan contracts. |
 | `src/fenrir/` | The `fenrir` Python package; `cli/main.py` is the CLI entry, `settings.py` loads `.env`. |
 | `src/fenrir/cli/` | Typer CLI, one module per command group. Thin shell over the core. |
 | `src/fenrir/core/` | Pure shared domain types: `Bar`, actions, contract specs, rollover, trading days. |

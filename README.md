@@ -12,13 +12,13 @@ The full v1 spec is [SPEC.md](SPEC.md).
 - **Rule-aware strategy generation.** Claude Code writes and tunes deterministic strategies that treat a firm's rules as hard constraints, optimizing for time-to-pass and time-to-payout instead of raw profit.
 - **Backtesting on deep history.** Pull historical market data from an external provider so strategies can be tested across many years and market regimes, and simulate the firm's rules bar by bar.
 - **NinjaTrader execution.** Connect to NinjaTrader to place and manage trades for live or sim accounts.
-- **Local only.** Runs on your machine and is served to your browser from localhost. No hosted backend, no accounts, and your credentials and data never leave your computer.
+- **Local only.** Runs on your machine and is served to your browser from localhost. No hosted backend and no accounts. Credentials and data are stored only on your machine; the LSE API key is sent only to LSE, to authenticate market data requests.
 
 ## Stack
 
 - **Backend and CLI:** Python 3.12, `uv`, FastAPI, Typer, Polars + Parquet.
 - **UI:** Vite, React, TypeScript, TanStack Router + Query, Tailwind, shadcn/ui.
-- **Market data:** London Strategic Edge (LSE), history and live.
+- **Market data:** London Strategic Edge (LSE) for history. LSE is also the intended live source, pending data gate item 3 (real-time futures access).
 - **Execution:** a C# NinjaScript add-on in NinjaTrader 8 (Windows), over local HTTP + WebSocket.
 
 ## Development

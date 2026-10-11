@@ -21,7 +21,7 @@ Fenrir Desk is a local-only web app where one futures prop trader uses Claude Co
 | Instruments | ES, MES, NQ, MNQ. Micros use the mini's price series. |
 | Users | Single user per install; anyone can clone and run it. No accounts or login. |
 | Strategies per account | One armed strategy per account. Different accounts can run different strategies. |
-| Market data | London Strategic Edge (LSE) for history and live bars. Only `fenrir.data.lse` knows LSE. |
+| Market data | London Strategic Edge (LSE) for history. Live bars from LSE are conditional on data gate item 3; if LSE cannot stream real-time futures, the live source is reopened (see Open Questions). Only `fenrir.data.lse` knows LSE. |
 | Execution | NinjaTrader 8 (Windows) via a C# add-on: orders, accounts, positions only. |
 | Style | Functional core, imperative shell, everywhere. |
 | Running | `docker compose up`. Development runs natively. |

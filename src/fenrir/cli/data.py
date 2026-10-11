@@ -10,11 +10,10 @@ from fenrir.core.sessions import trading_day
 from fenrir.data.lse import fetch_contract
 from fenrir.data.pull import NoBars, Window
 from fenrir.data.pull import pull as run_pull
-from fenrir.data.store import coverage, data_version
+from fenrir.data.store import SERIES, coverage, data_version
 from fenrir.settings import load_settings
 
 DEFAULT_SINCE = "2016-06-01"  # earliest usable day (docs/data-gate.md)
-SERIES = ("ES", "NQ")
 
 app = typer.Typer(no_args_is_help=True, help="Market data: pull LSE history and show coverage.")
 

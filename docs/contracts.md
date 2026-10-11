@@ -411,6 +411,8 @@ CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--co
 ### Plan 16 — data API
 
 - `GET /api/data` → `{series: Coverage[], rolls: Roll[], front: {ES, NQ}, pull}`; `POST /api/data/pull` → 202, or 409 while a pull runs (one `fenrir data pull` child process at a time).
+  - `Coverage = {series, first_day: string|null, last_day: string|null, days: number, gaps: [string, string][]}` (dates `YYYY-MM-DD`; the same objects as `fenrir data summary --json`'s `series`; an empty data dir gives nulls, 0 and `[]`); `Roll = {series, start, contract}` for every roll in `instruments.yaml`; `front = {ES: string|null, NQ: string|null}` for today's trading day, null outside the rollover calendar; `pull = {state: "idle"|"running"|"done"|"error", started_at: string|null, finished_at: string|null, returncode: number|null, log_tail: string[]}` (UTC ISO with `Z`).
+  - `POST /api/data/pull` → 202 with an empty body (refetch `GET /api/data` for status), `409 {detail}` while running; 401 without the session cookie, 403 cross-origin.
 
 ### Plan 19/20 — add-on HTTP API (base URL `Settings.nt_url`, header `X-Fenrir-Token: Settings.nt_token`)
 

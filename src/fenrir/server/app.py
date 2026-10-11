@@ -1,5 +1,6 @@
 """The FastAPI app: Host guard, launch link, health and the SPA. Pure helpers first; glue last."""
 
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -10,7 +11,8 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
-from fenrir.server.routes import rules
+from fenrir.server.pull import PullRunner, pull_command, pull_env
+from fenrir.server.routes import data, rules
 from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
@@ -80,6 +82,7 @@ def create_app(
     app.state.settings = settings
     app.state.session_key = session_key
     app.state.allowed_origins = allowed_origins(port, dev)
+    app.state.pull = PullRunner(pull_command(), pull_env(os.environ, settings.lse_api_key))
     app.add_middleware(HostGuard)
     unspent = [launch_code]
 
@@ -108,6 +111,7 @@ def create_app(
     # Register routers here, one line each, above the SPA:
     # app.include_router(<area>.router, dependencies=[Depends(require_session)])
     app.include_router(rules.router, dependencies=[Depends(require_session)])
+    app.include_router(data.router, dependencies=[Depends(require_session)])
 
     if static_dir is not None:
         _mount_spa(app, static_dir.resolve())

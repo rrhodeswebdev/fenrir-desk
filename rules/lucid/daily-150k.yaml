@@ -1,0 +1,50 @@
+# From Lucid's help center (LucidDaily collection, articles updated 2026-07-27 to 2026-10-09):
+# https://support.lucidtrading.com/en/articles/15996664-luciddaily-evaluation
+# https://support.lucidtrading.com/en/articles/15997244-luciddaily-funded-account
+# https://support.lucidtrading.com/en/articles/15997266-luciddaily-payouts
+# https://support.lucidtrading.com/en/articles/15998336-luciddaily-consistency
+# https://support.lucidtrading.com/en/articles/15998425-luciddaily-drawdown
+# https://support.lucidtrading.com/en/articles/16033858-luciddaily-customization
+# https://support.lucidtrading.com/en/articles/16085900-luciddaily-daily-loss-limit
+# https://support.lucidtrading.com/en/articles/11404728-other-trading-activities (automation permitted)
+# daily_loss_limit is the fixed amount when the optional DLL is on (both phases or neither).
+# Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
+# Schema gaps, entered on the safe side:
+# - The evaluation drawdown is a purchase option (end-of-day or intraday); intraday is entered.
+# - A payout may not dip into the $4,600 buffer (MLL + $100) and has no cap. max_pct_of_profit is
+#   500 / 5,100 rounded down: the $500 minimum request is reached at $5,100 profit,
+#   as on Lucid, and the request never exceeds profit above the buffer (it understates it).
+# Not modelled: holding a position from 1 minute before to 1 minute after high-impact USD news
+# is a hard breach; a day at or above $12,000 profit moves the account to live review.
+firm: lucid
+account: daily-150k
+verified_on: 2026-10-11
+source_url: https://support.lucidtrading.com/en/collections/19692910-luciddaily
+automation_allowed: true
+evaluation:
+  profit_target: 9000
+  max_drawdown: { amount: 4500, trailing: intraday, locks_at: 4600 }
+  daily_loss_limit: 2700
+  consistency: { max_day_pct: 50 }  # Lucid allows a small cushion above 50%; 50 is the safe side
+  min_trading_days: 0
+funded:
+  max_drawdown: { amount: 4500, trailing: intraday, locks_at: 4600 }
+  daily_loss_limit: 2700
+  consistency: null
+  payout:
+    max_pct_of_profit: 9.8  # stands in for the $4,600 buffer, see above
+    split_pct: 90
+    min_days: 0
+    min_profit: 500
+    min_day_profit: 0
+    max_amount: null
+    max_payouts: null
+  scaling: null
+session: { flat_by: "16:45", tz: America/New_York }  # Lucid's cutoff page names Pro, Flex, Direct, not Daily
+contracts: { max_minis: 10, micros_per_mini: 10 }
+prohibited:
+  microscalp: { max_profit_pct: 50, hold_seconds: 5 }
+  hft: true
+costs:
+  activation_fee: 0
+  commission_per_side: { ES: 1.75, MES: 0.5, NQ: 1.75, MNQ: 0.5 }

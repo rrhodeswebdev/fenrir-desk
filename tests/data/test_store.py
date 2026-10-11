@@ -1,8 +1,9 @@
 import hashlib
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import polars as pl
+import pytest
 
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import parse_instruments
@@ -205,3 +206,11 @@ def test_with_contract_current_window_is_incomplete():
     w = Window("NQ", "NQH26", date(2025, 12, 11), date(2026, 1, 5))
     m = with_contract({"series": {}}, w, rows=1, today=date(2026, 1, 5), pulled_at="x")
     assert m["series"]["NQ"]["NQH26"]["complete"] is False
+
+
+@pytest.mark.parametrize("days_back, complete", [(0, False), (1, False), (2, True)])
+def test_with_contract_complete_cutoff(days_back, complete):
+    today = date(2026, 1, 5)
+    w = Window("NQ", "NQH26", date(2025, 12, 11), today - timedelta(days=days_back))
+    m = with_contract({"series": {}}, w, rows=1, today=today, pulled_at="x")
+    assert m["series"]["NQ"]["NQH26"]["complete"] is complete

@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 
 from fenrir.core.instruments import parse_instruments
-from fenrir.data.pull import Window, pull, pull_windows, todo
+from fenrir.data.pull import NoBars, Window, pull, pull_windows, todo
 from fenrir.data.store import load_bars
 
 INST = parse_instruments(
@@ -46,7 +46,7 @@ def test_todo_skips_complete_contracts_only():
             }
         }
     }
-    assert [w.contract for w in todo(windows, manifest, date(2026, 3, 20))] == ["NQH26", "NQM26"]
+    assert [w.contract for w in todo(windows, manifest)] == ["NQH26", "NQM26"]
 
 
 def test_todo_repulls_when_since_moves_earlier():
@@ -63,12 +63,12 @@ def test_todo_repulls_when_since_moves_earlier():
             }
         }
     }
-    assert [w.contract for w in todo(windows, manifest, date(2025, 12, 5))] == ["NQZ25"]
+    assert [w.contract for w in todo(windows, manifest)] == ["NQZ25"]
 
 
 def test_todo_empty_manifest_pulls_everything():
     windows = pull_windows(INST, "NQ", date(2025, 12, 1), date(2026, 3, 20))
-    assert todo(windows, {}, date(2026, 3, 20)) == windows
+    assert todo(windows, {}) == windows
 
 
 def fake_fetch(w: Window) -> pl.DataFrame:
@@ -103,3 +103,22 @@ def test_pull_failure_keeps_finished_contracts(tmp_path):
         pull(tmp_path, INST, ("NQ",), date(2025, 12, 1), date(2026, 3, 20), flaky, lambda: "t")
     manifest = json.loads((tmp_path / "bars" / "manifest.json").read_text())
     assert list(manifest["series"]["NQ"]) == ["NQZ25"]
+    again = pull(
+        tmp_path, INST, ("NQ",), date(2025, 12, 1), date(2026, 3, 20), fake_fetch, lambda: "t"
+    )
+    assert [w.contract for w in again] == ["NQH26", "NQM26"]
+
+
+def test_pull_empty_fetch_is_not_recorded_and_retries(tmp_path):
+    def empty_h26(w: Window) -> pl.DataFrame:
+        return fake_fetch(w).clear() if w.contract == "NQH26" else fake_fetch(w)
+
+    with pytest.raises(NoBars, match="NQH26"):
+        pull(tmp_path, INST, ("NQ",), date(2025, 12, 1), date(2026, 3, 20), empty_h26, lambda: "t")
+    manifest = json.loads((tmp_path / "bars" / "manifest.json").read_text())
+    assert list(manifest["series"]["NQ"]) == ["NQZ25"]
+    assert not (tmp_path / "bars" / "NQ" / "1m" / "NQH26.parquet").exists()
+    again = pull(
+        tmp_path, INST, ("NQ",), date(2025, 12, 1), date(2026, 3, 20), fake_fetch, lambda: "t"
+    )
+    assert [w.contract for w in again] == ["NQH26", "NQM26"]

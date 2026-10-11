@@ -7,6 +7,7 @@ import polars as pl
 from typer.testing import CliRunner
 
 from fenrir.cli.main import app
+from fenrir.data.store import SCHEMA
 
 REPO = Path(__file__).parents[2]
 
@@ -78,3 +79,15 @@ def test_pull_malformed_since(tmp_path, monkeypatch):
     result = CliRunner().invoke(app, ["data", "pull", "--since", "2026-13-01"])
     assert result.exit_code == 1
     assert "--since must be YYYY-MM-DD" in result.output
+
+
+def test_pull_empty_window_prints_error(tmp_path, monkeypatch):
+    setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "fenrir.cli.data.fetch_contract",
+        lambda settings, w: pl.DataFrame(schema=SCHEMA),
+    )
+    since = datetime.now(UTC).date().replace(day=1).isoformat()
+    result = CliRunner().invoke(app, ["data", "pull", "--series", "NQ", "--since", since])
+    assert result.exit_code == 1
+    assert "LSE returned no bars" in result.output

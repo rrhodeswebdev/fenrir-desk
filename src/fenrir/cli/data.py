@@ -8,7 +8,7 @@ import typer
 from fenrir.core.instruments import load_instruments
 from fenrir.core.sessions import trading_day
 from fenrir.data.lse import fetch_contract
-from fenrir.data.pull import Window
+from fenrir.data.pull import NoBars, Window
 from fenrir.data.pull import pull as run_pull
 from fenrir.data.store import coverage, data_version
 from fenrir.settings import load_settings
@@ -26,7 +26,7 @@ def pull(
 ) -> None:
     """Download 1-minute bars from LSE into data/bars/."""
     # Validate and normalize series
-    normalized_series = [s.upper() for s in (series or list(SERIES))]
+    normalized_series = list(dict.fromkeys(s.upper() for s in (series or SERIES)))
     for s in normalized_series:
         if s not in SERIES:
             typer.echo(f"unknown series {s}; choose from {', '.join(SERIES)}", err=True)
@@ -48,15 +48,19 @@ def pull(
         typer.echo(f"{w.contract} {w.first}..{w.last}")
         return fetch_contract(settings, w)
 
-    windows = run_pull(
-        settings.data_dir,
-        load_instruments(),
-        tuple(normalized_series),
-        since_date,
-        trading_day(datetime.now(UTC)),
-        fetch,
-        lambda: datetime.now(UTC).isoformat(),
-    )
+    try:
+        windows = run_pull(
+            settings.data_dir,
+            load_instruments(),
+            tuple(normalized_series),
+            since_date,
+            trading_day(datetime.now(UTC)),
+            fetch,
+            lambda: datetime.now(UTC).isoformat(),
+        )
+    except NoBars as e:
+        typer.echo(f"{e}; finished contracts are kept, re-run to retry", err=True)
+        raise typer.Exit(1) from None
     version = data_version(settings.data_dir)[:12]
     typer.echo(f"pulled {len(windows)} contract windows; data version {version}")
 

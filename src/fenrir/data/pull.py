@@ -9,6 +9,10 @@ import polars as pl
 from fenrir.core.instruments import Instruments
 
 
+class NoBars(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class Window:
     series: str
@@ -29,9 +33,7 @@ def pull_windows(
     return tuple(w for w in windows if w.first <= w.last)
 
 
-def todo(
-    windows: tuple[Window, ...], manifest: Mapping[str, Any], today: date
-) -> tuple[Window, ...]:
+def todo(windows: tuple[Window, ...], manifest: Mapping[str, Any]) -> tuple[Window, ...]:
     def done(w: Window) -> bool:
         entry = manifest.get("series", {}).get(w.series, {}).get(w.contract)
         return (
@@ -56,10 +58,13 @@ def pull(
     windows = todo(
         tuple(w for s in series for w in pull_windows(instruments, s, since, today)),
         manifest,
-        today,
     )
     for w in windows:
-        rows = write_contract(data_dir, w.series, w.contract, fetch(w))
+        frame = fetch(w)
+        # an empty window recorded as complete would never be re-pulled
+        if frame.is_empty():
+            raise NoBars(f"LSE returned no bars for {w.contract} {w.first}..{w.last}")
+        rows = write_contract(data_dir, w.series, w.contract, frame)
         # manifest after every contract, so an interrupted pull keeps what finished
         manifest = with_contract(manifest, w, rows, today, now())
         write_manifest(data_dir, manifest)

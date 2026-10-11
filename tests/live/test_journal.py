@@ -31,14 +31,29 @@ def test_unknown_kind_is_rejected(conn):
 
 
 def test_rows_filter_by_account_and_trading_day(conn):
-    # trading day 2026-10-12 runs 2026-10-11 18:00 ET (22:00 UTC) to 2026-10-12 17:00 ET (21:00 UTC)
+    # trading day 2026-10-12 runs 2026-10-11 18:00 ET (22:00 UTC) to 2026-10-12 18:00 ET,
+    # its 17:00-18:00 break included (as core.sessions.trading_day counts it)
     journal.write(conn, datetime(2026, 10, 11, 21, 59, tzinfo=UTC), "Sim101", "bar", {"n": 0})
     journal.write(conn, datetime(2026, 10, 11, 22, 0, tzinfo=UTC), "Sim101", "bar", {"n": 1})
     journal.write(conn, datetime(2026, 10, 12, 20, 59, tzinfo=UTC), "Sim101", "bar", {"n": 2})
-    journal.write(conn, datetime(2026, 10, 12, 21, 0, tzinfo=UTC), "Sim101", "bar", {"n": 3})
-    journal.write(conn, datetime(2026, 10, 12, 14, 0, tzinfo=UTC), "Other", "bar", {"n": 4})
+    journal.write(conn, datetime(2026, 10, 12, 21, 30, tzinfo=UTC), "Sim101", "halt", {"n": 3})
+    journal.write(conn, datetime(2026, 10, 12, 22, 0, tzinfo=UTC), "Sim101", "bar", {"n": 4})
+    journal.write(conn, datetime(2026, 10, 12, 14, 0, tzinfo=UTC), "Other", "bar", {"n": 5})
     got = journal.rows(conn, account="Sim101", day=date(2026, 10, 12))
-    assert [r.payload["n"] for r in got] == [1, 2]
+    assert [r.payload["n"] for r in got] == [1, 2, 3]
+    assert [r.payload["n"] for r in journal.rows(conn, day=date(2026, 10, 12))] == [1, 2, 3, 5]
+
+
+def test_day_bounds_follow_winter_time():
+    assert journal.day_bounds(date(2026, 12, 15)) == (
+        datetime(2026, 12, 14, 23, 0, tzinfo=UTC),
+        datetime(2026, 12, 15, 23, 0, tzinfo=UTC),
+    )
+
+
+def test_naive_timestamp_is_rejected(conn):
+    with pytest.raises(ValueError, match="naive"):
+        journal.write(conn, datetime(2026, 10, 12, 12, 0), "Sim101", "bar", {})
 
 
 def test_rearming_replaces_and_delete_removes(conn):

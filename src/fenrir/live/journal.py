@@ -45,6 +45,8 @@ class JournalRow:
 
 def iso(ts: datetime) -> str:
     # one format everywhere, so string comparison orders by time
+    if ts.tzinfo is None:
+        raise ValueError(f"naive datetime: {ts!r}")
     return ts.astimezone(UTC).isoformat()
 
 
@@ -68,9 +70,10 @@ def write(
 
 
 def day_bounds(day: date) -> tuple[datetime, datetime]:
-    """UTC [18:00 ET on day-1, 17:00 ET on day): the CME trading day."""
+    """UTC [18:00 ET on day-1, 18:00 ET on day): the trading day plus its 17:00 break, as
+    `core.sessions.trading_day` counts it, so a halt journalled in the break is not lost."""
     start = datetime.combine(day - timedelta(days=1), time(18), NY)
-    end = datetime.combine(day, time(17), NY)
+    end = datetime.combine(day, time(18), NY)
     return start.astimezone(UTC), end.astimezone(UTC)
 
 

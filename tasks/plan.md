@@ -1,6 +1,6 @@
 # Implementation Plan: Fenrir Desk v1, remaining work (plans 09–24)
 
-**Updated:** 2026-10-11 · Spec: root `SPEC.md` · Contracts: `docs/contracts.md`
+**Updated:** 2026-10-11 (DEC-1…6 decided, see SPEC Decisions) · Spec: root `SPEC.md` · Contracts: `docs/contracts.md`
 
 ## Overview
 
@@ -52,12 +52,12 @@ Plans 01–03 and 05–08 are merged. Plan 09 is built on `feat/09-attempts-repo
 Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links between them. Size S = 1–2 files, M = 3–5.
 
 ### Phase 0: Decisions, data gate, rules
-- [ ] #10 DEC-1 Terminal isolation for tokens and `armed` · ask-first
-- [ ] #11 DEC-2 WebSocket rejection code (SC7) · ask-first
-- [ ] #12 DEC-3 Rules YAML comment preservation · ask-first
-- [ ] #15 DEC-4 Live limit open points · ask-first
-- [ ] #14 DEC-5 Add-on behaviour questions · ask-first
-- [ ] #13 DEC-6 Docker mounts · ask-first
+- [x] #10 DEC-1 Terminal isolation for tokens and `armed` · ask-first
+- [x] #11 DEC-2 WebSocket rejection code (SC7) · ask-first
+- [x] #12 DEC-3 Rules YAML comment preservation · ask-first
+- [x] #15 DEC-4 Live limit open points · ask-first
+- [x] #14 DEC-5 Add-on behaviour questions · ask-first
+- [x] #13 DEC-6 Docker mounts · ask-first
 - [ ] #16 GATE-3 Run data-gate item 3 in market hours · S
 - [ ] #17 GATE-4 Run data-gate item 4 over a full session · S · after GATE-3
 - [ ] #18 DEC-7 Live data source (if GATE-3/4 fail) · ask-first

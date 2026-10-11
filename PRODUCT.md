@@ -35,7 +35,7 @@ Optimizes for time-to-pass and time-to-payout under a specific firm's rules, not
 ## Capabilities and Constraints
 
 - Lucid Trading only (Pro, Flex, Direct, Daily); instruments ES, MES, NQ, MNQ.
-- One armed strategy per account; single user; no login beyond a local session token.
+- One armed strategy per account; single user; no login beyond a local session cookie.
 - Market data from London Strategic Edge; execution through a NinjaTrader add-on.
 - Stack: Vite, React, TypeScript, TanStack Router and Query, shadcn/ui, Tailwind CSS v4; charts with TradingView Lightweight Charts.
 - Terminology: account type (e.g. `lucid-flex-50k`), attempt, evaluation, funded, breach, payout, hold-out, tuning period, arm/disarm, halt, kill switch, dry run / sim / live.

@@ -48,10 +48,15 @@ Result: PASS, with a roll-date mismatch that plan 03 must handle (see below)
 
 ## Item 3 — Live WebSocket is real-time ES and NQ
 
-Result: PASS / FAIL (not run yet; the market was closed on 2026-10-10, a Saturday)
-- Lag vs wall clock over `__` minutes: median `__` s, p95 `__` s (fail if median > 5 s).
-- Contracts streamed: ...
-- Early warning (2026-10-10): the socket reports tier `registered` and lists 4,169 streamable symbols, none of them `ES.F`/`NQ.F` (stocks only). If no futures ticks arrive during market hours, this item fails on the current plan tier.
+Result: NO TICKS RECEIVED (a fail: the current LSE tier streams no futures)
+- Run 2026-10-11 (Sunday), Globex open (ES and NQ trade from 18:00 ET): `live ES.F NQ.F --minutes 30` from 18:10:27 ET. 0 ticks for `ES.F` and `NQ.F`, so 0 without volume; lag n/a. `data/gate/ticks-2026-10-11T221027.jsonl` is empty. The Mac idle-slept from 18:21:07 to 18:50:12 ET (`pmset -g log`), so about 10.5 minutes were actually recorded; the process was killed at 18:50 before it printed its summary (see the run note below).
+- Re-checks the same evening, Globex still open:
+  - 18:53 ET, 60 s, subscribed to `ES.F`, `NQ.F`, `MES.F`, `MNQ.F`, `ESZ26`, `ESZ6`, `NQZ26`, `NQZ6`, `ES`, `NQ`, `MES`, `MNQ`, `/ES`, `/NQ`: 0 ticks and no error reply (the server ignores a symbol it does not serve).
+  - 18:56–18:58 ET, `live ES.F NQ.F BTC/USD --minutes 2`: 121 ticks, all `BTC/USD`, 0 for `ES.F`/`NQ.F`; ended on time (120 s). So the socket and the script work and futures are simply not served. Control lag: median −0.53 s, p95 −0.52 s with the local clock 0.64 s slow (`sntp time.apple.com`), so about +0.1 s.
+- Tier and streamable symbols (the socket's `authenticated` message, 2026-10-11): tier `registered`, 4,173 symbols: stocks 3,987, forex 62, crypto 58, ETFs 25, commodities 23 (spot, e.g. `WTICO/USD`, `XAU/USD`), indices 13 (spot, e.g. `SPX500/USD`, `NAS100/USD`), 5 uncategorised (`BNKE.L`, `USB02Y/USD` … `USB30Y/USD`). No futures category and no ES, NQ, MES or MNQ in any form; the one `ES` is Eversource Energy stock. 2026-10-10 showed the same (tier `registered`, 4,169 symbols). The spot indices are not a stand-in: their price differs from the future by the basis (see Item 2).
+- Contracts streamed: none.
+- A weekday regular-hours re-run would show the same unless the tier changes: the symbol list, not the session, is what leaves futures out.
+- Run note: the "hang" after the deadline was the sleep, not the SDK. `time.monotonic` (`mach_absolute_time` on macOS) stops while the machine sleeps, and the deadline runs on it, so about 19 of the 30 minutes were still left at 18:50. The 2-minute run above closed the stream on time. `live` now holds a `caffeinate -i` assertion on macOS for as long as it runs; closing the lid still sleeps the machine.
 
 ## Item 4 — A day of live bars matches historical bars
 
@@ -71,11 +76,11 @@ Deferred to plan 22 (needs the add-on and a sim account).
 | LSE symbol for our code `NQZ26` | 03, 04 | None per contract. History uses `NQ.F` / `ES.F` (continuous, unadjusted, LSE's own roll dates; see "Roll mismatch") |
 | Timestamp shift to bar OPEN in UTC | 03 | none (timestamps are already bar open, UTC) |
 | Roll-window days to skip | 03, 08, 21 | Every trading day from the `instruments.yaml` roll day (third Friday − 8 days, a Thursday) through the Tuesday of expiry week, inclusive |
-| Live message → `Tick(ts, price, size, contract)` mapping | 04 | `____` |
+| Live message → `Tick(ts, price, size, contract)` mapping | 04 | Cannot be filled: no futures ticks arrive on the current tier. From the SDK and the `BTC/USD` control only: `tick.datetime` (aware UTC) → `ts`, `price` → `price`, `volume` (float, may be `None`) → `size`; the message has no contract field. To be filled for the source DEC-7 picks |
 
 ## Decision
 
 - Items 1–2: PASS → plan 03 may run. FAIL → stop; revisit the data source (Databento is the known alternative) before plan 03.
 - Items 3–4: PASS → plans 04, 21 may run. FAIL → live trading blocked until the user picks another live source; plans 03, 05–18 continue.
 
-Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Items 3–4 pending (weekday run needed; the live tier may not include futures).
+Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Item 3 NO TICKS RECEIVED (2026-10-11): LSE's `registered` tier streams no futures, so item 4 cannot run on it either. DEC-7 (#18, live data source) is now needed; plans 04.2, 21.5, 21.8 and 22.7 stay blocked until it is decided. Plans 03 and 05–18 continue.

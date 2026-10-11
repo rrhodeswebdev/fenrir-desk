@@ -107,12 +107,20 @@ def test_series_match_the_cli_summary(tmp_path, monkeypatch):
     }
 
 
-def test_create_app_holds_an_idle_runner_with_the_lse_key(tmp_path):
-    app, _ = _client(tmp_path, lse_api_key="lse-secret")
+def test_create_app_holds_an_idle_runner(tmp_path):
+    app, _ = _client(tmp_path)
     assert isinstance(app.state.pull, PullRunner)
     assert app.state.pull.status()["state"] == "idle"
-    assert app.state.pull._cmd[-2:] == ["data", "pull"]
-    assert app.state.pull._env["FENRIR_LSE_API_KEY"] == "lse-secret"
+
+
+def test_create_app_runs_the_cli_pull_with_the_lse_key(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("fenrir.server.app.PullRunner", lambda cmd, env: calls.append((cmd, env)))
+    app, _ = _client(tmp_path, lse_api_key="lse-secret")
+    [(cmd, env)] = calls
+    assert cmd[-2:] == ["data", "pull"]
+    assert env["FENRIR_LSE_API_KEY"] == "lse-secret"
+    assert app.state.pull is None  # the recorder's return: create_app keeps what it built
 
 
 def test_pull_202_then_409_while_running(tmp_path):

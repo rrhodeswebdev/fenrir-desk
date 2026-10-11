@@ -141,12 +141,17 @@ def write_bars(data_dir: Path, series: str, contract: str, bars: Sequence[Bar]) 
     write_manifest(data_dir, manifest)
 
 
-def _read_series(data_dir: Path, series: str) -> pl.DataFrame | None:
+def _read_series(
+    data_dir: Path, series: str, columns: list[str] | None = None
+) -> pl.DataFrame | None:
     files = sorted(_series_dir(data_dir, series).glob("*.parquet"))
     if not files:
         return None
     return pl.concat(
-        [pl.read_parquet(f).with_columns(pl.lit(f.stem).alias("contract")) for f in files]
+        [
+            pl.read_parquet(f, columns=columns).with_columns(pl.lit(f.stem).alias("contract"))
+            for f in files
+        ]
     ).with_columns(trading_day_expr().alias("day"))
 
 
@@ -186,7 +191,8 @@ def expected_days(first: date, last: date) -> Sequence[date]:
 
 
 def coverage(data_dir: Path, series: str) -> Coverage:
-    frame = _read_series(data_dir, series)
+    # only the timestamps: the Data page polls this every 2 s during a pull
+    frame = _read_series(data_dir, series, columns=["ts"])
     days = (
         set()
         if frame is None

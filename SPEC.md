@@ -57,14 +57,13 @@ Format:      uv run ruff format .
 Pull data:   uv run fenrir data pull [--series ES --series NQ] [--since YYYY-MM-DD]
 Data info:   uv run fenrir data summary --json
 Data gate:   uv run --with lse-data python scripts/lse_gate.py <command>
-Backtest:    uv run fenrir backtest <strategy files...> --account <id> [--account ...] --contract MNQ [--json]   # tuning only
-Evaluate:    uv run fenrir evaluate <same args>                                                              # tuning + hold-out
+Backtest:    uv run fenrir backtest <strategy globs...> --account <glob> [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached
+Evaluate:    uv run fenrir evaluate <same args>                                                                      # tuning + hold-out
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
-Backtest:    uv run fenrir backtest <strategy globs...> --account <glob> [--contract MNQ] [--json]   # globs, optional --contract (10)
 Serve:       uv run fenrir serve [--port 8000] [--dev] [--static-dir web/dist]                    # (11)
 Web dev:     npm --prefix web run dev                                                             # (12)
 Typecheck:   npm --prefix web run typecheck                                                       # (12)

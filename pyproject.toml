@@ -25,6 +25,7 @@ packages = ["src/fenrir"]
 
 [dependency-groups]
 dev = [
+    "hypothesis>=6.168.5",
     "pytest>=8",
     "ruff>=0.6",
 ]

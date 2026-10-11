@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from fenrir.rules.account import payout
-from fenrir.rules.loader import list_accounts, load_account, rules_path
+from fenrir.rules.loader import list_accounts, load_account
 
 RULES = Path(__file__).parents[2] / "rules"
 
@@ -37,8 +37,6 @@ def test_every_rules_file_loads(account):
 
 @pytest.mark.parametrize("account", FIRST_PAYOUT)
 def test_first_payout_matches_lucid(account, make_state):
-    if not rules_path(account, RULES).exists():
-        pytest.skip("file lands with #116 / #117")  # shortcut: drop once both are merged
     rules = load_account(account, RULES)
     point, buffer, cap = FIRST_PAYOUT[account]
 

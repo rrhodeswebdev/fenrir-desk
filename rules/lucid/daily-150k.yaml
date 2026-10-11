@@ -11,9 +11,10 @@
 # Whether your account has it on is yours to set (data/accounts.yaml), not a rule.
 # Schema gaps, entered on the safe side:
 # - The evaluation drawdown is a purchase option (end-of-day or intraday); intraday is entered.
-# - A payout may not dip into the $4,600 buffer (MLL + $100) and has no cap. max_pct_of_profit is
-#   500 / 5,100 rounded down: the $500 minimum request is reached at $5,100 profit,
-#   as on Lucid, and the request never exceeds profit above the buffer (it understates it).
+# - A payout may not dip into the $4,600 buffer (MLL + $100) and has no cap. max_pct_of_profit
+#   is just under 500 / 5,100: the $500 minimum request is reached within $3 of Lucid's
+#   point ($5,100 profit), and the request never exceeds profit above the buffer
+#   (it understates it).
 # Not modelled: holding a position from 1 minute before to 1 minute after high-impact USD news
 # is a hard breach; a day at or above $12,000 profit moves the account to live review.
 firm: lucid

@@ -320,6 +320,8 @@ def daily_loss_limit(limit: float) -> Rule:
 | Overfitting from many strategies on the same data | Hold-out; ranking never uses it; `holdout_gap` flag. |
 | Backtest fills better than live | Conservative fill model; dry run and sim first; journal for live vs backtest. |
 | Python fold too slow | Estimated from a sample (Open Question 5): about 3 h for one ORB backtest. 10.4 loads bars once and caps workers by memory; the attempt length is Open Question 6. |
+| Lucid Direct's daily loss limit is mandatory | Set `dll_on: true` for `direct-*` in `data/accounts.yaml`, or backtests ignore it. |
+| LucidDaily news-window hard breach (flat from 1 min before to 1 min after high-impact USD news) is not modelled | Daily pass/payout rates are overstated for strategies holding through releases; the skill tells Claude to stay flat around them. |
 | Worker memory | About 1.5 GB per spawn worker (24 GB on 16 cores) would exceed a typical Docker Desktop memory limit; 10.4 caps the worker count. |
 | Browser terminal as attack surface | Loopback binding, Host check, one-time launch link → HttpOnly cookie, Origin checks; in Docker the terminal runs as `claude` and nothing it writes runs as root. |
 | Host goes down with a position open | Broker-side brackets; add-on flattens at 16:40 on its own. |

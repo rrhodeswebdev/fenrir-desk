@@ -33,6 +33,7 @@ You write deterministic strategy code whose only goal is passing a Lucid evaluat
 - **The daily loss limit (when `dll_on`) halts the day, not the attempt:** the position is flattened, no more entries that day, and the attempt continues next session.
 - **Roll window:** from the Thursday 8 days before quarterly expiry through the Tuesday of expiry week there are no bars in backtests and no entries live.
 - Open positions are flattened at the account's `flat_by` (16:40 ET at the latest); do not plan to hold overnight.
+- **LucidDaily (`lucid-daily-*`): be flat from 1 minute before to 1 minute after high-impact USD news** (08:30, 10:00, 14:00 ET releases). Lucid fails the account for holding through them, and the backtest does not model that breach.
 
 ## Strategy contract
 

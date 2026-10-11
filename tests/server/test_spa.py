@@ -83,3 +83,8 @@ def test_no_spa_without_static_dir():
     client = TestClient(create_app(Settings(), KEY, CODE, None), base_url="http://localhost:8000")
     assert client.get("/").status_code == 404
     assert client.get("/backtests/abc").status_code == 404
+
+
+def test_static_dir_without_index_fails_fast(tmp_path: Path):
+    with pytest.raises(ValueError, match="no index.html"):
+        create_app(Settings(), KEY, CODE, tmp_path)

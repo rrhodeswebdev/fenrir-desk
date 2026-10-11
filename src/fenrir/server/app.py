@@ -22,11 +22,11 @@ def host_action(host: str | None) -> Literal["ok", "redirect", "reject"]:
     return "reject" if m is None else "ok" if m[1] == "localhost" else "redirect"
 
 
-def localhost_url(host: str, raw_path: bytes, query: bytes) -> str:
+def localhost_url(host: str, raw_path: bytes, path: str, query: bytes) -> str:
     port = host.removeprefix("127.0.0.1")
-    return f"http://localhost{port}{raw_path.decode('latin-1')}" + (
-        f"?{query.decode('latin-1')}" if query else ""
-    )
+    # an absolute-form target (GET http://h/p) puts the whole URL in raw_path; keep only the path
+    target = raw_path.decode("latin-1") if raw_path.startswith(b"/") else path
+    return f"http://localhost{port}{target}" + (f"?{query.decode('latin-1')}" if query else "")
 
 
 def static_file(root: Path, path: str) -> Path | None:
@@ -46,14 +46,18 @@ class HostGuard:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
             return await self.app(scope, receive, send)
-        host = Headers(scope=scope).get("host")
+        hosts = Headers(scope=scope).getlist("host")
+        # a repeated Host is refused: servers differ on which copy wins
+        host = hosts[0] if len(hosts) == 1 else None
         action = host_action(host)
         if action == "ok":
             return await self.app(scope, receive, send)
         # on a WebSocket, starlette sends these as a handshake denial, never an accept
         response = (
             RedirectResponse(
-                localhost_url(host or "", scope.get("raw_path") or b"", scope["query_string"]),
+                localhost_url(
+                    host or "", scope.get("raw_path") or b"", scope["path"], scope["query_string"]
+                ),
                 status_code=307,
             )
             if action == "redirect"
@@ -110,6 +114,9 @@ def create_app(
 
 
 def _mount_spa(app: FastAPI, root: Path) -> None:
+    if not (root / "index.html").is_file():
+        raise ValueError(f"{root} has no index.html; build the web UI first")
+
     @app.get("/{path:path}", include_in_schema=False)
     def spa(path: str) -> FileResponse:
         if path.split("/")[0] in ("api", "ws"):

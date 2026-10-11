@@ -1,10 +1,12 @@
+import asyncio
+
 import pytest
 from fastapi import APIRouter, Depends, WebSocket
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
-from fenrir.server.app import create_app, host_action
+from fenrir.server.app import create_app, host_action, localhost_url
 from fenrir.server.auth import SESSION_COOKIE, check_ws, require_session
 from fenrir.settings import Settings
 
@@ -186,3 +188,35 @@ def test_ws_foreign_host_refused():
             pass
     assert e.value.status_code == 400
     assert accepted == []
+
+
+def test_localhost_url_keeps_raw_origin_form_path():
+    url = localhost_url("127.0.0.1:8000", b"/a%2Fb", "/a/b", b"q=1")
+    assert url == "http://localhost:8000/a%2Fb?q=1"
+
+
+def test_localhost_url_absolute_form_target_uses_path():
+    url = localhost_url("127.0.0.1", b"http://evil.example/x", "/x", b"")
+    assert url == "http://localhost/x"
+
+
+def test_duplicate_host_header_400():
+    app = create_app(Settings(), KEY, CODE, None)
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/api/health",
+        "raw_path": b"/api/health",
+        "query_string": b"",
+        "headers": [(b"host", b"localhost:8000"), (b"host", b"evil.example")],
+    }
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b""}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    assert sent[0]["status"] == 400

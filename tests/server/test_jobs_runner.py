@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -366,6 +367,27 @@ def test_expand_times_out_and_kills_the_child(make, tmp_path):
     with pytest.raises(ValueError, match="took over 0.5 s"):
         runner.expand(["hang", str(tmp_path / "x.py")], [], None)
     wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
+
+
+def test_stop_kills_a_running_expand_child(make, tmp_path):
+    runner = make(expand_timeout=60)
+    errors: list = []
+
+    def expand() -> None:
+        try:
+            runner.expand(["hang", str(tmp_path / "x.py")], [], None)
+        except ValueError as e:
+            errors.append(e)
+
+    thread = threading.Thread(target=expand)
+    thread.start()
+    wait_for((tmp_path / "x.json").exists)
+    runner.stop()
+    thread.join(10)
+    assert not thread.is_alive() and "without an answer" in str(errors[0])
+    wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
+    with pytest.raises(RuntimeError, match="stopping"):  # nothing new spawns after stop
+        runner.expand(["[]"], [], None)
 
 
 def test_parse_grid(tmp_path):

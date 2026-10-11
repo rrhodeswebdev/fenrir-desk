@@ -174,6 +174,7 @@ class JobRunner:
         self._listeners: list[Listener] = []
         self._thread: threading.Thread | None = None
         self._proc: subprocess.Popen | None = None
+        self._expanding: set[subprocess.Popen] = set()
         self._stopping = False
 
     def start(self) -> None:
@@ -198,11 +199,13 @@ class JobRunner:
         self._thread.start()
 
     def stop(self) -> None:
-        """Kill the running child and its workers; its unfinished items re-run on next start."""
+        """Kill the running child and its workers, and any expand child; a job's unfinished
+        items re-run on next start."""
         with self._lock:
             self._stopping = True
-            if self._proc is not None:
-                _kill_group(self._proc.pid)
+            for proc in [self._proc, *self._expanding]:
+                if proc is not None:
+                    _kill_group(proc.pid)
         self._queue.put(None)
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=10)
@@ -230,6 +233,8 @@ class JobRunner:
         finally:
             code = proc.wait()
             _kill_group(proc.pid)
+            with self._lock:
+                self._expanding.discard(proc)
         if len(lines) != 1:
             raise ValueError(f"the strategy loader exited with code {code} without an answer")
         return parse_grid(lines[0], self._settings)
@@ -372,7 +377,7 @@ class JobRunner:
         overlay, drop = as_user(user)
         env |= overlay
         with self._lock:
-            if job and self._stopping:
+            if self._stopping:
                 raise RuntimeError("the job runner is stopping")
             proc = subprocess.Popen(
                 [*self._child, *args],
@@ -386,6 +391,8 @@ class JobRunner:
             )
             if job:
                 self._proc = proc
+            else:
+                self._expanding.add(proc)
         with contextlib.suppress(BrokenPipeError):  # a child that died early is seen at wait()
             proc.stdin.write(json.dumps(request))
             proc.stdin.close()

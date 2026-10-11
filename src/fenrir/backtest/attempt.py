@@ -159,7 +159,9 @@ def _close(sim: _Sim, env: _Env, price: float, ts: datetime) -> _Sim | AttemptRe
 
 def _fill_pending(sim: _Sim, env: _Env, i: int) -> _Sim | AttemptResult:
     bar = env.bars[i]
-    if sim.exit_requested and sim.position is not None:
+    # a position still open on a bar opening at or past flat-by: a data gap skipped _flat_time
+    gap = at_or_after(bar.ts, env.flat_at, env.rules.session.tz)
+    if sim.position is not None and (sim.exit_requested or gap):
         sim = _close(sim, env, market_exit(sim.position.qty, bar.open, env.spec.tick), bar.ts)
         if isinstance(sim, AttemptResult):
             return sim

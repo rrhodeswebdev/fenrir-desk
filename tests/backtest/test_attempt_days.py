@@ -139,3 +139,22 @@ def test_pending_bracket_does_not_fill_past_flat_by():
     r = attempt(bars, {"16:30": [LONG]})
     assert r.fills == ()
     assert r.outcome != "breached"
+
+
+def test_open_position_exits_when_data_skips_past_flat_by():
+    bars = [
+        bar("16:30", 100, 100.5, 99.5, 100),
+        bar("16:31", 100.5, 101, 100.25, 100.5),  # entry 100.75; data then skips 16:32-16:49
+        bar("16:50", 101, 101.5, 100.5, 101),  # exit at open - tick before any mark
+    ]
+    r = attempt(bars, {"16:30": [LONG]})
+    assert [(f.qty, f.price, f.ts) for f in r.fills] == [
+        (1, 100.75, et(D1, "16:31")),
+        (-1, 100.75, et(D1, "16:50")),
+    ]
+    assert (r.outcome, r.breach) == ("no_result", None)
+
+
+def test_pending_bracket_does_not_survive_the_day_roll():
+    r = attempt([bar("15:00", 100, 100.5, 99.5, 100), *winning_day(D2)], {"15:00": [LONG]})
+    assert r.fills == ()

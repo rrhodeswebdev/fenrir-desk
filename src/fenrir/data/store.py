@@ -1,10 +1,12 @@
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import os
+import tempfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import polars as pl
 
@@ -87,11 +89,31 @@ def _manifest_path(data_dir: Path) -> Path:
     return data_dir / "bars" / "manifest.json"
 
 
-def _atomic_write(path: Path, write: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    write(tmp)
-    tmp.replace(path)
+def _atomic_write(data_dir: Path, path: Path, write: Callable[[BinaryIO], Any]) -> None:
+    """`write` fills a fresh temp file beside `path`, which then replaces `path`.
+
+    data/ is terminal-writable in the image (DEC-1): ValueError, writing nothing, when
+    `data_dir`, a directory below it on the way to `path`, or `path` is a symlink.
+    """
+    # shortcut: checked, not opened with O_NOFOLLOW dir fds; a swap between check and write still
+    # races, upgrade to dir fds if the terminal is ever given a way to win that race
+    rel = path.relative_to(data_dir)
+    for p in [data_dir / Path(*rel.parts[:i]) for i in range(len(rel.parts) + 1)]:
+        if p.is_symlink():
+            raise ValueError(f"refusing to write through symlink {p}")
+        if p != path:
+            p.mkdir(parents=True, exist_ok=True)
+    # mkstemp: an unpredictable name opened O_EXCL, so a planted <path>.tmp link is never followed
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            if hasattr(os, "fchmod"):  # POSIX: keep the 0644 a plain write gave; mkstemp is 0600
+                os.fchmod(f.fileno(), 0o644)
+            write(f)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def read_manifest(data_dir: Path) -> dict[str, Any]:
@@ -101,7 +123,7 @@ def read_manifest(data_dir: Path) -> dict[str, Any]:
 
 def write_manifest(data_dir: Path, manifest: Mapping[str, Any]) -> None:
     text = json.dumps(manifest, indent=2, sort_keys=True)
-    _atomic_write(_manifest_path(data_dir), lambda p: p.write_text(text))
+    _atomic_write(data_dir, _manifest_path(data_dir), lambda f: f.write(text.encode()))
 
 
 def data_version(data_dir: Path) -> str:
@@ -118,7 +140,8 @@ def write_contract(data_dir: Path, series: str, contract: str, frame: pl.DataFra
         .unique("ts", keep="last", maintain_order=True)
         .sort("ts")
     )
-    _atomic_write(_series_dir(data_dir, series) / f"{contract}.parquet", clean.write_parquet)
+    path = _series_dir(data_dir, series) / f"{contract}.parquet"
+    _atomic_write(data_dir, path, clean.write_parquet)
     return clean.height
 
 

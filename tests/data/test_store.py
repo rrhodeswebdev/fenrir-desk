@@ -10,6 +10,7 @@ from fenrir.core.instruments import parse_instruments
 from fenrir.core.sessions import trading_day
 from fenrir.data.pull import Window
 from fenrir.data.store import (
+    _atomic_write,
     coverage,
     data_version,
     find_gaps,
@@ -214,3 +215,60 @@ def test_with_contract_complete_cutoff(days_back, complete):
     w = Window("NQ", "NQH26", date(2025, 12, 11), today - timedelta(days=days_back))
     m = with_contract({"series": {}}, w, rows=1, today=today, pulled_at="x")
     assert m["series"]["NQ"]["NQH26"]["complete"] is complete
+
+
+# data/ is terminal-writable in the image (DEC-1): no planted link may redirect a write (#135)
+NQ_ROWS = [(utc(2025, 12, 1, 15, 0), 1.0)]
+
+
+def test_planted_tmp_symlinks_are_never_followed(tmp_path):
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    (data / "bars" / "NQ" / "1m").mkdir(parents=True)
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_text("keep")
+    (data / "bars" / "manifest.json.tmp").symlink_to(secret)
+    (data / "bars" / "NQ" / "1m" / "NQZ25.parquet.tmp").symlink_to(secret)
+    write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    write_manifest(data, {"series": {}})
+    assert secret.read_text() == "keep"
+    assert read_manifest(data) == {"series": {}}
+    assert load_bars(data, INST, "NQ") == (bar(*NQ_ROWS[0], "NQZ25"),)
+    manifest = data / "bars" / "manifest.json"
+    assert not manifest.is_symlink() and manifest.stat().st_mode & 0o777 == 0o644
+    leftovers = {p.name for p in data.rglob("*.tmp")}
+    assert leftovers == {"manifest.json.tmp", "NQZ25.parquet.tmp"}  # only the planted links
+
+
+@pytest.mark.parametrize("link", ["", "bars", "bars/NQ", "bars/NQ/1m"])
+def test_symlinked_directory_refuses_the_write(tmp_path, link):
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    outside.mkdir()
+    (data / link).parent.mkdir(parents=True, exist_ok=True)
+    (data / link).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    if link in ("", "bars"):  # on the manifest's path too
+        with pytest.raises(ValueError, match="symlink"):
+            write_manifest(data, {"series": {}})
+    assert list(outside.rglob("*")) == []
+
+
+def test_symlinked_target_refuses_the_write(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text("keep")
+    (tmp_path / "bars").mkdir()
+    (tmp_path / "bars" / "manifest.json").symlink_to(secret)
+    with pytest.raises(ValueError, match="symlink"):
+        write_manifest(tmp_path, {"series": {}})
+    assert secret.read_text() == "keep"
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path):
+    def fail(f):
+        f.write(b"half")
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        _atomic_write(tmp_path, tmp_path / "bars" / "manifest.json", fail)
+    assert list((tmp_path / "bars").iterdir()) == []

@@ -238,9 +238,9 @@ function RuleEditor({ id }: { id: string }) {
   const [draft, setDraft] = useState<unknown>(null) // null = no edits yet
   const save = useMutation({
     mutationFn: (rules: unknown) => apiFetch<RuleRow>(url, { method: 'PUT', body: JSON.stringify(rules) }),
-    onSuccess: async () => {
+    onSuccess: async (_row, sent) => {
       await qc.invalidateQueries({ queryKey: ['rules'] }) // the list and this account
-      setDraft(null)
+      setDraft((d: unknown) => (d === sent ? null : d)) // keep edits typed during the save
     },
   })
   const error = pageError(detail.error)

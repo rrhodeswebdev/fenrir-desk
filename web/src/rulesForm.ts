@@ -29,7 +29,7 @@ export function fieldErrors(e: unknown): FieldError[] {
   if (!(e instanceof ApiError) || e.status !== 422) return []
   try {
     const errors: unknown = JSON.parse(e.body).errors
-    return Array.isArray(errors) ? errors : []
+    return Array.isArray(errors) ? errors.filter((x) => Array.isArray(x?.loc) && typeof x?.msg === 'string') : []
   } catch {
     return []
   }

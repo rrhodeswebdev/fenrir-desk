@@ -56,5 +56,6 @@ describe('errorsAt and fieldErrors', () => {
     expect(fieldErrors(new Error('network'))).toEqual([])
     expect(fieldErrors(new ApiError(422, 'not json'))).toEqual([])
     expect(fieldErrors(new ApiError(422, '{"detail": [{"msg": "x"}]}'))).toEqual([])
+    expect(fieldErrors(new ApiError(422, JSON.stringify({ errors: [{ msg: 'no loc' }, null, ...body.errors] })))).toEqual(body.errors)
   })
 })

@@ -64,14 +64,17 @@ Data gate:   uv run --with lse-data python scripts/lse_gate.py <command>
 Backtest:    uv run fenrir backtest '<strategy glob>'... --account '<glob>' [--account ...] [--contract MNQ ...] [--json]   # tuning only, cached; quote globs (zsh)
 Evaluate:    uv run fenrir evaluate <same args>                                                                      # tuning + hold-out
 Compare:     uv run fenrir compare --view account|strategy [--json]                                                  # latest cached reports, ranked by tuning
+Web install: npm --prefix web ci
+Web dev:     npm --prefix web run dev            # proxies /api, /ws, /launch to :8000
+Typecheck:   npm --prefix web run typecheck
+Web test:    npm --prefix web test -- --run      # Vitest unit tests
+Web build:   npm --prefix web run build          # writes web/dist/
 ```
 
 Planned (the plan that adds each one adds it here):
 
 ```
 Serve:       uv run fenrir serve [--port 8000] [--dev] [--static-dir web/dist]                    # (11)
-Web dev:     npm --prefix web run dev                                                             # (12)
-Typecheck:   npm --prefix web run typecheck                                                       # (12)
 E2E:         npx --prefix web playwright test                                                     # (12)
 Run app:     docker compose up        → http://localhost:8000                                     # (18)
 ```
@@ -91,7 +94,7 @@ src/fenrir/cli/          → Typer CLI, one module per command group; thin shell
 src/fenrir/server/       → FastAPI app, auth, routes, PTY, jobs          (planned, 11)
 src/fenrir/bridge/       → add-on client, reconciliation                 (planned, 20)
 src/fenrir/live/         → live runner, journal, safety, arming          (planned, 21)
-web/                     → Vite React app                                (planned, 12)
+web/                     → Vite React app (scaffold and API client; pages from 12.2)
 addon/                   → C# NinjaScript add-on                         (planned, 19)
 .claude/skills/fenrir-strategy/ → project skill for the strategy loop    (planned, 17)
 scripts/                 → one-off scripts run by hand; never imported
@@ -113,7 +116,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09, 10.1–10.3, 10.5 done; 10.4 not started |
 | `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
-| `web` | React UI, every page | server | 12–16, 23, 24 | Not started |
+| `web` | React UI, every page | server | 12–16, 23, 24 | 12.1 scaffold and API client done |
 | `skill` | Claude project skill | backtest | 17 | Not started |
 | `docker` | Image and compose | server, web | 18 | Not started |
 | `addon` | NinjaTrader C# add-on | — | 19 | Not started |

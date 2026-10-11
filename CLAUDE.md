@@ -102,6 +102,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/bridge/` | Python side of the NinjaTrader add-on: instrument names, add-on client, reconciliation. |
 | `src/fenrir/live/` | Live runner: SQLite trade journal and armed table (`<private_dir>/fenrir.db`); later per-bar decisions, limits and halts. |
 | `src/fenrir/server/` | FastAPI shell and its state: pure backtest-job state and session-cookie/Origin/CSRF auth now; app, PTY and routes arrive in plans 11–16. |
+| `web/` | React UI (Vite, React 19, TypeScript strict). `src/api.ts` is the only server client (session cookie, no token); `src/errorText.ts` turns errors into text. |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 | `.claude/skills/fenrir-strategy/` | Project skill teaching Claude the strategy loop (rules → data → strategy → backtest → report), tuning period only. |
 

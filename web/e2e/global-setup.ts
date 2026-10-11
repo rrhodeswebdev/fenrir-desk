@@ -1,6 +1,6 @@
 import { chromium } from '@playwright/test'
 import { spawn } from 'node:child_process'
-import { cp, mkdtemp, rm } from 'node:fs/promises'
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -15,6 +15,7 @@ export default async function globalSetup() {
   const dir = (name: string) => path.join(tmp, name)
   await cp(path.join(repo, 'rules'), dir('rules'), { recursive: true })
   await cp(path.join(repo, 'strategies'), dir('strategies'), { recursive: true })
+  await writeFile(dir('empty.env'), '')
   const server = spawn('uv', ['run', 'fenrir', 'serve', '--port', String(PORT), '--static-dir', 'web/dist'], {
     cwd: repo,
     env: {
@@ -24,7 +25,8 @@ export default async function globalSetup() {
       FENRIR_STRATEGIES_DIR: dir('strategies'),
       FENRIR_PRIVATE_DIR: dir('private'),
       FENRIR_HOLDOUT_MONTHS: '12',
-      // load_settings also reads the repo's .env and an empty value would not override it: keep real secrets out
+      // never read the repo .env; the dummies also cover a secret exported in the shell
+      FENRIR_ENV_FILE: dir('empty.env'),
       FENRIR_LSE_API_KEY: 'e2e-disabled',
       FENRIR_NT_TOKEN: 'e2e-disabled',
       FENRIR_NT_URL: 'http://127.0.0.1:9',

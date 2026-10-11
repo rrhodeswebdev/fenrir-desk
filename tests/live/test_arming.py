@@ -90,8 +90,26 @@ def test_mode_must_match_account(mode, is_sim):
     assert _decide(_req(mode=mode, confirm=True), is_sim=is_sim) == Refusal("mode_mismatch")
 
 
-def test_unknown_nt_account_is_refused_for_sim():
-    assert _decide(_req(), is_sim=None) == Refusal("unknown_account")
+@pytest.mark.parametrize("mode", ["sim", "live"])
+def test_unknown_nt_account_is_refused(mode):
+    assert _decide(_req(mode=mode, confirm=True), is_sim=None) == Refusal("unknown_account")
+
+
+@pytest.mark.parametrize(("mode", "phase"), [("Live", "evaluation"), ("live", "Funded")])
+def test_a_mode_or_phase_outside_the_contract_is_an_error(mode, phase):
+    with pytest.raises(ValueError, match="bad mode"):
+        _decide(_req(mode=mode, phase=phase), is_sim=False)
+
+
+def test_the_report_with_the_current_dll_setting_is_used():
+    other = TUNING | {"p_pass_and_payout": 0.5}
+    reports = [_report(dll_on=True) | {"periods": {"tuning": other, "holdout": None}}, _report()]
+    result = _decide(_req(account="LIVE1", mode="live"), is_sim=False, reports=reports)
+    assert result == Refusal("needs_confirmation", TUNING | {"expected_net_per_attempt": 87.5})
+
+
+def test_a_report_of_another_strategy_with_the_same_hash_does_not_count():
+    assert _decide(_req(), reports=[_report() | {"strategy": "fade"}]) == Refusal("no_backtest")
 
 
 def test_dry_run_does_not_need_nt_account():

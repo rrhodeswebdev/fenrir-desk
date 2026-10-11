@@ -4,7 +4,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import astuple, dataclass
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from fenrir.backtest.report import Report
 from fenrir.backtest.run import AccountChoice, net_per_attempt
@@ -85,6 +85,9 @@ def decide(
     report the account; `has_evaluation` False for account types without one (Lucid Direct);
     `choices` from `load_account_choices`.
     """
+    # fail closed: an unchecked "Live" would skip both the mode check and the confirmation
+    if req.mode not in get_args(Mode) or req.phase not in get_args(Phase):
+        raise ValueError(f"bad mode {req.mode!r} or phase {req.phase!r}")
     if any(a.account == req.account for a in armed):
         return Refusal("already_armed")
     if req.mode != "dry":

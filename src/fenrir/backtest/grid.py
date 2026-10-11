@@ -40,6 +40,8 @@ def expand_grid(
 ) -> tuple[GridItem, ...]:
     """Strategy globs are relative to the cwd. `contracts` None = both symbols of each
     strategy's MARKET; otherwise those that fit it, and each must fit some strategy."""
+    if contracts is not None and not contracts:
+        raise ValueError("no contracts given")
     paths = _expand(strategy_globs, lambda p: map(Path, glob.glob(p)))
     known = list_accounts(settings.rules_dir)
     accounts = _expand(account_globs, lambda p: (a for a in known if fnmatchcase(a, p)))

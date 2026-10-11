@@ -99,6 +99,11 @@ def test_no_patterns_raises(settings, strategies, accounts):
         grid(settings, strategies, accounts)
 
 
+def test_empty_contract_list_raises(settings):
+    with pytest.raises(ValueError, match="no contracts given"):
+        grid(settings, ["orb_nq.py"], ["lucid-*"], [])
+
+
 def test_unknown_contract_raises(settings):
     with pytest.raises(ValueError, match="XYZ"):
         grid(settings, ["orb_nq.py"], ["lucid-*"], ["XYZ"])

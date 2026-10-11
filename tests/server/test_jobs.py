@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from fenrir.backtest.grid import GridItem
 from fenrir.server.jobs import (
     Job,
@@ -48,6 +50,18 @@ def test_restart_turns_running_back_to_pending_and_clears_progress():
     again = restart(job)
     assert again.items[0] == JobItem("strategies/orb.py", "lucid-flex-50k", "NQ")
     assert again.items[1].status == "done"
+
+
+def test_restart_keeps_an_errored_item_out_of_the_rerun():
+    job = update_item(make_job(), 1, status="error", error="ValueError: boom")
+    again = restart(job)
+    assert again.items[1] == job.items[1]
+    assert 1 not in unfinished(again)
+
+
+def test_update_item_out_of_range_raises():
+    with pytest.raises(IndexError):
+        update_item(make_job(), 99, status="done")
 
 
 def test_grid_item_round_trips():

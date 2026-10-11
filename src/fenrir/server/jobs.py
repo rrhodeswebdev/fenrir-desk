@@ -35,8 +35,9 @@ def new_job(job_id: str, created_at: str, grid: Sequence[GridItem], include_hold
 
 
 def update_item(job: Job, index: int, **changes: Any) -> Job:
-    items = tuple(replace(it, **changes) if i == index else it for i, it in enumerate(job.items))
-    return replace(job, items=items)
+    items = list(job.items)
+    items[index] = replace(items[index], **changes)  # a bad index raises, not a silent no-op
+    return replace(job, items=tuple(items))
 
 
 def unfinished(job: Job) -> tuple[int, ...]:

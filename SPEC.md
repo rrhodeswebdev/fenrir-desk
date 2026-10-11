@@ -108,7 +108,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `rules` | Schema, loader, state, rule functions, pre-trade | core | 05, 06 | Done (Flex files only) |
 | `strategy` | Strategy contract and loader | rules, core | 07 | Done |
 | `backtest` | Fill model, attempt fold, attempts, report, grid, cache | data, rules, strategy | 08, 09, 10 | 08, 09 done; 10 not started |
-| `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | Not started |
+| `server` | FastAPI shell, auth, PTY, jobs/rules/data APIs | backtest, data, rules | 11, 13–16 | 14.1 job state done |
 | `web` | React UI, every page | server | 12–16, 23, 24 | Not started |
 | `skill` | Claude project skill | backtest | 17 | Not started |
 | `docker` | Image and compose | server, web | 18 | Not started |

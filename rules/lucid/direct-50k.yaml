@@ -9,9 +9,10 @@
 # No evaluation: attempts start funded.
 # The DLL is not optional on Direct: set dll_on: true for this account in
 # data/accounts.yaml, or backtests run without it.
-# Schema gaps, entered on the safe side:
+# Schema gaps:
 # - Funded DLL turns into 60% of peak end-of-day profit once the balance closes above
-#   the initial trail (+$2,100); the fixed amount is kept, which is never larger.
+#   the initial trail (+$2,100); the fixed amount is kept, so it halts no later than
+#   Lucid; whether that helps or hurts the outcome depends on the strategy.
 # - A payout needs $3,000 profit in the cycle (no field for a profit goal). max_pct_of_profit
 #   is 2,000 / 3,000 rounded down and min_profit is the $2,000 cap, so the first request
 #   is allowed from $3,000 profit and is the $2,000 cap, as on Lucid (Lucid's minimum request

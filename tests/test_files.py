@@ -13,6 +13,14 @@ def test_reads_a_regular_file_up_to_the_limit(tmp_path):
         read_regular(path, 4)
 
 
+def test_reads_a_file_spanning_several_chunks_exactly_to_the_limit(tmp_path):
+    data = os.urandom((3 << 20) + 7)  # 3 MiB + 7 bytes: four 1 MiB reads
+    (path := tmp_path / "f").write_bytes(data)
+    assert read_regular(path, len(data)) == data
+    with pytest.raises(ValueError, match="over"):
+        read_regular(path, len(data) - 1)
+
+
 @pytest.mark.parametrize(
     ("plant", "message"),
     [

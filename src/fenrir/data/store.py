@@ -1,10 +1,16 @@
+import contextlib
+import errno
 import hashlib
 import json
-from collections.abc import Iterable, Mapping, Sequence
+import os
+import secrets
+import stat
+import tempfile
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 import polars as pl
 
@@ -87,26 +93,128 @@ def _manifest_path(data_dir: Path) -> Path:
     return data_dir / "bars" / "manifest.json"
 
 
-def _atomic_write(path: Path, write: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    write(tmp)
-    tmp.replace(path)
+# every call _atomic_write makes with dir_fd; native Windows has none (and no hostile user)
+_DIR_FD = {os.open, os.mkdir, os.rename, os.unlink} <= os.supports_dir_fd
+MAX_MANIFEST = 16 * 2**20
+
+
+def _open_dirs(data_dir: Path, parts: Sequence[str], *, create: bool = True) -> int:
+    """A fd for data_dir/parts..., creating missing ones if `create`. Each is opened O_NOFOLLOW,
+    so a link there, even one swapped in a moment ago, fails with ELOOP, never followed."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(data_dir, flags)
+    try:
+        for part in parts:
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=fd)
+            fd, parent = os.open(part, flags, dir_fd=fd), fd
+            os.close(parent)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _atomic_write(data_dir: Path, path: Path, write: Callable[[BinaryIO], Any]) -> None:
+    """`write` fills a fresh temp file beside `path`, which then replaces `path`.
+
+    data/ is terminal-writable in the image and the pull writes as root (DEC-1, #135):
+    ValueError, writing nothing, when `data_dir` or a directory below it on the way to `path` is
+    a symlink. A symlink at `path` itself is replaced, never written through.
+    """
+    if not _DIR_FD:
+        return _atomic_write_checked(data_dir, path, write)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = _open_dirs(data_dir, path.relative_to(data_dir).parts[:-1])
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"refusing to write through a symlink on the way to {path}") from None
+        raise
+    try:
+        # a random name opened O_EXCL|O_NOFOLLOW: a planted <path>.tmp link is never followed
+        tmp = f"{path.name}.{secrets.token_hex(8)}.tmp"
+        out = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        try:
+            with os.fdopen(out, "wb") as f:
+                write(f)
+            os.replace(tmp, path.name, src_dir_fd=fd, dst_dir_fd=fd)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):  # the terminal may have removed it
+                os.unlink(tmp, dir_fd=fd)
+            raise
+    finally:
+        os.close(fd)
+
+
+def _atomic_write_checked(data_dir: Path, path: Path, write: Callable[[BinaryIO], Any]) -> None:
+    """`_atomic_write` where dir_fd is missing (native Windows): checks, then writes."""
+    # shortcut: a link swapped in between check and write is followed; fine with no hostile user
+    rel = path.relative_to(data_dir)
+    for p in [data_dir / Path(*rel.parts[:i]) for i in range(len(rel.parts) + 1)]:
+        if p.is_symlink():
+            raise ValueError(f"refusing to write through symlink {p}")
+        if p != path:
+            p.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            if hasattr(os, "fchmod"):  # keep the 0644 a plain write gave; mkstemp is 0600
+                os.fchmod(f.fileno(), 0o644)
+            write(f)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
+def _manifest_bytes(data_dir: Path) -> bytes:
+    """b"" when missing. ValueError for a symlinked data dir, `bars/` or manifest, a non-regular
+    file or one over 16 MB: the pull reads this as root in the image, where the terminal could
+    plant a link, a FIFO or /dev/zero."""
+    path = _manifest_path(data_dir)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        if _DIR_FD:  # a planted bars/ link fails too, not only a manifest.json link
+            bars = _open_dirs(data_dir, ("bars",), create=False)
+            try:
+                fd = os.open(path.name, flags, dir_fd=bars)
+            finally:
+                os.close(bars)
+        else:
+            fd = os.open(path, flags)
+    except FileNotFoundError:
+        return b""
+    except OSError as e:
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"refusing to read through a symlink to {path}") from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):  # on the raw fd: fdopen raises on a directory
+            raise ValueError(f"refusing to read {path}: not a regular file under 16 MB")
+        f = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        text = f.read(MAX_MANIFEST + 1)
+    if len(text) > MAX_MANIFEST:
+        raise ValueError(f"refusing to read {path}: not a regular file under 16 MB")
+    return text
 
 
 def read_manifest(data_dir: Path) -> dict[str, Any]:
-    path = _manifest_path(data_dir)
-    return json.loads(path.read_text()) if path.exists() else {"series": {}}
+    return json.loads(_manifest_bytes(data_dir) or b'{"series": {}}')
 
 
 def write_manifest(data_dir: Path, manifest: Mapping[str, Any]) -> None:
     text = json.dumps(manifest, indent=2, sort_keys=True)
-    _atomic_write(_manifest_path(data_dir), lambda p: p.write_text(text))
+    _atomic_write(data_dir, _manifest_path(data_dir), lambda f: f.write(text.encode()))
 
 
 def data_version(data_dir: Path) -> str:
-    path = _manifest_path(data_dir)
-    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+    return hashlib.sha256(_manifest_bytes(data_dir)).hexdigest()
 
 
 def write_contract(data_dir: Path, series: str, contract: str, frame: pl.DataFrame) -> int:
@@ -118,7 +226,8 @@ def write_contract(data_dir: Path, series: str, contract: str, frame: pl.DataFra
         .unique("ts", keep="last", maintain_order=True)
         .sort("ts")
     )
-    _atomic_write(_series_dir(data_dir, series) / f"{contract}.parquet", clean.write_parquet)
+    path = _series_dir(data_dir, series) / f"{contract}.parquet"
+    _atomic_write(data_dir, path, clean.write_parquet)
     return clean.height
 
 

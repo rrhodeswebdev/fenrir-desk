@@ -4,7 +4,7 @@ import { renderToStaticMarkup, renderToString } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api'
 import { routeTree } from '@/router'
-import { type Options, type Picks, RunFormView, canRun, jobBody, noPicks, postJob, toggle } from './RunForm'
+import { type Options, type Picks, RunFormView, canRun, jobBody, noPicks, postJob, toggle, withinOptions } from './RunForm'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -37,6 +37,13 @@ describe('jobBody', () => {
   it('sends null contracts when none is ticked, else the ticked ones', () => {
     expect(jobBody(picks)).toEqual({ strategies: ['strategies/orb.py'], accounts: ['lucid-flex-50k'], contracts: null })
     expect(jobBody({ ...picks, contracts: ['MNQ'] }).contracts).toEqual(['MNQ'])
+  })
+})
+
+describe('withinOptions', () => {
+  it('drops picks no longer in the options, keeping tick order', () => {
+    const ticked: Picks = { strategies: ['strategies/gone.py', 'strategies/vwap.py'], accounts: ['lucid-pro-25k'], contracts: ['YM', 'NQ'] }
+    expect(withinOptions(ticked, options)).toEqual({ strategies: ['strategies/vwap.py'], accounts: ['lucid-pro-25k'], contracts: ['NQ'] })
   })
 })
 
@@ -78,6 +85,15 @@ describe('RunFormView', () => {
     expect(submit(view({ pending: true }))).toMatch(/disabled="".*>Queuing<\/button>$/)
   })
 
+  it('says why Run is disabled, linked to the button, only while picks are missing', () => {
+    const html = view({ picks: noPicks })
+    const id = submit(html).match(/aria-describedby="([^"]+)"/)?.[1]
+    expect(id).toBeTruthy()
+    expect(html).toContain(`<p id="${id}" class="text-ink-3">Tick a strategy and an account.</p>`)
+    expect(view()).not.toContain('Tick a strategy')
+    expect(submit(view())).not.toContain('aria-describedby')
+  })
+
   it('shows the new job', () => {
     expect(view({ jobId: 'j1' })).toContain('<span class="label">Queued job</span><span class="value">j1</span>')
   })
@@ -89,16 +105,29 @@ describe('RunFormView', () => {
 })
 
 describe('Backtests page', () => {
-  it('renders the run form once the options load', async () => {
-    const client = new QueryClient()
-    client.setQueryData<Options>(['backtests', 'options'], options)
+  const render = async (client: QueryClient) => {
     const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/backtests'] }) })
     await router.load()
-    const html = renderToString(
+    return renderToString(
       <QueryClientProvider client={client}>
         <RouterProvider router={router} />
       </QueryClientProvider>,
     )
+  }
+
+  it('shows a failed refetch above the loaded form', async () => {
+    const client = new QueryClient()
+    client.setQueryData<Options>(['backtests', 'options'], options)
+    client.getQueryCache().find({ queryKey: ['backtests', 'options'] })!.setState({ status: 'error', error: new ApiError(500, '{"detail":"boom"}') })
+    const html = await render(client)
+    expect(html).toMatch(/<p role="alert" class="text-red">500: boom<\/p><form/)
+    expect(html).toContain('>strategies/orb.py</label>')
+  })
+
+  it('renders the run form once the options load', async () => {
+    const client = new QueryClient()
+    client.setQueryData<Options>(['backtests', 'options'], options)
+    const html = await render(client)
     expect(html).toContain('<h1>Backtests</h1>')
     expect(html).toContain('>strategies/orb.py</label>')
     expect(submit(html)).toMatch(/disabled="".*>Run<\/button>$/)

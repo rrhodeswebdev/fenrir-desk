@@ -1,6 +1,6 @@
 // Report figures as text (DESIGN.md: tabular, a sign instead of colour). Fixed locale so tests are stable.
 
-export const pct = (x: number): string => `${(x * 100).toFixed(1)}%`
+export { pct } from './Compare'
 
 /** null (nothing to take a median of) shows as a dash. */
 export const num = (x: number | null): string =>

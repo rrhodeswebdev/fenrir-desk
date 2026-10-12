@@ -26,6 +26,12 @@ export const jobBody = ({ strategies, accounts, contracts }: Picks) => ({
   contracts: contracts.length ? contracts : null,
 })
 
+/** Drops picks a refetch removed from the options, so they are neither shown nor posted. */
+export const withinOptions = (picks: Picks, options: Options): Picks => {
+  const keep = (axis: Axis) => picks[axis].filter((v) => options[axis].includes(v))
+  return { strategies: keep('strategies'), accounts: keep('accounts'), contracts: keep('contracts') }
+}
+
 export const canRun = (picks: Picks): boolean => picks.strategies.length > 0 && picks.accounts.length > 0
 
 export const postJob = (picks: Picks) =>
@@ -44,28 +50,34 @@ export function RunForm() {
   })
   const [picks, setPicks] = useState(noPicks)
   const run = useMutation({ mutationFn: postJob })
+  // A failed refetch keeps the last options on screen, so the error shows above them too.
   const message = pageError(options.error)
+  const alert = message && (
+    <p role="alert" className="text-red">
+      {message}
+    </p>
+  )
   if (!options.data)
     return (
       <>
-        {message && (
-          <p role="alert" className="text-red">
-            {message}
-          </p>
-        )}
+        {alert}
         {options.isPending && <p className="text-ink-3">Loading…</p>}
       </>
     )
+  const live = withinOptions(picks, options.data)
   return (
-    <RunFormView
-      options={options.data}
-      picks={picks}
-      onToggle={(axis, value) => setPicks((p) => toggle(p, axis, value))}
-      onRun={() => run.mutate(picks)}
-      pending={run.isPending}
-      error={run.error}
-      jobId={run.data?.job_id}
-    />
+    <div className="grid gap-6">
+      {alert}
+      <RunFormView
+        options={options.data}
+        picks={live}
+        onToggle={(axis, value) => setPicks((p) => toggle(p, axis, value))}
+        onRun={() => run.mutate(live)}
+        pending={run.isPending}
+        error={run.error}
+        jobId={run.data?.job_id}
+      />
+    </div>
   )
 }
 
@@ -86,6 +98,8 @@ export function RunFormView({
   error: unknown
   jobId?: string
 }) {
+  const reason = useId()
+  const blocked = !canRun(picks)
   return (
     <form
       aria-labelledby="run"
@@ -103,9 +117,14 @@ export function RunFormView({
       </div>
       <p className="text-ink-3">No contract ticked runs every contract of each strategy's market.</p>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <Button type="submit" disabled={!canRun(picks) || pending}>
+        <Button type="submit" disabled={blocked || pending} aria-describedby={blocked ? reason : undefined}>
           {pending ? 'Queuing' : 'Run'}
         </Button>
+        {blocked && (
+          <p id={reason} className="text-ink-3">
+            Tick a strategy and an account.
+          </p>
+        )}
         {jobId && (
           <span role="status" className="flex items-baseline gap-2">
             <span className="label">Queued job</span>

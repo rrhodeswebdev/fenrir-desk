@@ -69,6 +69,25 @@ def _session_pids(sid: int) -> list[int]:
     return found
 
 
+def _sweep(sid: int) -> None:
+    """SIGKILL session `sid` until nothing killable is left in it."""
+    denied: set[int] = set()
+    for _ in range(KILL_ROUNDS):
+        if not (pids := [p for p in _session_pids(sid) if p not in denied]):
+            break
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:  # e.g. a setuid program; retrying will not help
+                denied.add(pid)
+    else:
+        log.error("the shell's session still has processes after %d kill rounds", KILL_ROUNDS)
+    if denied:
+        log.error("cannot kill %s in the shell's session: not permitted", sorted(denied))
+
+
 class PosixPty:
     def __init__(self, argv: Sequence[str], env: Mapping[str, str], as_user: dict[str, Any]):
         master, slave = pty.openpty()
@@ -130,14 +149,7 @@ class PosixPty:
             self._proc.wait(HANGUP_GRACE)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._proc.pid, signal.SIGKILL)
-        for _ in range(KILL_ROUNDS):
-            if not (pids := _session_pids(self._proc.pid)):
-                break
-            for pid in pids:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.kill(pid, signal.SIGKILL)
-        else:
-            log.error("the shell's session still has processes after %d kill rounds", KILL_ROUNDS)
+        _sweep(self._proc.pid)
         self._proc.wait()
 
 

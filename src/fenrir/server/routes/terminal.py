@@ -96,8 +96,10 @@ async def terminal_ws(ws: WebSocket) -> None:
     finally:
         for task in tasks:
             task.cancel()
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        await pty.close()
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:  # a second cancel must not skip killing the shell
+            await pty.close()
         for e in results:  # a send to a gone client raises; anything else is a bug
             if isinstance(e, Exception) and not isinstance(e, GONE):
                 log.error("terminal session failed", exc_info=e)

@@ -53,10 +53,11 @@ def port(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
-def native_sh(monkeypatch):
-    for var in ("FENRIR_BIND_ALL", "FENRIR_PTY_USER"):
+def native_sh(monkeypatch, tmp_path):
+    for var in ("FENRIR_BIND_ALL", "FENRIR_PTY_USER", "ZDOTDIR", "ENV"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("HOME", str(tmp_path))  # no user rc files: a slow prompt times reads out
 
 
 def open_term(port, cookie=KEY, origin=None):
@@ -143,6 +144,15 @@ def test_disconnect_kills_jobs_forked_during_the_kill(port, job_shell):
     for pid in survivors:  # don't leak them if this fails
         os.kill(pid, signal.SIGKILL)
     assert survivors == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root could kill pid 1")
+def test_sweep_skips_a_process_it_cannot_kill(monkeypatch, caplog):
+    scans = []
+    monkeypatch.setattr(ptyproc, "_session_pids", lambda sid: scans.append(sid) or [1])
+    ptyproc._sweep(12345)  # pid 1 is never ours to kill
+    assert len(scans) == 2  # one kill round, then nothing left it can kill
+    assert "cannot kill [1]" in caplog.text and "kill rounds" not in caplog.text
 
 
 def test_disconnect_with_unread_input_kills_the_shell(port):

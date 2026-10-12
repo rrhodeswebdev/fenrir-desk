@@ -6,7 +6,8 @@ Strategy files written by Claude. One file = one strategy; the file stem is its 
   `PARAMS` (dict), `init(params) -> state`, `step(state, bar, ctx) -> (state,
   [actions])`.
 - Actions: `Bracket(side, qty, stop, target)` with absolute prices, `Flatten()`,
-  `Cancel(order_id)` from `fenrir.core.actions`. No entry without a stop.
+  `Cancel(order_id)` from `fenrir.core.actions`. No entry without a stop. `qty` must be
+  an int (wrap sizing in `int(...)`): a float such as `2.0` is silently rejected.
 - `step` must be pure: no I/O, no clock (`datetime.now()`), no randomness. Use
   `bar.ts`/`ctx.ts` for time. Keep state in frozen dataclasses; put params in the
   state (step does not receive them).

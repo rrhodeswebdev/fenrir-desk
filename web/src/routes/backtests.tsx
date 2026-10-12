@@ -1,4 +1,7 @@
 import { createRoute } from '@tanstack/react-router'
+import { Compare } from '@/backtests/Compare'
+import { JobList } from '@/backtests/JobList'
+import { RunForm } from '@/backtests/RunForm'
 import { Page } from '@/components/page'
 import { rootRoute } from './root'
 
@@ -7,7 +10,11 @@ export const backtestsRoute = createRoute({
   path: '/backtests',
   component: () => (
     <Page title="Backtests">
-      <p className="max-w-[44ch] text-ink-2">Not built yet. Jobs, results and comparisons land here.</p>
+      <div className="grid gap-8">
+        <RunForm />
+        <JobList />
+        <Compare />
+      </div>
     </Page>
   ),
 })

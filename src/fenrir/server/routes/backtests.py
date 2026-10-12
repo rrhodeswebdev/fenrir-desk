@@ -5,6 +5,7 @@ grid is expanded by `app.state.jobs.expand` in an isolated child.
 """
 
 import asyncio
+import glob
 import threading
 from pathlib import Path
 from typing import Any
@@ -27,7 +28,7 @@ _expand_slot = threading.Semaphore(1)  # one expand child at a time: each holds 
 
 
 def cwd_relative(path: Path) -> str:
-    """`path` relative to the cwd when it lies under it, so it passes `strategy_glob_ok`."""
+    """`path` relative to the cwd when it lies under it, else as given (absolute or not)."""
     try:
         return str(path.relative_to(Path.cwd()))
     except ValueError:  # already relative, or outside the cwd
@@ -35,14 +36,13 @@ def cwd_relative(path: Path) -> str:
 
 
 def strategy_glob_ok(pattern: str, strategies_dir: Path) -> bool:
-    """A cwd-relative glob with no `..` that resolves inside `strategies_dir`.
+    """A glob with no `..` that resolves (relative ones against the cwd) inside `strategies_dir`.
 
     Checked before `expand`, whose child executes every file the glob matches.
     """
     path = Path(pattern)
     return (
         "\x00" not in pattern  # resolve() raises on NUL
-        and not path.is_absolute()
         and ".." not in path.parts
         and path.resolve().is_relative_to(strategies_dir.resolve())
     )
@@ -73,8 +73,11 @@ def _reports(settings: Settings) -> tuple[dict, ...]:
 def options(request: Request) -> dict[str, list[str]]:
     settings = request.app.state.settings
     return {
-        # file names only: reading MARKET would execute the file (DEC-1)
-        "strategies": sorted(cwd_relative(p) for p in settings.strategies_dir.glob("*.py")),
+        # file names only: reading MARKET would execute the file (DEC-1); escaped, as POST
+        # takes globs
+        "strategies": sorted(
+            glob.escape(cwd_relative(p)) for p in settings.strategies_dir.glob("*.py")
+        ),
         "accounts": list_accounts(settings.rules_dir),
         "contracts": [s.symbol for s in load_instruments().specs],
     }
@@ -88,7 +91,7 @@ def submit_job(body: JobRequest, request: Request) -> dict[str, str]:
         if not strategy_glob_ok(pattern, settings.strategies_dir):
             raise HTTPException(
                 status_code=422,
-                detail=f"{pattern!r} is not a relative path inside {settings.strategies_dir}",
+                detail=f"{pattern!r} is not a path inside {settings.strategies_dir}",
             )
     runner = request.app.state.jobs
     if not _expand_slot.acquire(blocking=False):

@@ -3,8 +3,9 @@
 Run from the repo root: uv run python tests/fixtures/e2e/make_bars.py <data_dir>
 (web/e2e/global-setup.ts does, into its temp data dir; never point it at the repo data/).
 Two 5-day windows a year apart, so a 12-month hold-out leaves days on both sides.
-Price climbs one tick a minute, so strategies/orb.py wins every day and a $1,250 target is
-reached on an attempt's 4th day: each period then has a passed attempt and an equity sample.
+Price climbs one tick a minute, so e2e_bracket.py's daily trade (2 NQ, +$783 net) always hits
+its target and lucid-pro-25k's $1,250 is reached on an attempt's 2nd day: each period then has
+passed attempts and equity samples (a pass on a period's last day does not count).
 """
 
 import sys
@@ -18,26 +19,24 @@ from fenrir.core.sessions import NY
 from fenrir.data.store import write_bars
 
 DAYS = [date(2024, 6, d) for d in (3, 4, 5, 6, 7)] + [date(2025, 6, d) for d in (2, 3, 4, 5, 6)]
+MINUTES = 23 * 60  # 18:00 ET the evening before to 17:00 ET
 
 
-def day_bars(day: date, contract: str, price: float) -> tuple[list[Bar], float]:
+def day_bars(day: date, contract: str, price: float) -> list[Bar]:
     start = datetime.combine(day - timedelta(days=1), time(18), NY).astimezone(UTC)
-    bars = []
-    for m in range(23 * 60):  # 18:00 ET the evening before to 17:00 ET
-        up = price + 0.25
-        bars.append(Bar(start + timedelta(minutes=m), price, up, price, up, 100, contract))
-        price = up
-    return bars, price
+    return [
+        Bar(start + timedelta(minutes=m), p, p + 0.25, p, p + 0.25, 100, contract)
+        for m in range(MINUTES)
+        for p in [price + 0.25 * m]
+    ]
 
 
 def main(out: Path) -> None:
     instruments = load_instruments()
-    price = 18000.0
     by_contract: dict[str, list[Bar]] = defaultdict(list)
-    for day in DAYS:
+    for i, day in enumerate(DAYS):
         contract = front_month(instruments, "NQ", day)
-        bars, price = day_bars(day, contract, price)
-        by_contract[contract].extend(bars)
+        by_contract[contract].extend(day_bars(day, contract, 18000.0 + 0.25 * MINUTES * i))
     for contract, bars in by_contract.items():
         write_bars(out, "NQ", contract, bars)
         print(f"{contract}: {len(bars)} bars")

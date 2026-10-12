@@ -119,6 +119,7 @@ dependencies = [
     { name = "ruamel-yaml" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -142,6 +143,7 @@ requires-dist = [
     { name = "ruamel-yaml", specifier = ">=0.19.1,<0.20" },
     { name = "typer", specifier = ">=0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.54.0" },
+    { name = "websockets", specifier = ">=17.2" },
 ]
 
 [package.metadata.requires-dev]

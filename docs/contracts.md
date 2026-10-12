@@ -439,12 +439,28 @@ Add-on behaviour (DEC-5): its config file lists `managed_accounts`; a request na
 ```python
 # fenrir.bridge.names
 def nt_instrument(symbol: str, front_code: str) -> str   # ("MNQ", "NQZ26") -> "MNQ 12-26"
-# fenrir.bridge.client  (shell; async httpx + websockets)
+# fenrir.bridge.client  (pure parsing + async shell; httpx + websockets)
 class Ack: accepted: bool; duplicate: bool; error: str | None   # duplicate=True: an earlier attempt landed; treat as success
-class AddonClient: accounts(), positions(account), orders(account), bracket(...), flatten(...), cancel(...), flatten_all(...) -> Ack, stream() -> AsyncIterator[dict], aclose()
-    # accounts() returns list[dict] in /accounts shape; raises httpx.HTTPError when NinjaTrader is unreachable.
-    # stream() never ends: yields {"type":"connected"} after each (re)connect and {"type":"disconnected","error":str}
-    # on a drop, bad token or missed heartbeats (default 6 s). Plan 22 sets app.state.addon: AddonClient.
+class AddonClient(base_url, token, *, timeout=5.0, retries=3, heartbeat_timeout=6.0, reconnect_delay=1.0):
+    accounts() -> list[Account]; positions(account) -> list[Position]; orders(account) -> list[Order]
+    bracket(client_id, account, instrument, side, qty, stop, target), flatten(client_id, account),
+    cancel(client_id, account, order_id), flatten_all(client_id) -> Ack; stream() -> AsyncIterator[dict]; aclose()
+    # Account/Position/Order are TypedDicts in the /accounts, /positions, /orders row shapes (plain dicts; keys match
+    # reconcile's NtPosition/NtOrder fields). Every response and stream message is validated strictly (no "1" -> 1,
+    # no NaN, ts must be ...HH:MM:SS.mmmZ); malformed -> ValueError naming the first bad field and error kind,
+    # input not echoed.
+    # HTTP errors and an unreachable add-on raise httpx.HTTPError; a 401 is never retried. POSTs retry only on a
+    # transport error (timeouts included) with the same body, so a retry after a landed order comes back duplicate.
+    # stream() never ends: yields {"type":"connected"} after each (re)connect, then validated events, and
+    # {"type":"disconnected","error":str} on a drop, bad token, malformed message or no message at all for
+    # heartbeat_timeout (default 6 s = 3 missed heartbeats; at most ~1 s more to give up on a half-open peer);
+    # reconnects with backoff doubling to 30 s, reset only by a valid message.
+    # The token is never logged or put in an error. Env proxies (HTTP_PROXY etc.) are ignored: the add-on is always
+    # a direct peer. Plan 22 sets app.state.addon: AddonClient.
+# fenrir.bridge.fake_addon  (test support, shared with live tests)
+class FakeAddon: token, accounts, positions, orders, requests, seen, delays, heartbeats, heartbeat_every; push(msg), kick()
+async def running(fake) -> AsyncContextManager[str]   # serves make_app(fake) on a free loopback port, yields base URL
+def now_ts() -> str                                   # contract ts shape, e.g. "2026-10-12T13:31:00.250Z"
 # fenrir.bridge.reconcile
 class NtPosition: account: str; instrument: str; qty: int; avg_price: float          # /positions row, qty signed
 class NtOrder: account: str; order_id: str; client_id: str; instrument: str; role: "entry"|"stop"|"target"|"other"; action: "buy"|"sell"; qty: int; price: float; state: str   # /orders row

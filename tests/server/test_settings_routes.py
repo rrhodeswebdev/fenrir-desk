@@ -59,7 +59,7 @@ def test_get_masks_secrets_and_reads_the_file(env):
         "nt_token": "••••0002",
         "holdout_months": 6,
         "safety_margin_pct": 80.0,
-        "stale_seconds": 90,
+        "stale_seconds": 180,
         "repo_env_secrets": False,
     }
     assert LSE not in r.text and TOKEN not in r.text
@@ -199,7 +199,7 @@ def test_import_fills_only_empty_secrets_and_never_returns_them(env, repo_env):
     r = client.post(IMPORT, headers=WRITE)
     assert r.status_code == 200 and new_token not in r.text and "repo-lse" not in r.text
     assert r.json()["imported"] == ["nt_token"]
-    assert r.json()["nt_token"] == "••••9999" and r.json()["stale_seconds"] == 90
+    assert r.json()["nt_token"] == "••••9999" and r.json()["stale_seconds"] == 180
     saved = parse_env_text(env_file.read_text())
     assert saved["FENRIR_NT_TOKEN"] == new_token and saved["FENRIR_LSE_API_KEY"] == LSE
     assert "FENRIR_STALE_SECONDS" not in saved  # only secrets are imported

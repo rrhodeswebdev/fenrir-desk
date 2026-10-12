@@ -95,7 +95,7 @@ class Settings:
     nt_token: str = ""
     holdout_months: int = 12
     safety_margin_pct: float = 80.0
-    stale_seconds: int = 90
+    stale_seconds: int = 180
     data_dir: Path = Path("data")
     rules_dir: Path = Path("rules")
     strategies_dir: Path = Path("strategies")
@@ -518,7 +518,25 @@ A Bracket is rejected when halted, for sim/live while `day_start` is None, after
 
 Day roll (21.4): the first bar of a new trading day first applies one `DayClosed(previous day, bar.ts)` through `build_rules` for the account's phase (as the backtest: books the day into `closed_days` when traded, resets `day_start_balance`, `traded_today`, `halted_today`, trails an `end_of_day` floor), then sets `acct.day`, empties today's equity and resets `session.start`/`session_floor` to the new `day_start_balance` and floor. A `Breach` there halts open-ended (`halt_kind` "breach", reason `breach <rule>: <reason>`; it replaces a day halt) and the account's figures stay as they were. A day halt (`halt_day` set) whose day has passed lifts with an `"alert"` `{message: "halt lifted: <reason>"}`, and the bar's safety check runs against the new day's level; open-ended halts never lift. `setup.day_start` is not replaced at the roll: a sim/live runner that started without it keeps rejecting brackets until 21.5 or 22.2 supplies it.
 
-Stale pause (21.4): `on_tick(s, now, stale_seconds)` pauses new entries (`RunnerState.stale` = reason, Bracket rejected with `paused: <reason>`) and writes one `"alert"` when the last bar closed more than `stale_seconds` ago while `now` and `now − (stale_seconds + 60 s)` are both `in_session`, so the reopen after the daily break or the weekend is not stale; the next bar clears it. `account_status` reports it as `halted: true`, `halt_kind: "stale"`, `halt_reason` = the reason, unless a halt is also set, which it shows instead.
+Stale pause (21.4): `on_tick(s, now, stale_seconds)` pauses new entries (`RunnerState.stale` = reason, Bracket rejected with `paused: <reason>`) and writes one `"alert"` when the last bar closed more than `stale_seconds` ago while `now` and `now − (stale_seconds + 60 s)` are both `in_session`, so the reopen after the daily break or the weekend is not stale; the next bar clears it. `account_status` reports it as `halted: true`, `halt_kind: "stale"`, `halt_reason` = the reason, unless a halt is also set, which it shows instead. `stale_seconds` defaults to 180: bars exist only for minutes that trade and arrive a lag grace after their close, so at 90 a single quiet minute raised the pause.
+
+LiveHub (21.6), `fenrir.live.service`, the shell around the core; `create_app` builds one on `app.state.live` (`LiveHub(settings, secret=session_key)`, opening nothing) and the lifespan calls `start()` (a clock tick every 5 s) and `await stop()` (cancels it, SIGKILLs every step child's group, closes the db):
+
+```python
+class LiveHub:
+    conn: sqlite3.Connection | None    # <private_dir>/fenrir.db, opened once that file exists; never created here
+    states: dict[str, RunnerState]; broken: dict[str, tuple[Armed, str]]; children: dict[str, Process]
+    lse_connected: bool; last_bar_ts: datetime | None
+    async def tick(now)                # sync the armed table, then core.on_tick(stale_seconds) per account
+    async def handle_bar(bar)          # sync, then per account whose spec.series front month is bar.contract:
+        # hash check (file changed → open-ended halt), core.on_bar, step in its child, core.decide / step_failed
+    def status() -> dict               # the GET /api/live/status body; nt {connected: false, last_heartbeat: null}, drift {ok: true, ticks: null} until plan 22
+async def run_ticks(hub, every=5.0)
+async def run_bars(hub, stream)        # stream = stream_bars (04.2): lse_connected true from the first bar, false when the stream ends; resubscribes each trading day
+def parse_reply(line: bytes) -> dict   # pure: one step-child line, untrusted
+```
+
+Each sync re-reads `armed`: a removed or changed row stops that account (its child killed); a new row starts with `core.start(Setup(armed, sha256 of the file read with read_regular, with_dll(rules, accounts.yaml dll_on), spec, safety_margin_pct), now)` (no `start`/`day_start` yet: dry runs only, until 22.2). A row whose rules, contract, `instruments.yaml` or `accounts.yaml` fails is `broken`: one `"alert"` `cannot start: <error>`, an AccountStatus with `halted: true`, `halt_kind: null` and null figures, retried only when the row changes. Strategy code runs in one `python -P -m fenrir.live.step_child <path>` per started account (DEC-1: `terminal.child_env`, `jobs_runner.strategy_user`, own session), which holds the strategy's state: it answers `{"hash"}` after `init` (60 s), then one `{"actions": [{type, **fields}]}` per `{"ctx": ctx_json(ctx)}` line (`step_timeout`, 10 s). A load error, a hash that is not `armed.strategy_hash`, or an isolation refusal halts the account (`cannot load the strategy: …`); a step error, timeout, EOF or a reply `parse_reply` refuses (unknown type or key, a non-number, NaN or Infinity) is `step_failed` and the child is killed. An account with no child still journals each bar (`"bar"`, 0 actions). Bars of other series or of a non-front-month contract are ignored. The lifespan starts no bar stream yet: 04.2 supplies `stream_bars` and 21.8 runs it.
 
 - `GET /api/live/status` → `{lse: {connected, last_bar_ts}, nt: {connected, last_heartbeat}, drift: {ok: boolean, ticks: number|null}, accounts: AccountStatus[]}`, `AccountStatus = {account, mode: "dry"|"sim"|"live", phase: "evaluation"|"funded", strategy, rules_account, contract, halted: boolean, halt_kind: "safety"|"reconcile"|"stale"|"drift"|"breach"|null, halt_reason: string|null, balance, today_pnl, limits: {drawdown_remaining, drawdown_max, daily_loss_remaining: number|null, daily_loss_max: number|null, max_minis, held_minis}, position: {qty, entry, stop, target}, session: {start: number (equity at session start, relative to phase start), floor: number, target: number|null, safety: number (equity level of today's safety margin, recomputed each bar: the higher of start − margin × daily loss limit (when on) and floor + (1 − margin) × (start − floor at session start); DEC-4c), equity: [ts, number][] (one point per closed bar this trading day, close mark), fills: string[] (ISO ts of today's fills)}}`.
   - `halted` is true for any halt and for a stale or drift pause (the brief `unreconciled` pause while connecting to NinjaTrader appears only in `halt_reason`); `halt_kind` names it (`safety` margin or daily loss limit day halt, `reconcile` mismatch, `stale` feed pause, `drift` LSE-vs-NinjaTrader pause, `breach`), and is null for other halts (strategy error, strategy file changed, mode mismatch, cannot start). Plan 21 sets `safety`, `stale`, `breach`; plan 22 sets `reconcile`, `drift` and fills `drift` (`ticks` = largest last entry-fill distance from the LSE close; plan 21 reports `{ok: true, ticks: null}`).

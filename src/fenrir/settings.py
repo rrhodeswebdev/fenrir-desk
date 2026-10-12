@@ -12,7 +12,7 @@ class Settings:
     nt_token: str = ""
     holdout_months: int = 12
     safety_margin_pct: float = 80.0
-    stale_seconds: int = 90
+    stale_seconds: int = 180
     data_dir: Path = Path("data")
     rules_dir: Path = Path("rules")
     strategies_dir: Path = Path("strategies")

@@ -46,7 +46,7 @@ class SettingsUpdate(BaseModel):
     nt_token: str = ""
     holdout_months: int = Field(0, ge=0)
     safety_margin_pct: float = Field(80.0, gt=0, le=100)
-    stale_seconds: int = Field(90, gt=0)
+    stale_seconds: int = Field(180, gt=0)
 
 
 def view(env: Mapping[str, str], repo_env_secrets: bool) -> dict:

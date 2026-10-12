@@ -207,9 +207,12 @@ class LiveHub:
             + [_cannot_start(a, error) for a, error in self.broken.values()],
         }
 
-    def _apply(self, account: str, s: RunnerState, effects: tuple[Log, ...]) -> None:
+    def _apply(self, account: str, s: RunnerState, effects: tuple[Log | core.Send, ...]) -> None:
         self.states[account] = s
         for e in effects:
+            if isinstance(e, core.Send):
+                # unreachable until 22.2/22.4 supply sim/live start figures; fail loud, never drop
+                raise RuntimeError(f"order sending lands in 22.4 (#86): {e.client_id} not sent")
             journal.write(self.conn, _now(), account, e.kind, e.payload)
 
     async def _sync(self, now: datetime) -> None:
@@ -280,14 +283,16 @@ class LiveHub:
 
     async def _step(self, account: str, s: RunnerState) -> core.Step:
         proc = self.children.get(account)
+        stale = self.settings.stale_seconds
         if proc is None:  # never started, or its strategy failed: journal the bar only
-            return core.decide(s, ())
+            return core.decide(s, (), _now(), stale)
         try:
             reply = await self._ask(proc, {"ctx": ctx_json(core.ctx(s))}, self._timeout)
         except Exception as e:
             await self._kill(account)
             return core.step_failed(s, str(e))
-        return core.decide(s, reply["actions"])
+        # now = after step: a bar that is late by then is never traded at its old close
+        return core.decide(s, reply["actions"], _now(), stale)
 
     async def _ask(
         self, proc: asyncio.subprocess.Process, request: Any, timeout: float

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, D3, bar, make_rules
-from live_helpers import make_setup
+from live_helpers import decide_now, make_setup
 
 from fenrir.core.actions import Bracket
 from fenrir.live import core
@@ -56,11 +56,11 @@ def test_stale_data_pauses_then_resumes():
     assert kinds(effects) == ["alert"] and "no NQ bar for 91s" in effects[0].payload["message"]
     st = core.account_status(s)
     assert (st["halted"], st["halt_kind"]) == (True, "stale")
-    assert core.decide(s, [LONG])[1][-1].payload["reason"].startswith("paused: no NQ bar")
+    assert decide_now(s, [LONG])[1][-1].payload["reason"].startswith("paused: no NQ bar")
     s, effects = core.on_tick(s, closed + timedelta(seconds=120), 90)
     assert effects == ()  # one alert, not one per tick
     s, _ = core.on_bar(s, at("09:32"))
-    assert kinds(core.decide(s, [LONG])[1]) == ["bar", "action"]  # cleared by the bar
+    assert kinds(decide_now(s, [LONG])[1]) == ["bar", "action"]  # cleared by the bar
     assert core.account_status(s)["halted"] is False
     # the bar's close starts the next stale window
     assert core.on_tick(s, at("09:33").ts + timedelta(seconds=90), 90)[1] == ()
@@ -94,7 +94,7 @@ def test_day_halt_lifts_next_trading_day():
     s, effects = core.on_bar(s, at("09:30", D2))
     assert kinds(effects) == ["alert"] and effects[0].payload["message"].startswith("halt lifted")
     assert (s.halted, s.halt_kind, s.halt_day, s.acct.day) == (None, None, None, D2)
-    assert kinds(core.decide(s, [LONG])[1]) == ["bar", "action"]
+    assert kinds(decide_now(s, [LONG])[1]) == ["bar", "action"]
     # the safety check runs again on the new day, against the new day's level
     assert core.safety_level(s) == -800.0  # opened at −400: −400 − 0.8 × 500
     s, effects = core.on_bar(with_balance(s, -800.0), at("09:31", D2))

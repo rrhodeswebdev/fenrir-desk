@@ -6,7 +6,7 @@ import pytest
 from live_helpers import ARMED_AT
 
 from fenrir.core.bars import Bar
-from fenrir.live import arming, core, journal
+from fenrir.live import arming, core, journal, service
 from fenrir.live.arming import Armed
 from fenrir.live.service import LiveHub, run_bars
 from fenrir.settings import Settings
@@ -57,6 +57,14 @@ def armed(tmp_path) -> Armed:
     )
 
 
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """The hub's wall clock, pinned to T0 so the bars here are fresh (decide checks bar age)."""
+    now = {"t": T0}
+    monkeypatch.setattr(service, "_now", lambda: now["t"])
+    return now
+
+
 @pytest.fixture
 async def hub(settings):
     h = LiveHub(settings)
@@ -79,6 +87,15 @@ async def test_runs_armed_dry_account(hub, conn, armed):
     [child] = hub.children.values()
     await hub.stop()
     assert child.returncode is not None and hub.conn is None
+
+
+async def test_a_late_bar_is_not_traded_at_its_old_close(hub, conn, armed, clock):
+    arming.insert_armed(conn, armed)
+    clock["t"] = T0 + timedelta(minutes=1, seconds=181)  # closed 181 s ago; the default is 180
+    await hub.handle_bar(bar(T0))
+    assert kinds(conn) == ["bar", "rejection"]
+    [row] = [r for r in journal.rows(conn, account="Sim101") if r.kind == "rejection"]
+    assert row.payload["reason"].startswith("bar closed 181s ago (over 180s)")
 
 
 async def test_bar_starts_a_newly_armed_account_without_a_tick(hub, conn, armed):

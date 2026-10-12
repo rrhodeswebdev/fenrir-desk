@@ -1,5 +1,5 @@
 import { chromium } from '@playwright/test'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -16,6 +16,8 @@ export default async function globalSetup() {
   await cp(path.join(repo, 'rules'), dir('rules'), { recursive: true })
   await cp(path.join(repo, 'strategies'), dir('strategies'), { recursive: true })
   await writeFile(dir('empty.env'), '')
+  // synthetic NQ bars, small enough that a real backtest finishes in seconds
+  execFileSync('uv', ['run', 'python', 'tests/fixtures/e2e/make_bars.py', dir('data')], { cwd: repo })
   const server = spawn('uv', ['run', 'fenrir', 'serve', '--port', String(PORT), '--static-dir', 'web/dist'], {
     cwd: repo,
     env: {

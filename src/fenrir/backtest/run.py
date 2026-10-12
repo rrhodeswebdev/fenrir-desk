@@ -62,7 +62,7 @@ def load_account_choices(data_dir: Path) -> dict[str, AccountChoice]:
     # errors name the file, line and field but never quote it: the text may not be ours
     try:
         data = yaml.safe_load(text)
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, RecursionError) as e:  # deep nesting overflows the parser
         mark = getattr(e, "problem_mark", None)
         where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
         raise ValueError(f"{path}: not valid YAML{where}") from None

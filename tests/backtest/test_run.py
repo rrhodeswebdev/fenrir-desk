@@ -207,6 +207,21 @@ def test_bad_account_choices_name_the_file(tmp_path, text):
         load_account_choices(tmp_path)
 
 
+def test_account_choices_refuse_a_directory_without_leaking_fds(tmp_path):
+    (tmp_path / "accounts.yaml").mkdir()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(50):
+        with pytest.raises(ValueError, match="accounts.yaml is not a regular file"):
+            load_account_choices(tmp_path)
+    assert len(os.listdir("/dev/fd")) == before
+
+
+def test_deeply_nested_account_choices_are_not_valid_yaml(tmp_path):
+    (tmp_path / "accounts.yaml").write_text("a: " + "[" * 100_000 + "]" * 100_000 + "\n")
+    with pytest.raises(ValueError, match="accounts.yaml: not valid YAML"):
+        load_account_choices(tmp_path)
+
+
 def test_account_choices_never_follow_a_symlink_or_read_a_special_file(tmp_path):
     secret = tmp_path / "secret.env"
     secret.write_text("FENRIR_NT_TOKEN=nt-secret-token-0002\n")

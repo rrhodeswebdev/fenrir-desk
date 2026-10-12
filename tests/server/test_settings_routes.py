@@ -306,3 +306,10 @@ def test_accounts_put_refuses_a_symlinked_data_dir(env, tmp_path):
     r = client.put("/api/settings/accounts", json={AID: {"dll_on": True}}, headers=WRITE)
     assert r.status_code == 500 and "symlink" in r.json()["detail"]
     assert list(elsewhere.iterdir()) == []
+
+
+def test_a_directory_accounts_file_is_500_naming_it(env):
+    client, _, data_dir = env
+    (data_dir / "accounts.yaml").mkdir(parents=True)
+    r = client.get("/api/settings/accounts")
+    assert r.status_code == 500 and "accounts.yaml is not a regular file" in r.json()["detail"]

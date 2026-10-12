@@ -165,6 +165,17 @@ def test_breach_over_an_open_ended_halt_is_journalled_and_alerted():
     assert core.account_status(s)["halt_kind"] == "breach"
 
 
+def test_a_breach_never_replaces_a_breach():
+    s = started(make_setup(make_rules()))
+    s, effects = core.on_bar(with_balance(s, -2000.0), at("09:30", D2))
+    first = s.halted
+    assert kinds(effects) == ["halt"] and s.halt_kind == "breach"
+    s, effects = core.on_bar(with_balance(s, -2500.0), at("09:31", D2))  # breaches again
+    assert effects == () and s.halted == first
+    s, effects = core.on_bar(s, at("09:30", D3))
+    assert effects == () and s.halted == first
+
+
 def test_day_roll_resets_the_session_from_the_close():
     # sim, end-of-day trailing: opened at +1000 (peak +1000, floor −1000), +1500 now
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=51_500.0)

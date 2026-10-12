@@ -1,8 +1,10 @@
+import os
 from datetime import date
 from pathlib import Path
 
 import pytest
 
+from fenrir.core import instruments
 from fenrir.core.instruments import (
     ContractSpec,
     Roll,
@@ -89,3 +91,22 @@ def test_in_roll_window_is_roll_thursday_through_expiry_tuesday():
         16,
     ]
     assert not in_roll_window(date(2025, 11, 13))  # not a quarterly month
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory", "oversized"])
+def test_load_instruments_refuses_a_planted_file(tmp_path, monkeypatch, kind):
+    # the terminal can write the repo; the root server and pull read this file (DEC-1)
+    real = Path(__file__).parents[2] / "instruments.yaml"
+    path = tmp_path / "instruments.yaml"
+    if kind == "symlink":
+        path.symlink_to(real)
+    elif kind == "fifo":
+        os.mkfifo(path)  # a blocking open would hang
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        path.write_bytes(real.read_bytes())
+        monkeypatch.setattr(instruments, "INSTRUMENTS_MAX", path.stat().st_size - 1)
+    message = {"symlink": "is a symlink", "oversized": "is over"}.get(kind, "is not a regular file")
+    with pytest.raises(ValueError, match=f"{path} {message}"):
+        load_instruments(path)

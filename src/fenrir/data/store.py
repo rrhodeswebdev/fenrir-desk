@@ -17,6 +17,7 @@ import polars as pl
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import Instruments, front_month, in_roll_window
 from fenrir.data.pull import Window
+from fenrir.files import read_regular
 
 SCHEMA = {
     "ts": pl.Datetime("us", "UTC"),
@@ -96,6 +97,7 @@ def _manifest_path(data_dir: Path) -> Path:
 # every call _atomic_write makes with dir_fd; native Windows has none (and no hostile user)
 _DIR_FD = {os.open, os.mkdir, os.rename, os.unlink} <= os.supports_dir_fd
 MAX_MANIFEST = 16 * 2**20
+MAX_PARQUET = 256 * 2**20  # one contract's 1m bars is about 1 MB
 
 
 def _open_dirs(data_dir: Path, parts: Sequence[str], *, create: bool = True) -> int:
@@ -256,9 +258,13 @@ def _read_series(
     files = sorted(_series_dir(data_dir, series).glob("*.parquet"))
     if not files:
         return None
+    # bytes, not the path: the terminal can write data/ and coverage() runs in the root server
+    # (DEC-1), so a symlinked, FIFO or huge *.parquet is a ValueError, never followed or read
     return pl.concat(
         [
-            pl.read_parquet(f, columns=columns).with_columns(pl.lit(f.stem).alias("contract"))
+            pl.read_parquet(read_regular(f, MAX_PARQUET), columns=columns).with_columns(
+                pl.lit(f.stem).alias("contract")
+            )
             for f in files
         ]
     ).with_columns(trading_day_expr().alias("day"))

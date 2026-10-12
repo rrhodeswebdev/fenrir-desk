@@ -106,6 +106,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `web/` | React UI (Vite, React 19, TypeScript strict). `src/api.ts` is the only server client (session cookie, no token); `src/errorText.ts` turns errors into text. |
 | `web/src/routes/` | One file per UI page (`<page>Route`); `root.tsx` is the index rail shell, `../router.tsx` assembles the tree. |
 | `web/src/components/` | Shared components: `Page` (top strip + body), `StateText`; `ui/` holds shadcn components edited to DESIGN.md. |
+| `web/src/backtests/` | Backtests page parts: `RunForm` (strategies × accounts × contracts → `POST /api/backtests/jobs`). |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 | `.claude/skills/fenrir-strategy/` | Project skill teaching Claude the strategy loop (rules → data → strategy → backtest → report), tuning period only. |
 

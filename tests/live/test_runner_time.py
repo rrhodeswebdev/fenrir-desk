@@ -123,6 +123,48 @@ def test_breach_at_day_close_replaces_a_safety_halt():
     assert effects == () and s.halt_kind == "breach"
 
 
+BREACH = {"reason": "breach max_drawdown: x", "kind": "breach", "until": None}
+ERROR = {"reason": "strategy error: boom", "kind": None, "until": None}
+SAFETY = {"reason": "safety margin: x", "kind": "safety", "until": D1.isoformat()}
+
+
+def test_restart_restores_a_breach_until_disarmed():
+    s, effects = core.start(make_setup(make_rules()), T0, (BREACH,))
+    assert effects == ()  # already journalled
+    assert (s.halted, s.halt_kind, s.halt_day) == ("breach max_drawdown: x", "breach", None)
+    s, _ = core.on_bar(s, at("09:30"))
+    assert decide_now(s, [LONG])[1][-1].payload["reason"] == "halted: breach max_drawdown: x"
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert effects == () and s.halt_kind == "breach"
+
+
+def test_restart_restores_a_day_halt_on_its_own_day_only():
+    s, _ = core.start(make_setup(make_rules()), T0, (SAFETY,))
+    assert (s.halted, s.halt_kind, s.halt_day) == ("safety margin: x", "safety", D1)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert kinds(effects) == ["alert"] and s.halted is None  # lifts as without a restart
+    s, _ = core.start(make_setup(make_rules()), at("09:30", D2).ts, (SAFETY,))
+    assert s.halted is None
+
+
+def test_restart_keeps_the_breach_whatever_the_journal_order():
+    for halts in [(BREACH, ERROR, SAFETY), (ERROR, BREACH), (SAFETY, BREACH)]:
+        s, _ = core.start(make_setup(make_rules()), T0, halts)
+        assert (s.halted, s.halt_kind) == ("breach max_drawdown: x", "breach")
+    s, _ = core.start(make_setup(make_rules()), T0, (ERROR, SAFETY))
+    assert (s.halted, s.halt_day) == ("strategy error: boom", None)  # never downgraded
+
+
+def test_breach_over_an_open_ended_halt_is_journalled_and_alerted():
+    s, _ = core.halt(started(make_setup(make_rules())), "strategy error: boom")
+    s, effects = core.on_bar(with_balance(s, -2000.0), at("09:30", D2))
+    assert kinds(effects) == ["halt", "alert"]
+    assert (effects[0].payload["kind"], effects[0].payload["until"]) == ("breach", None)
+    assert "strategy error: boom" in effects[1].payload["message"]
+    assert (s.halt_kind, s.halt_day) == ("breach", None)
+    assert core.account_status(s)["halt_kind"] == "breach"
+
+
 def test_day_roll_resets_the_session_from_the_close():
     # sim, end-of-day trailing: opened at +1000 (peak +1000, floor −1000), +1500 now
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=51_500.0)

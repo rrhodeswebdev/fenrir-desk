@@ -158,7 +158,9 @@ def _floor(rules: AccountRules, phase: Phase, peak: float) -> float:
     return max(-dd.amount, level - dd.amount)
 
 
-def start(setup: Setup, now: datetime) -> Step:
+def start(setup: Setup, now: datetime, halts: Sequence[Mapping[str, Any]] = ()) -> Step:
+    """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
+    still in force are restored (already journalled, so not again)."""
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
     day = setup.day_start if begin else None
@@ -170,6 +172,10 @@ def start(setup: Setup, now: datetime) -> Step:
     else:
         floor = acct.floor
     s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, floor, now)
+    for h in halts:  # replayed in order, so open-ended halts and breaches win as they did live
+        until = h["until"] and date.fromisoformat(h["until"])
+        if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
+            s, _ = _halt(s, h["reason"], h["kind"], until)
     if setup.strategy_hash != a.strategy_hash:
         return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
     if a.mode != "dry" and setup.start is None:
@@ -523,10 +529,14 @@ def _flatten(s: RunnerState, ts: datetime, suffix: str, why: str) -> Step:
 
 
 def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> Step:
-    if s.halted == reason or (s.halted and s.halt_day is None):
-        return s, ()  # an open-ended halt is never replaced or downgraded to a day halt
+    open_ended = s.halted is not None and s.halt_day is None
+    if s.halted == reason or (open_ended and (kind != "breach" or s.halt_kind == "breach")):
+        return s, ()  # an open-ended halt is replaced only by a first breach, never downgraded
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
-    return replace(s, halted=reason, halt_kind=kind, halt_day=until), (Log("halt", payload),)
+    out: tuple[Log, ...] = (Log("halt", payload),)
+    if open_ended:  # the account was already halted: the user must still learn it failed
+        out += (Log("alert", {"message": f"{reason} (was halted: {s.halted})"}),)
+    return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 
 
 def _roll_day(s: RunnerState, ts: datetime) -> Step:

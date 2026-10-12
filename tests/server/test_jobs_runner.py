@@ -144,6 +144,32 @@ def test_a_corrupt_job_file_is_skipped_and_logged(make, settings, caplog):
     ]
 
 
+def test_planted_job_files_are_skipped_never_followed(make, settings, caplog, monkeypatch):
+    # data/jobs is terminal-writable and the root server reads it (DEC-1)
+    jobs = settings.data_dir / "jobs"
+    jobs.mkdir(parents=True)
+    good = Job("good", "2026-10-10T14:00:00.000Z", True, ())
+    (jobs / "good.json").write_text(json.dumps(to_json(good)))
+    secret = settings.data_dir / "secret.json"  # a valid job: following the link would load it
+    secret.write_text(json.dumps(to_json(Job("link", "2026-10-10T14:00:00.000Z", True, ()))))
+    (jobs / "link.json").symlink_to(secret)
+    os.mkfifo(jobs / "fifo.json")  # a blocking open would hang start()
+    (jobs / "dir.json").mkdir()
+    (jobs / "big.json").write_text(json.dumps(to_json(Job("big", "x" * 100, True, ()))))
+    limit = (jobs / "good.json").stat().st_size
+    monkeypatch.setattr(jobs_runner, "JOB_MAX", limit)
+    runner = make()
+    runner.start()
+    assert runner.jobs() == [good]
+    assert sorted(r.message for r in caplog.records) == [
+        f"skipping job file {jobs}/big.json: ValueError('{jobs}/big.json is over {limit} bytes')",
+        f"skipping job file {jobs}/dir.json: ValueError('{jobs}/dir.json is not a regular file')",
+        f"skipping job file {jobs}/fifo.json: ValueError('{jobs}/fifo.json is not a regular file')",
+        f"skipping job file {jobs}/link.json: ValueError('{jobs}/link.json is a symlink; "
+        "not reading it')",
+    ]
+
+
 def test_listeners_see_pending_running_done_and_throttled_progress(make, tmp_path):
     runner = make()
     seen: list[dict] = []
@@ -220,10 +246,10 @@ def test_child_runs_in_its_own_session_and_stop_kills_its_group(make, tmp_path):
 
 
 def test_a_silent_child_is_killed_and_its_items_error(make, tmp_path):
-    runner = make(idle=0.5)
+    runner = make(idle=5)  # the fake sleeps 60 s: headroom for a loaded machine
     runner.start()
     job = runner.submit(grid(tmp_path, "hang", "orb"), True)
-    wait_for(lambda: finished(runner, job.id))
+    wait_for(lambda: finished(runner, job.id), timeout=30)
     info = json.loads((tmp_path / "hang.json").read_text())
     wait_for(lambda: gone(info["sleeper"]))
     for item in runner.get(job.id).items:
@@ -364,8 +390,8 @@ def test_expand_executes_strategies_only_in_the_child(make, tmp_path):
 
 
 def test_expand_times_out_and_kills_the_child(make, tmp_path):
-    runner = make(expand_timeout=0.5)
-    with pytest.raises(ValueError, match="took over 0.5 s"):
+    runner = make(expand_timeout=5)  # the fake sleeps 60 s: headroom for a loaded machine
+    with pytest.raises(ValueError, match="took over 5 s"):
         runner.expand(["hang", str(tmp_path / "x.py")], [], None)
     wait_for(lambda: gone(json.loads((tmp_path / "x.json").read_text())["sleeper"]))
 
@@ -411,6 +437,18 @@ def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):
     for bad in (tmp_path / "x.py", s.strategies_dir / ".." / "x.py", s.strategies_dir / "d/x.py"):
         with pytest.raises(ValueError, match="not a file in"):
             runner.describe([str(s.strategies_dir / "ok.py"), str(bad)])
+
+
+def test_describe_refuses_a_symlinked_strategies_dir(make, tmp_path):
+    # the terminal can swap strategies/ for a link: root would hash files in any directory
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.py").write_text("x = 1\n")
+    s = replace(Settings(data_dir=tmp_path / "data"), strategies_dir=tmp_path / "strategies")
+    s.strategies_dir.symlink_to(elsewhere, target_is_directory=True)
+    runner = make(s, child=CHILD)
+    with pytest.raises(ValueError, match="strategies is a symlink; not reading it"):
+        runner.describe([str(s.strategies_dir / "a.py")])
 
 
 H = "b" * 64
@@ -503,8 +541,7 @@ def test_parse_grid(tmp_path):
         parse_grid("[" * 100000, s)
 
 
-def test_real_job_produces_a_cached_report(make, tmp_path):
-    s = real_settings(tmp_path)
+def write_nq_bars(s: Settings) -> None:
     code = front_month(load_instruments(), "NQ", D1)
     bars = [
         replace(bar(f"09:{m:02d}", p, p + 2, p - 1, p + 1, day), contract=code)
@@ -512,10 +549,17 @@ def test_real_job_produces_a_cached_report(make, tmp_path):
         for m, p in ((m, 20000.0 + 3 * m) for m in range(30, 60))
     ]
     write_bars(s.data_dir, "NQ", code, bars)
+
+
+def test_real_job_produces_a_cached_report(make, tmp_path):
+    s = real_settings(tmp_path)
+    write_nq_bars(s)
+    orb = s.strategies_dir / "orb.py"
+    orb.write_bytes(ORB.read_bytes())  # the child runs only files inside strategies_dir
     runner = make(s, child=CHILD)
     runner.start()
     job = runner.submit(
-        (GridItem(ORB, "lucid-flex-50k", "MES"), GridItem(ORB, "lucid-flex-50k", "MNQ")), False
+        (GridItem(orb, "lucid-flex-50k", "MES"), GridItem(orb, "lucid-flex-50k", "MNQ")), False
     )
     wait_for(lambda: finished(runner, job.id), timeout=120)
     wrong, good = runner.get(job.id).items
@@ -523,3 +567,19 @@ def test_real_job_produces_a_cached_report(make, tmp_path):
     assert good.status == "done" and good.progress[0] == good.progress[1] == 3
     report = json.loads((s.data_dir / "results" / f"{good.key}.json").read_text())
     assert report["periods"]["tuning"]["attempts"] == 3
+
+
+def test_the_job_child_refuses_items_outside_strategies_dir(make, tmp_path):
+    s = real_settings(tmp_path)
+    outside = tmp_path / "evil.py"
+    outside.write_text(SIDE_EFFECT)
+    (s.strategies_dir / "link.py").symlink_to(outside)
+    write_nq_bars(s)  # so an item that got past the check would load its strategy
+    runner = make(s, child=CHILD)
+    runner.start()
+    paths = (outside, s.strategies_dir / "link.py", s.strategies_dir / ".." / "evil.py")
+    job = runner.submit(tuple(GridItem(p, "lucid-flex-50k", "NQ") for p in paths), False)
+    wait_for(lambda: finished(runner, job.id), timeout=60)
+    for item, path in zip(runner.get(job.id).items, paths, strict=True):
+        assert item.error == f"ValueError: {str(path)!r} is not a file inside {s.strategies_dir}"
+    assert not list(tmp_path.rglob("*.pid"))  # never executed

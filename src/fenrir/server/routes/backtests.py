@@ -38,7 +38,10 @@ def cwd_relative(path: Path) -> str:
 def strategy_glob_ok(pattern: str, strategies_dir: Path) -> bool:
     """A glob with no `..` that resolves (relative ones against the cwd) inside `strategies_dir`.
 
-    Checked before `expand`, whose child executes every file the glob matches.
+    A first filter only: resolving a pattern cannot follow a symlink behind a wildcard part
+    (`strategies/*.py` with `strategies/link.py -> /elsewhere`), so the `--expand` child
+    resolves every match and refuses the grid, executing nothing, if any match is not a
+    regular file inside `strategies_dir` (#153).
     """
     path = Path(pattern)
     return (

@@ -10,9 +10,12 @@ from fenrir.backtest.grid import GridItem
 from fenrir.backtest.report import Report, report_key
 from fenrir.backtest.run import AccountChoice, load_account_choices, run_backtest
 from fenrir.data.store import data_version
+from fenrir.files import read_regular
 from fenrir.rules.loader import rules_path
 from fenrir.settings import Settings
 from fenrir.strategy.loader import file_hash
+
+REPORT_MAX = 16 * 2**20
 
 
 def _results(settings: Settings) -> Path:
@@ -33,8 +36,10 @@ def cache_key(item: GridItem, settings: Settings, include_holdout: bool) -> str:
 
 
 def _read(path: Path) -> Report:
+    # the terminal can write data/results: no symlink, FIFO or huge file, read as root (DEC-1)
+    data = read_regular(path, REPORT_MAX)
     try:
-        report = json.loads(path.read_text())
+        report = json.loads(data)
         report["created_at"], report["key"]  # noqa: B018 - list_reports sorts on both
         report["strategy_hash"], report["account"]  # noqa: B018 - the API matches and nets on both
         if not all(p is None or isinstance(p, dict) for p in report["periods"].values()):

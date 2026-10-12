@@ -1,5 +1,6 @@
 import glob
 import json
+import os
 import shutil
 import threading
 import time
@@ -146,6 +147,29 @@ def test_every_listed_strategy_is_accepted_with_strategies_outside_the_cwd(
         r = client.post("/api/backtests/jobs", headers=WRITE, json=body)
         assert r.status_code == 422, pattern
     assert [c[0] for c in runner.calls] == ["expand", "submit"] * 3
+
+
+def test_a_wildcard_never_reaches_a_file_outside_strategies_dir(settings, tmp_path_factory):
+    # strategy_glob_ok passes each pattern: a wildcard part hides the symlink from resolve()
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "evil.py").write_text(SIDE_EFFECT)
+    (outside / "x.py").write_text(SIDE_EFFECT)
+    strategies = settings.strategies_dir
+    (strategies / "link.py").symlink_to(outside / "evil.py")
+    (strategies / "sub").symlink_to(outside)
+    client = _app(settings)[1]  # the real JobRunner and expand child
+    inside = f"is not a file inside {strategies.resolve()}"
+    for pattern, match in (
+        (str(strategies.resolve() / "l*.py"), str(strategies.resolve() / "link.py")),
+        ("strategies/*.py", "strategies/link.py"),
+        ("strategies/s*/x.py", "strategies/sub/x.py"),
+    ):
+        r = client.post("/api/backtests/jobs", headers=WRITE, json=GOOD | {"strategies": [pattern]})
+        assert r.status_code == 422, (pattern, r.text)
+        assert r.json()["detail"] == f"ValueError: {match!r} {inside}"
+    for root in (outside, settings.strategies_dir):
+        assert not list(root.rglob("*.pid"))  # nothing was executed, not even orb.py
+    assert client.get("/api/backtests/jobs", headers=COOKIE).json() == []
 
 
 def test_create_app_holds_a_job_runner_with_the_session_key(settings, monkeypatch):
@@ -301,6 +325,24 @@ def test_a_corrupt_report_is_500_naming_the_file(settings):
         r = client.get(f"/api/backtests/{path}", headers=COOKIE)
         assert r.status_code == 500
         assert "corrupt cached report, delete it" in r.json()["detail"]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_a_planted_report_is_500_naming_it_without_leaking_or_hanging(settings, kind):
+    # data/results is terminal-writable and the root server reads it (DEC-1)
+    secret = settings.data_dir / "secret.json"  # a root-only file that parses as a report
+    secret.parent.mkdir(parents=True)
+    secret.write_text(json.dumps({**report("orb", "a"), "key": "c" * 64, "note": "secret-0001"}))
+    planted = settings.data_dir / "results" / f"{'b' * 64}.json"
+    planted.parent.mkdir()
+    planted.symlink_to(secret) if kind == "symlink" else os.mkfifo(planted)
+    client = _app(settings)[1]
+    for path in ("results", f"results/{'b' * 64}", "compare?view=account"):
+        r = client.get(f"/api/backtests/{path}", headers=COOKIE)
+        assert r.status_code == 500 and f"{planted} is " in r.json()["detail"]
+        assert "secret-0001" not in r.text
+    planted.unlink()
+    assert client.get("/api/backtests/results", headers=COOKIE).json() == []
 
 
 def test_compare_ranks_latest_reports_by_tuning_only(settings):

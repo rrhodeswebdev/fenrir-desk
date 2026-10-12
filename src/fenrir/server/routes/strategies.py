@@ -27,6 +27,9 @@ def strategies(request: Request) -> list[dict[str, Any]]:
         reports = list_reports(settings)
     except ValueError as e:  # a broken accounts.yaml or cached report: the message names it
         raise HTTPException(status_code=500, detail=str(e)) from e
+    if settings.strategies_dir.is_symlink():  # the terminal can swap it for a link (DEC-1)
+        detail = f"{settings.strategies_dir} is a symlink; not reading it"
+        raise HTTPException(status_code=500, detail=detail)
     paths = sorted(str(p) for p in settings.strategies_dir.glob("*.py"))
     if not _describe_slot.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="the strategies are already being loaded")

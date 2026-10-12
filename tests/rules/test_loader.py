@@ -1,8 +1,10 @@
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
+from fenrir.rules import loader
 from fenrir.rules.loader import account_id, dump_account, list_accounts, load_account, rules_path
 
 
@@ -121,3 +123,25 @@ def test_dump_round_trip(tmp_path, base):
     rules = load_account("lucid-flex-50k", tmp_path)
     (tmp_path / "lucid" / "flex-50k.yaml").write_text(dump_account(rules))
     assert load_account("lucid-flex-50k", tmp_path) == rules
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory", "oversized"])
+def test_load_account_refuses_a_planted_file(tmp_path, monkeypatch, kind):
+    # the terminal can write rules/ and the root server reads it (DEC-1)
+    secret = tmp_path / "secret.yaml"
+    secret.write_text("token: [secret-0001\n")  # a YAML error would quote it
+    path = tmp_path / "rules" / "lucid" / "flex-50k.yaml"
+    path.parent.mkdir(parents=True)
+    if kind == "symlink":
+        path.symlink_to(secret)
+    elif kind == "fifo":
+        os.mkfifo(path)  # a blocking open would hang
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("#" * 11)
+        monkeypatch.setattr(loader, "RULES_MAX", 10)
+    message = {"symlink": "is a symlink", "oversized": "is over"}.get(kind, "is not a regular file")
+    with pytest.raises(ValueError, match=f"^{path} {message}") as e:
+        load_account("lucid-flex-50k", tmp_path / "rules")
+    assert "secret-0001" not in str(e.value)

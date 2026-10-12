@@ -81,6 +81,7 @@ export default async function globalSetup() {
       await page.goto(launch)
       if (new URL(page.url()).pathname !== '/') throw new Error(`launch link landed on ${page.url()}`)
       process.env.FENRIR_E2E_STATE = dir('state.json') // workers inherit the runner's env
+      process.env.FENRIR_E2E_ENV_FILE = dir('empty.env') // the secrets file the Settings page writes
       await page.context().storageState({ path: process.env.FENRIR_E2E_STATE })
     } finally {
       await browser.close()

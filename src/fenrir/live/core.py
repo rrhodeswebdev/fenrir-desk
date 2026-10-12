@@ -272,7 +272,8 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
             s = replace(s, drift=reason)
             out += (Log("alert", {"message": reason}),)
     if s.position.qty and s.position.stop is None and not s.exiting:  # no broker-side stop known
-        s, more = _flatten(s, ts, "f", f"position {s.position.qty} has no known stop")
+        # "f<n>": today's n-th fill, so each fill's Flatten has its own id, the same on a replay
+        s, more = _stopless(s, ts, f"f{len(s.fills)}")
         out += more
     return s, out
 
@@ -292,9 +293,10 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 
 def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:
     """24 chars and deterministic, so a retry or a restart that re-decides the bar is deduped by
-    the add-on. `ts` is the bar's open (a fill's time for "f"); `suffix` the action's index, or
-    "x" / "f" for the runner's own Flatten on a bar / a fill. The action's type is hashed in, so a
-    re-decided bar whose list changed never gives a Flatten a Bracket's id (a false duplicate)."""
+    the add-on. `ts` is the bar's open (a fill's time for "f<n>"); `suffix` the action's index, or
+    "x" / "f<n>" (today's n-th fill) for the runner's own Flatten on a bar / a fill. The action's
+    type is hashed in, so a re-decided bar whose list changed never gives a Flatten a Bracket's id
+    (a false duplicate)."""
     key = f"{account}\0{suffix}\0{type(action).__name__}"
     tag = hashlib.sha256(key.encode()).hexdigest()[:13]
     return f"{ts.astimezone(UTC):%y%m%d%H%M}-{tag}"
@@ -500,11 +502,18 @@ def _exit(s: RunnerState, bar: Bar) -> Step:
         why = "daily loss limit hit"
     elif s.halt_kind == "breach" and s.halted:
         why = s.halted
-    elif s.position.stop is None:
-        why = f"position {s.position.qty} has no known stop"
+    elif s.position.stop is None:  # its flatten failed (send_failed): send it again
+        return _stopless(s, bar.ts, "x")
     else:
         return s, ()
     return _flatten(s, bar.ts, "x", why)
+
+
+def _stopless(s: RunnerState, ts: datetime, suffix: str) -> Step:
+    """Flatten a position with no known stop (reversed by an over-close, or not Fenrir's)."""
+    why = f"position {s.position.qty} has no known stop"
+    s, out = _flatten(s, ts, suffix, why)
+    return s, (Log("alert", {"message": f"flattening: {why}"}), *out)
 
 
 def _flatten(s: RunnerState, ts: datetime, suffix: str, why: str) -> Step:

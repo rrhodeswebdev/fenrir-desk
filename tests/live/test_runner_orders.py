@@ -288,14 +288,43 @@ def test_a_flatten_through_zero_flattens_the_reversed_position():
     s, effects = core.on_bar(s, at("16:39"))  # flat-by: the runner's Flatten goes out
     over = at("16:40").ts + timedelta(seconds=1)
     s, effects = core.on_fill(s, fill(-2, 20004.75, over))  # closed one too many
-    cid = core.client_id("Sim101", over, "f", Flatten())
+    cid = core.client_id("Sim101", over, "f2", Flatten())  # today's second fill
     assert s.position == core.Position(-1, 20004.75, None, None)
     assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
     assert effects[-2].payload["reason"] == "position -1 has no known stop"
+    assert effects[-3].kind == "alert" and "no known stop" in effects[-3].payload["message"]
     s, effects = core.on_bar(s, at("16:40"))
     assert sends(effects) == []  # once
     s, _ = core.on_fill(s, fill(1, 20004.75, over + timedelta(seconds=1)))
     assert s.position == core.FLAT and s.exiting is None
+
+
+def stopless_opens_in_one_minute():
+    """Two foreign (e.g. manual) opens in one UTC minute, each flattened; the Sends' ids."""
+    s, ids = started(sim(), at("09:30")), []
+    t = at("09:31").ts
+    for qty, sec in [(1, 5), (-1, 10), (1, 20)]:
+        s, effects = core.on_fill(s, fill(qty, 20000.0, t + timedelta(seconds=sec)))
+        ids += [e.client_id for e in sends(effects)]
+    return ids
+
+
+def test_each_stopless_open_gets_its_own_flatten_id():
+    ids = stopless_opens_in_one_minute()
+    assert len(ids) == 2 and ids[0] != ids[1]  # a reused id would come back `duplicate`
+    assert stopless_opens_in_one_minute() == ids  # a replay of the same fills: the same ids
+
+
+def test_a_failed_flatten_of_a_stopless_position_is_sent_again():
+    s = started(sim(), at("09:30"))
+    s, effects = core.on_fill(s, fill(1, 20000.0, at("09:31").ts + timedelta(seconds=5)))
+    [first] = sends(effects)
+    s, _ = core.send_failed(s, first.client_id, "rejected")
+    b = at("09:31")
+    s, effects = core.on_bar(s, b)  # not late, no halt: only the missing stop
+    again = core.client_id("Sim101", b.ts, "x", Flatten())
+    assert sends(effects) == [Send(Flatten(), again)] and s.exiting == again
+    assert "alert" in kinds(effects)
 
 
 def test_late_bar_takes_no_entries_but_exits():

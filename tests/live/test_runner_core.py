@@ -70,27 +70,53 @@ def test_over_contract_limit_is_rejected():
 
 def test_funded_scaling_limits_size_and_status():
     low = Start(phase_start=50_000.0, peak=50_500.0, balance=50_500.0)  # +500: tier 2
-    setup = make_setup(scaled_rules(), mode="sim", phase="funded", start=low)
+    setup = make_setup(scaled_rules(), mode="sim", phase="funded", start=low, day_start=50_500.0)
     s = run(setup)
     assert core.account_status(s)["limits"]["max_minis"] == 2
     _, effects = core.decide(s, [replace(LONG, qty=3)])
     assert "max_minis 2" in effects[1].payload["reason"]
 
     high = Start(phase_start=50_000.0, peak=51_500.0, balance=51_500.0)  # +1500: tier 4
-    s = run(replace(setup, start=high))
+    s = run(replace(setup, start=high, day_start=51_500.0))
     assert core.account_status(s)["limits"]["max_minis"] == 4
     assert kinds(core.decide(s, [replace(LONG, qty=3)])[1]) == ["bar", "action"]
+
+    # the tier comes from today's opening balance, not a winning morning since
+    s = run(replace(setup, start=high, day_start=50_500.0))
+    assert core.account_status(s)["limits"]["max_minis"] == 2
 
 
 def test_stop_out_past_drawdown_is_rejected_from_ninjatrader_start():
     # peak +1000 → floor -1000; balance +500 → $1,500 of room, so a $1,505 stop-out breaches
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=50_500.0)
     wide = Bracket("long", 1, 19925.0, 20020.0)
-    _, effects = decide(make_setup(make_rules(), mode="sim", start=start), [wide])
+    setup = make_setup(make_rules(), mode="sim", start=start, day_start=50_500.0)
+    _, effects = decide(setup, [wide])
     assert kinds(effects) == ["bar", "rejection"]  # journalled, nothing sent (SC5)
     assert "drawdown floor -1000.00" in effects[1].payload["reason"]
     # the same bracket on a fresh account has $2,000 of room
     assert kinds(decide(make_setup(make_rules()), [wide])[1]) == ["bar", "action"]
+
+
+def test_sim_without_day_start_takes_no_brackets():
+    start = Start(phase_start=50_000.0, peak=50_000.0, balance=50_000.0)
+    setup = make_setup(make_rules(), mode="sim", start=start)
+    _, effects = decide(setup, [LONG, Flatten(), Cancel("x")])
+    assert kinds(effects) == ["bar", "rejection", "action", "action"]
+    assert effects[1].payload["reason"] == "today's opening balance unknown"
+    assert kinds(decide(replace(setup, day_start=50_000.0), [LONG])[1]) == ["bar", "action"]
+    # dry runs start fresh and need no opening balance
+    assert kinds(decide(make_setup(make_rules()), [LONG])[1]) == ["bar", "action"]
+
+
+def test_day_start_sets_the_daily_loss_room():
+    # down $350 today (above the −$400 safety level): a $205 stop-out makes the day −$555
+    start = Start(phase_start=50_000.0, peak=50_000.0, balance=49_650.0)
+    setup = make_setup(make_rules(daily_loss=500.0), mode="sim", start=start, day_start=50_000.0)
+    s = run(setup)
+    assert (s.acct.day_start_balance, s.session_start) == (0.0, 0.0)
+    _, effects = core.decide(s, [LONG])
+    assert "daily loss limit" in effects[1].payload["reason"]
 
 
 def test_stop_out_past_daily_loss_limit_is_rejected():

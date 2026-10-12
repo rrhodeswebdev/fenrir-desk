@@ -20,9 +20,10 @@ def make_setup(
     start: Start | None = None,
     strategy_hash: str = "h1",
     spec: ContractSpec = NQ,
+    day_start: float | None = None,
 ) -> Setup:
     """A runner setup (NQ by default), armed with strategy hash "h1" and an 80% safety margin."""
     armed = Armed(
         "Sim101", "strategies/orb.py", "h1", "lucid-test-50k", spec.symbol, mode, phase, ARMED_AT
     )
-    return Setup(armed, strategy_hash, rules, spec, 80.0, start)
+    return Setup(armed, strategy_hash, rules, spec, 80.0, start, day_start)

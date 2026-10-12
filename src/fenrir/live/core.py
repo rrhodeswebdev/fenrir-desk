@@ -41,6 +41,9 @@ class Setup:
     spec: ContractSpec
     safety_margin_pct: float
     start: Start | None = None  # ignored for dry runs, which start fresh (DEC-4a)
+    # NinjaTrader balance at today's session open, absolute $; 21.5 or 22.2 supplies it.
+    # Sim and live take no new brackets while it is None. Ignored for dry runs.
+    day_start: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +71,11 @@ Step = tuple[RunnerState, tuple[Log, ...]]
 
 
 def start_account(
-    rules: AccountRules, phase: Phase, day: date, start: Start | None
+    rules: AccountRules,
+    phase: Phase,
+    day: date,
+    start: Start | None,
+    day_start: float | None = None,
 ) -> AccountState:
     """State relative to phase start; with NinjaTrader balances the floor trails their peak."""
     fresh = initial_state(rules, phase, day)
@@ -83,10 +90,8 @@ def start_account(
     return replace(
         fresh,
         balance=balance,
-        # shortcut: treats the balance at start as today's opening balance, which understates
-        # the DLL room after a losing morning and can unlock a higher funded scaling tier after
-        # a winning one; 21.5 or 22.2 must restore it before a sim/live order is sent
-        day_start_balance=balance,
+        # without day_start the balance now stands in; brackets are blocked until it arrives
+        day_start_balance=balance if day_start is None else day_start - start.phase_start,
         peak=peak,
         floor=max(fresh.floor, level - dd.amount),
     )
@@ -95,9 +100,9 @@ def start_account(
 def start(setup: Setup, now: datetime) -> Step:
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
-    acct = start_account(setup.rules, a.phase, trading_day(now), begin)
-    # shortcut: session start = balance at runner start; 21.5's warm-up restores today's fills
-    s = RunnerState(setup, acct, FLAT, (), (), acct.balance, acct.floor)
+    acct = start_account(setup.rules, a.phase, trading_day(now), begin, setup.day_start)
+    # shortcut: session floor = floor at runner start; 21.5's warm-up replays today's fills
+    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, acct.floor)
     if setup.strategy_hash != a.strategy_hash:
         return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
     if a.mode != "dry" and setup.start is None:
@@ -253,6 +258,8 @@ def _block(s: RunnerState, a: Action, pending: bool) -> str | None:
     flat_at = min(rules.session.flat_by, ADDON_FLATTEN)
     if at_or_after(bar.ts + MINUTE, flat_at, rules.session.tz):
         return f"at or after {flat_at} flat-by: no new entries"
+    if s.setup.armed.mode != "dry" and s.setup.day_start is None:
+        return "today's opening balance unknown"
     # 21.3 (#77) adds the roll-window block and 21.4 (#78) the stale-data pause here.
     # 22.2 swaps s.acct for the stricter of it and NinjaTrader's figures (DEC-4b).
     return check(s.acct, rules, a, s.setup.spec, entry_price=bar.close, held_minis=0.0)

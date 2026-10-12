@@ -255,3 +255,14 @@ def test_a_planted_rules_file_is_refused_never_followed(env, tmp_path, kind):
     for r in (rows, got.text, put.text):
         assert "secret-0001" not in str(r)
     assert secret.read_text() == "token: [secret-0001\n"
+
+
+def test_put_never_writes_through_a_planted_temp_link(env, tmp_path):
+    client, rules_dir = env
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    (rules_dir / "lucid" / ".flex-50k.yaml.tmp").symlink_to(victim)
+    rules = flex(client) | {"verified_on": date.today().isoformat()}
+    assert client.put(f"/api/rules/{AID}", json=rules, headers=WRITE).status_code == 200
+    assert victim.read_text() == "keep me"
+    assert flex(client)["verified_on"] == date.today().isoformat()

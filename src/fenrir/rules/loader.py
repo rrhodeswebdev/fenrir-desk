@@ -5,7 +5,7 @@ from pathlib import Path
 
 import yaml
 
-from fenrir.files import read_regular
+from fenrir.files import read_regular, refuse_symlink
 from fenrir.rules.schema import AccountRules
 
 RULES_MAX = 1 << 20
@@ -67,7 +67,13 @@ def parse_account(text: str, aid: str, path: Path) -> AccountRules:
 
 
 def list_accounts(rules_dir: Path) -> tuple[str, ...]:
-    return tuple(sorted(f"{p.parent.name}-{p.stem}" for p in rules_dir.glob("*/*.yaml")))
+    """ValueError naming `rules_dir` or a `<firm>/` dir that is a symlink: the terminal can
+    swap either for a link to a dir only the root server may read (DEC-1)."""
+    refuse_symlink(rules_dir)
+    paths = list(rules_dir.glob("*/*.yaml"))
+    for firm in {p.parent for p in paths}:
+        refuse_symlink(firm)
+    return tuple(sorted(f"{p.parent.name}-{p.stem}" for p in paths))
 
 
 def dump_account(rules: AccountRules) -> str:

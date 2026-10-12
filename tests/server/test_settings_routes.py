@@ -59,7 +59,7 @@ def test_get_masks_secrets_and_reads_the_file(env):
         "nt_token": "••••0002",
         "holdout_months": 6,
         "safety_margin_pct": 80.0,
-        "stale_seconds": 90,
+        "stale_seconds": 180,
         "repo_env_secrets": False,
     }
     assert LSE not in r.text and TOKEN not in r.text
@@ -199,7 +199,7 @@ def test_import_fills_only_empty_secrets_and_never_returns_them(env, repo_env):
     r = client.post(IMPORT, headers=WRITE)
     assert r.status_code == 200 and new_token not in r.text and "repo-lse" not in r.text
     assert r.json()["imported"] == ["nt_token"]
-    assert r.json()["nt_token"] == "••••9999" and r.json()["stale_seconds"] == 90
+    assert r.json()["nt_token"] == "••••9999" and r.json()["stale_seconds"] == 180
     saved = parse_env_text(env_file.read_text())
     assert saved["FENRIR_NT_TOKEN"] == new_token and saved["FENRIR_LSE_API_KEY"] == LSE
     assert "FENRIR_STALE_SECONDS" not in saved  # only secrets are imported
@@ -246,6 +246,19 @@ def test_accounts_default_for_every_rules_account(env):
     assert r.status_code == 200
     assert set(r.json()) == set(list_accounts(RULES))
     assert r.json()[AID] == {"eval_price": 0.0, "dll_on": False}
+
+
+def test_accounts_with_a_symlinked_rules_dir_is_500_listing_nothing(tmp_path, env):
+    client, _, _ = env
+    linked = tmp_path / "linked"
+    linked.symlink_to(RULES, target_is_directory=True)
+    client.app.state.settings = Settings(rules_dir=linked, data_dir=tmp_path / "data")
+    detail = {"detail": f"{linked} is a symlink; not reading it"}
+    for r in (
+        client.get("/api/settings/accounts"),
+        client.put("/api/settings/accounts", json={}, headers=WRITE),
+    ):
+        assert (r.status_code, r.json()) == (500, detail)
 
 
 def test_accounts_put_merges(env):

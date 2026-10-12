@@ -46,7 +46,7 @@ class SettingsUpdate(BaseModel):
     nt_token: str = ""
     holdout_months: int = Field(0, ge=0)
     safety_margin_pct: float = Field(80.0, gt=0, le=100)
-    stale_seconds: int = Field(90, gt=0)
+    stale_seconds: int = Field(180, gt=0)
 
 
 def view(env: Mapping[str, str], repo_env_secrets: bool) -> dict:
@@ -207,8 +207,15 @@ def _choices(data_dir: Path) -> dict[str, AccountChoice]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+def _accounts(rules_dir: Path) -> tuple[str, ...]:
+    try:
+        return list_accounts(rules_dir)
+    except ValueError as e:  # a symlinked rules/ or firm dir: the message names it
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 def _accounts_view(rules_dir: Path, choices: Mapping[str, AccountChoice]) -> dict:
-    return {aid: choices.get(aid, AccountChoice()).model_dump() for aid in list_accounts(rules_dir)}
+    return {aid: choices.get(aid, AccountChoice()).model_dump() for aid in _accounts(rules_dir)}
 
 
 @router.get("/accounts")
@@ -225,7 +232,7 @@ async def put_accounts(request: Request):
         return _invalid(
             "Accounts must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
-    known = set(list_accounts(s.rules_dir))
+    known = set(_accounts(s.rules_dir))
     current = _choices(s.data_dir)
     merged, errors = dict(current), []
     for aid, patch in data.items():

@@ -19,6 +19,11 @@ WS = "ws://localhost:8000/ws/jobs"
 GOOD = {"cookie": f"{SESSION_COOKIE}={KEY}", "origin": BASE}
 
 
+def _settings(tmp_path: Path) -> Settings:
+    # the lifespan starts the live hub: never let it near the repo's data/private/fenrir.db
+    return Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+
+
 def wait_for(cond, timeout: float = 10.0) -> None:
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -30,7 +35,7 @@ def wait_for(cond, timeout: float = 10.0) -> None:
 
 @pytest.fixture
 def app_runner(tmp_path):
-    app = create_app(Settings(data_dir=tmp_path / "data"), KEY, "c" * 22, None, port=8000)
+    app = create_app(_settings(tmp_path), KEY, "c" * 22, None, port=8000)
     app.state.jobs = runner = JobRunner(app.state.settings, child=FAKE, secret=KEY)
     return app, runner
 
@@ -80,7 +85,7 @@ class BurstRunner:
 
 
 def test_a_burst_of_changes_sends_only_the_latest(tmp_path):
-    app = create_app(Settings(data_dir=tmp_path / "data"), KEY, "c" * 22, None, port=8000)
+    app = create_app(_settings(tmp_path), KEY, "c" * 22, None, port=8000)
     app.state.jobs = runner = BurstRunner()
     with TestClient(app, base_url=BASE) as client:
         with client.websocket_connect(WS, headers=GOOD) as ws:

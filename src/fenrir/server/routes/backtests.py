@@ -78,8 +78,9 @@ def options(request: Request) -> dict[str, list[str]]:
     settings = request.app.state.settings
     try:
         refuse_symlink(settings.strategies_dir)  # the terminal can swap it for a link (DEC-1)
+        accounts = list_accounts(settings.rules_dir)  # refuses a symlinked rules/ or firm dir
         contracts = [s.symbol for s in load_instruments().specs]
-    except ValueError as e:  # that link, or a planted instruments.yaml: the message names it
+    except ValueError as e:  # a link, or a planted instruments.yaml: the message names it
         raise HTTPException(status_code=500, detail=str(e)) from e
     return {
         # file names only: reading MARKET would execute the file (DEC-1); escaped, as POST
@@ -87,7 +88,7 @@ def options(request: Request) -> dict[str, list[str]]:
         "strategies": sorted(
             glob.escape(cwd_relative(p)) for p in settings.strategies_dir.glob("*.py")
         ),
-        "accounts": list_accounts(settings.rules_dir),
+        "accounts": accounts,
         "contracts": contracts,
     }
 

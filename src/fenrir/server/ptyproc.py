@@ -38,6 +38,22 @@ def _set_size(fd: int, cols: int, rows: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def _session_pids(sid: int) -> list[int]:
+    """Every process still in session `sid`: the shell's jobs, which job control puts in their
+    own process groups, out of `killpg`'s reach."""
+    if os.path.isdir("/proc"):  # Linux, the image
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    else:  # macOS
+        out = subprocess.run(["ps", "-A", "-o", "pid="], capture_output=True, text=True).stdout
+        pids = [int(p) for p in out.split()]
+    found = []
+    for p in pids:
+        with contextlib.suppress(OSError):  # gone, or not ours to ask about
+            if os.getsid(p) == sid:
+                found.append(p)
+    return found
+
+
 class PosixPty:
     def __init__(self, argv: Sequence[str], env: Mapping[str, str], as_user: dict[str, Any]):
         master, slave = pty.openpty()
@@ -88,12 +104,16 @@ class PosixPty:
         _set_size(self._fd, cols, rows)
 
     async def close(self) -> None:
-        """Hang up, let the shell SIGHUP its jobs, then kill its whole process group."""
+        """Hang up, let the shell SIGHUP its jobs, then kill every process in its session; only
+        a job that called `setsid` escapes."""
         os.close(self._fd)
         with contextlib.suppress(subprocess.TimeoutExpired):
             await asyncio.to_thread(self._proc.wait, HANGUP_GRACE)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._proc.pid, signal.SIGKILL)
+        for pid in await asyncio.to_thread(_session_pids, self._proc.pid):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(pid, signal.SIGKILL)
         await asyncio.to_thread(self._proc.wait)
 
 
@@ -101,7 +121,12 @@ class WindowsPty:
     def __init__(self, argv: Sequence[str], env: Mapping[str, str], as_user: dict[str, Any]):
         from winpty import PtyProcess
 
-        self._proc = PtyProcess.spawn(list(argv), env=dict(env), dimensions=(ROWS, COLS))
+        try:
+            self._proc = PtyProcess.spawn(list(argv), env=dict(env), dimensions=(ROWS, COLS))
+        except OSError:
+            raise
+        except Exception as e:  # pywinpty's own errors; spawn promises OSError
+            raise OSError(str(e)) from e
 
     async def read(self) -> bytes:
         try:
@@ -110,7 +135,7 @@ class WindowsPty:
             return b""
 
     async def write(self, data: bytes) -> None:
-        self._proc.write(data.decode())
+        await asyncio.to_thread(self._proc.write, data.decode())
 
     def resize(self, cols: int, rows: int) -> None:
         self._proc.setwinsize(rows, cols)

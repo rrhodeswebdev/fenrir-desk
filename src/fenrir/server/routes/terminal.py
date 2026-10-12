@@ -2,8 +2,8 @@
 
 Client → server text frames (`terminal.parse_message`; anything else is ignored); server →
 client binary frames of raw PTY output. The socket closes 1000 when the shell exits, 1009 when
-more than `MAX_PENDING` bytes of input wait for the shell to read them, and 1011 after a
-one-line output frame when the shell cannot start.
+one input frame, or the input queued behind a write the shell is not reading, passes
+`MAX_PENDING` bytes, and 1011 after a one-line output frame when the shell cannot start.
 """
 
 import asyncio
@@ -12,7 +12,9 @@ import os
 import subprocess
 import sys
 
-from fastapi import APIRouter, WebSocket
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnected
+from uvicorn.protocols.utils import ClientDisconnected
 
 from fenrir.server import ptyproc
 from fenrir.server.auth import check_ws
@@ -24,6 +26,7 @@ router = APIRouter()
 MAX_PENDING = 1 << 20  # bytes of input the shell has not taken yet
 
 Pty = ptyproc.PosixPty | ptyproc.WindowsPty
+GONE = (WebSocketDisconnect, WebSocketDisconnected, ClientDisconnected)  # client left mid-send
 
 
 async def _output(ws: WebSocket, pty: Pty) -> None:
@@ -93,5 +96,8 @@ async def terminal_ws(ws: WebSocket) -> None:
     finally:
         for task in tasks:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)  # a send to a gone client raises
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         await pty.close()
+        for e in results:  # a send to a gone client raises; anything else is a bug
+            if isinstance(e, Exception) and not isinstance(e, GONE):
+                log.error("terminal session failed", exc_info=e)

@@ -1,8 +1,10 @@
 """`WS /ws/terminal` end to end: a real uvicorn server and a real PTY running `/bin/sh`."""
 
+import contextlib
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -112,12 +114,17 @@ def test_exit_closes_the_socket(port):
         assert e.value.rcvd.code == 1000
 
 
-def test_disconnect_kills_the_shell_and_its_jobs(port):
+@pytest.mark.parametrize("name", ["bash", "zsh", "dash"])
+def test_disconnect_kills_the_shell_and_its_jobs(port, monkeypatch, name):
+    # job control puts each job in its own process group; only bash passes SIGHUP on to them
+    path = shutil.which(name) or pytest.skip(f"{name} is not installed")
+    monkeypatch.setenv("SHELL", path)
     with open_term(port) as ws:
-        send(ws, "sleep 1000 & echo pids=$$,$!\n")
-        pids = re.search(rb"pids=(\d+),(\d+)", read_until(ws, rb"pids=\d+,\d+"))
-        shell, job = map(int, pids.groups())
-    assert gone(shell) and gone(job)
+        send(ws, "sleep 1000 & echo job=$!\n")  # `$!` ends each line: bash's history expansion
+        send(ws, "nohup sleep 1000 >/dev/null 2>&1 & echo pids=$$,$!\n")
+        out = read_until(ws, rb"pids=\d+,\d+")
+        pids = map(int, re.search(rb"job=(\d+).*pids=(\d+),(\d+)", out, re.S).groups())
+    assert all(map(gone, pids))
 
 
 def test_disconnect_with_unread_input_kills_the_shell(port):
@@ -132,10 +139,13 @@ def test_disconnect_with_unread_input_kills_the_shell(port):
 def test_too_much_unread_input_closes_1009(port):
     with open_term(port) as ws:
         send(ws, "exec sleep 1000\n")
-        send(ws, "x" * (terminal.MAX_PENDING + 1))
         with pytest.raises(ConnectionClosed) as e:
-            while True:
-                ws.recv(timeout=5)
+            for _ in range(terminal.MAX_PENDING // 65536 + 4):  # small frames queue behind
+                send(ws, ("x" * 63 + "\n") * 1024)  # whole lines: the tty blocks, not drops
+                # stop at the close: unread frames would reset the TCP and lose its code
+                with contextlib.suppress(TimeoutError):
+                    while True:
+                        ws.recv(timeout=0.1)
         assert e.value.rcvd.code == 1009
 
 
@@ -204,3 +214,20 @@ def test_failed_controlling_tty_closes_with_a_message(port, monkeypatch):
         with pytest.raises(ConnectionClosed) as e:
             ws.recv(timeout=5)
         assert e.value.rcvd.code == 1011
+
+
+def test_unexpected_task_error_is_logged(port, monkeypatch, caplog):
+    spawn = ptyproc.spawn
+
+    def broken_resize(argv, env, as_user):
+        pty = spawn(argv, env, as_user)
+        pty.resize = lambda cols, rows: (_ for _ in ()).throw(OSError("resize broke"))
+        return pty
+
+    monkeypatch.setattr(ptyproc, "spawn", broken_resize)
+    with open_term(port) as ws:
+        ws.send(json.dumps({"type": "resize", "cols": 10, "rows": 10}))
+        with pytest.raises(ConnectionClosed):
+            while True:
+                ws.recv(timeout=5)
+    assert "terminal session failed" in caplog.text and "resize broke" in caplog.text

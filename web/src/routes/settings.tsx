@@ -127,7 +127,7 @@ function SettingsForm({ server }: { server: Settings }) {
   const secret = (k: SecretKey) =>
     field(k, SECRET_NAMES[k], {
       help: 'Masked. Type to replace it; empty clears it.',
-      caution: draft?.[k] === '' ? `Clears the ${SECRET_NAMES[k]} on save.` : undefined,
+      caution: draft?.[k] === '' && server[k] !== '' ? `Clears the ${SECRET_NAMES[k]} on save.` : undefined,
       input: (p) => (
         // new-password: browsers ignore "off" on a password field and would autofill a saved login
         <Input {...p} type={draft?.[k] === undefined ? 'text' : 'password'} autoComplete="new-password" spellCheck={false} value={value(k)} onFocus={(e) => e.target.select()} onChange={(e) => set(k, e.target.value)} />

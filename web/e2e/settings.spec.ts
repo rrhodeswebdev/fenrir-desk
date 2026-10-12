@@ -36,9 +36,10 @@ test('a secret round trip: the PUT sends only the edited key, and after a reload
   await page.goto('/settings')
   const form = page.getByRole('region', { name: 'Secrets and limits' })
   const field = form.getByLabel('NinjaTrader token')
-  await field.fill('x') // the e2e secrets file starts with no token, so its mask is empty
+  // the e2e secrets file starts with no token: emptying it again clears nothing, so no warning
+  await field.fill('x')
   await field.fill('')
-  await expect(field).toHaveAccessibleDescription('Clears the NinjaTrader token on save.')
+  await expect(field).toHaveAccessibleDescription('Masked. Type to replace it; empty clears it.')
   await field.fill(token)
   await expect(field).toHaveAttribute('type', 'password')
   const put = page.waitForRequest((r) => r.method() === 'PUT' && r.url().endsWith('/api/settings'))
@@ -50,6 +51,8 @@ test('a secret round trip: the PUT sends only the edited key, and after a reload
   await expect(field).toHaveValue('••••WXYZ')
   await expect(field).toHaveAttribute('type', 'text')
   expect(await page.content()).not.toContain(token)
+  await field.fill('')
+  await expect(field).toHaveAccessibleDescription('Clears the NinjaTrader token on save.')
 })
 
 test('an account price and daily loss limit save and survive a reload', async ({ page }) => {

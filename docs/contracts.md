@@ -451,6 +451,30 @@ def reconcile(expected: ExpectedBook, positions: Sequence[NtPosition], orders: S
 
 SQLite at `<private_dir>/fenrir.db` (DEC-1), owned by `fenrir.live.journal` (plan 21): tables `journal(id, ts, account, kind, payload_json)` with `kind ∈ {"bar","action","rejection","fill","alert","halt","peak"}` (`peak` added by plan 22.2: payload `{peak, ts}`, written each time the runner raises an account's peak; on start the runner uses the highest of `armed.peak_balance` and the journalled peaks, and halts with "confirm balances" when an `end_of_day` session close passed while it was down), and `armed(account PRIMARY KEY, strategy_path, strategy_hash, rules_account, contract, mode, phase, armed_at)` with `phase ∈ {"evaluation","funded"}`; plan 23.3 adds `dll_on`, `rules_hash`, `instruments_hash`, `start_balance`, `peak_balance` with a guarded migration (DEC-4a/d). The runner halts an account whose strategy, rules or `instruments.yaml` hash differs from `armed`, or whose `dll_on` differs from `accounts.yaml`. `fenrir.live.journal.open_db(path: Path) -> sqlite3.Connection` creates both tables if missing. `src/fenrir/live/arming.py` is created by plan 21 (`Armed`, `list_armed`, `insert_armed`, `delete_armed`); plan 23 adds `ArmRequest`, `Refusal`, `decide` to that file. The runner re-reads `armed` on every closed bar and halts an account whose strategy file hash ≠ `armed.strategy_hash`.
 
+Runner core (plan 21.2), `fenrir.live.core`, pure; the shell journals each `Log` with `journal.write`:
+
+```python
+@dataclass(frozen=True, slots=True)
+class Start: phase_start: float; peak: float; balance: float   # NinjaTrader balances, absolute $ (DEC-4a)
+@dataclass(frozen=True, slots=True)
+class Setup: armed: Armed; strategy_hash: str; rules: AccountRules; spec: ContractSpec; safety_margin_pct: float; start: Start | None = None
+    # strategy_hash = file_hash on disk now; rules = with_dll applied; start ignored for dry runs (they start fresh)
+@dataclass(frozen=True, slots=True)
+class Log: kind: str; payload: Mapping[str, Any]     # kind ∈ journal KINDS
+def start(setup, now) -> (RunnerState, effects)      # halts (open-ended) on a strategy hash mismatch, or sim/live without start
+def start_account(rules, phase, day, start: Start | None) -> AccountState   # relative to phase start; floor trails start.peak like drawdown's trail
+def on_bar(s, bar) -> (RunnerState, effects)         # appends to the ≤500-bar window and today's equity, then the safety check
+def ctx(s) -> Ctx                                     # what step sees; step runs in a child (DEC-1), never in the core
+def decide(s, actions: Sequence[Action]) -> (RunnerState, effects)   # "bar" {**bar, actions: n}, then per action
+    # "action" {type, **fields, mode, sent: false} or "rejection" {action: {type, **fields}, reason}
+def step_failed(s, error: str) -> (RunnerState, effects)   # "bar" (actions 0) + open-ended "halt"
+def halt(s, reason) -> (RunnerState, effects)              # open-ended; "halt" {reason, kind, until: ISO day | null}
+def safety_level(s) -> float                               # session.safety (DEC-4c)
+def account_status(s) -> dict                              # one AccountStatus
+```
+
+A Bracket is rejected when halted, after another Bracket accepted on the same bar (Flatten/Cancel clear that), while in a position, when the bar closes at or after `min(session.flat_by, "16:40")`, or when `fenrir.rules.pretrade.check` rejects it at the bar's close; Flatten and Cancel always pass. These are the backtest's decisions. The safety margin day-halts (`halt_kind` "safety", until the current trading day) when close-mark equity is at or below `safety_level`.
+
 - `GET /api/live/status` → `{lse: {connected, last_bar_ts}, nt: {connected, last_heartbeat}, drift: {ok: boolean, ticks: number|null}, accounts: AccountStatus[]}`, `AccountStatus = {account, mode: "dry"|"sim"|"live", phase: "evaluation"|"funded", strategy, rules_account, contract, halted: boolean, halt_kind: "safety"|"reconcile"|"stale"|"drift"|"breach"|null, halt_reason: string|null, balance, today_pnl, limits: {drawdown_remaining, drawdown_max, daily_loss_remaining: number|null, daily_loss_max: number|null, max_minis, held_minis}, position: {qty, entry, stop, target}, session: {start: number (equity at session start, relative to phase start), floor: number, target: number|null, safety: number (equity level of today's safety margin, recomputed each bar: the higher of start − margin × daily loss limit (when on) and floor + (1 − margin) × (start − floor at session start); DEC-4c), equity: [ts, number][] (one point per closed bar this trading day, close mark), fills: string[] (ISO ts of today's fills)}}`.
   - `halted` is true for any halt and for a stale or drift pause (the brief `unreconciled` pause while connecting to NinjaTrader appears only in `halt_reason`); `halt_kind` names it (`safety` margin or daily loss limit day halt, `reconcile` mismatch, `stale` feed pause, `drift` LSE-vs-NinjaTrader pause, `breach`), and is null for other halts (strategy error, strategy file changed, mode mismatch, cannot start). Plan 21 sets `safety`, `stale`, `breach`; plan 22 sets `reconcile`, `drift` and fills `drift` (`ticks` = largest last entry-fill distance from the LSE close; plan 21 reports `{ok: true, ticks: null}`).
   - An account that cannot start has `balance`, `today_pnl`, `limits`, `position` and `session` = null; `halt_reason` says why.

@@ -55,6 +55,8 @@ def _bracket(qty: bytes) -> bytes:
         (b"not json\n", "not a strategy reply"),
         (b"[1]\n", "not a strategy reply"),
         (_bracket(b"NaN"), "NaN"),
+        (_bracket(b"1e999"), "not an action"),  # parses as inf
+        (_bracket(b"1" + b"0" * 400), "not an action"),  # float() overflows
         (b'{"actions": [{"type": "Order"}]}', "not an action"),
         (b'{"actions": [{"type": "Flatten", "now": true}]}', "not an action"),
         (_bracket(b'"1"'), "not an action"),

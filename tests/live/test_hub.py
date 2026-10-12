@@ -6,7 +6,7 @@ import pytest
 from live_helpers import ARMED_AT
 
 from fenrir.core.bars import Bar
-from fenrir.live import arming, journal
+from fenrir.live import arming, core, journal
 from fenrir.live.arming import Armed
 from fenrir.live.service import LiveHub, run_bars
 from fenrir.settings import Settings
@@ -203,3 +203,46 @@ async def test_run_bars_feeds_the_hub_and_connects_on_the_first_bar(hub, conn, a
         assert kinds(conn) == ["bar", "action"]
     finally:
         task.cancel()
+
+
+async def test_an_overflowing_number_halts_only_that_account(hub, conn, armed, tmp_path):
+    huge = strategy(tmp_path, ALWAYS.replace('"long", 1,', '"long", 10**400,'), "huge")
+    arming.insert_armed(conn, armed)
+    arming.insert_armed(
+        conn,
+        replace(armed, account="Sim102", strategy_path=str(huge), strategy_hash=file_hash(huge)),
+    )
+    await hub.handle_bar(bar(T0))
+    assert kinds(conn, "Sim102") == ["bar", "halt"]
+    assert "not an action" in hub.states["Sim102"].halted
+    assert kinds(conn) == ["bar", "action"]
+
+
+async def test_an_unexpected_error_in_one_account_spares_the_others(hub, conn, armed, monkeypatch):
+    on_bar = core.on_bar
+
+    def failing(s, b):
+        if s.setup.armed.account == "Sim101":
+            raise OverflowError("boom")
+        return on_bar(s, b)
+
+    monkeypatch.setattr(core, "on_bar", failing)
+    arming.insert_armed(conn, armed)  # Sim101 runs first: armed rows are in account order
+    arming.insert_armed(conn, replace(armed, account="Sim102"))
+    await hub.handle_bar(bar(T0))
+    assert kinds(conn) == ["halt"]
+    assert hub.states["Sim101"].halted == "live runner error: OverflowError: boom"
+    assert "Sim101" not in hub.children
+    assert kinds(conn, "Sim102") == ["bar", "action"]
+
+
+async def test_isolation_refusal_halts_without_a_child(hub, conn, armed, monkeypatch):
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
+    arming.insert_armed(conn, armed)
+    await hub.tick(T0)
+    assert kinds(conn) == ["halt"]
+    reason = hub.states["Sim101"].halted
+    assert reason.startswith("cannot load the strategy: refusing to run strategy code")
+    assert "FENRIR_PTY_USER is unset" in reason  # the shared isolation check's reasons
+    assert hub.children == {}

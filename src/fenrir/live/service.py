@@ -11,6 +11,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import signal
 import sqlite3
@@ -55,6 +56,14 @@ def _no_constant(name: str) -> None:
     raise ValueError(f"{name} is not JSON")  # NaN cannot be journalled or served
 
 
+def _finite(*numbers: float) -> bool:
+    """Each a finite float: 1e999 parses as inf, and 10**400 overflows float()."""
+    try:
+        return all(math.isfinite(float(n)) for n in numbers)
+    except OverflowError:
+        return False
+
+
 def _action(item: Any) -> Action:
     match item:
         case {
@@ -64,7 +73,7 @@ def _action(item: Any) -> Action:
             "stop": int() | float() as stop,
             "target": int() | float() as target,
             **rest,
-        } if not rest:
+        } if not rest and _finite(qty, stop, target):
             return Bracket(side, qty, stop, target)  # core.decide vets side and qty
         case {"type": "Flatten", **rest} if not rest:
             return Flatten()
@@ -142,6 +151,7 @@ class LiveHub:
 
     def start(self) -> None:
         """Start the clock ticks; call on the event loop. Bars come from `run_bars` (04.2)."""
+        # shortcut: no bar stream yet; when 21.8 wires stream_bars, add run_bars to _tasks here
         self._tasks.append(asyncio.create_task(run_ticks(self)))
 
     async def stop(self) -> None:
@@ -170,12 +180,21 @@ class LiveHub:
                 # a running account means _start loaded the instruments
                 if bar.contract != front_month(self.instruments, s.setup.spec.series, day):
                     continue
-                out: tuple[Log, ...] = ()
-                if _hash(s.setup.armed.strategy_path) != s.setup.armed.strategy_hash:
-                    s, out = core.halt(s, "strategy file changed since arming; re-arm")
-                s, more = core.on_bar(s, bar)
-                s, last = await self._step(account, s)
-                self._apply(account, s, out + more + last)
+                try:
+                    self._apply(account, *await self._bar(account, s, bar))
+                except Exception as e:  # one account's failure must not stop the others' bar
+                    log.exception("live account %s failed on a bar", account)
+                    await self._kill(account)
+                    error = f"{type(e).__name__}: {e}"
+                    self._apply(account, *core.halt(s, f"live runner error: {error}"))
+
+    async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
+        out: tuple[Log, ...] = ()
+        if _hash(s.setup.armed.strategy_path) != s.setup.armed.strategy_hash:
+            s, out = core.halt(s, "strategy file changed since arming; re-arm")
+        s, more = core.on_bar(s, bar)
+        s, last = await self._step(account, s)
+        return s, out + more + last
 
     def status(self) -> dict[str, Any]:
         """The `GET /api/live/status` body (plan 22 fills `nt` and `drift`)."""

@@ -83,8 +83,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        await app.state.live.stop()
-        app.state.jobs.stop()
+        try:
+            await app.state.live.stop()
+        finally:
+            app.state.jobs.stop()
 
 
 def create_app(

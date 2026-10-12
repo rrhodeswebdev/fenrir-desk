@@ -97,7 +97,7 @@ class RunnerState:
     started: bool = True  # False: start refused, so the figures are not the account's
     stale: str | None = None  # stale-data pause: no new entries until the next bar
     working: Working | None = None  # no new entries while an entry is working
-    exiting: str | None = None  # client_id of the runner's own Flatten, until flat
+    exiting: str | None = None  # client_id of the Flatten out (runner or step), until flat
     drift: str | None = None  # entry-fill drift pause: no new entries until resolved (22.3)
     fills: tuple[datetime, ...] = ()  # this trading day's fill times
     opened: datetime | None = None  # first fill of the open position
@@ -221,6 +221,7 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         return s, (*out, Log("alert", {"message": "ignored a fill with qty 0"}))
     pos, w, spec = s.position, s.working, s.setup.spec
     rest = pos.qty + qty
+    flipped = rest != 0 and pos.qty != 0 and (rest > 0) != (pos.qty > 0)
     # an entry fill carries its bracket's client_id
     mine = pos.qty == 0 and w is not None and fill["client_id"] == w.client_id
     opening = pos.qty == 0 or (pos.qty > 0) == (qty > 0)
@@ -246,14 +247,14 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         position=position,
         fills=(*s.fills, ts),
         working=None if mine else w,
-        exiting=None if rest == 0 else s.exiting,
+        # an over-close that reversed the position ends that Flatten: the reversal gets its own
+        exiting=None if rest == 0 or flipped else s.exiting,
         held=s.held or (None if opening else (pos, before)),
     )
     s, more = _event(s, Fill(ts, qty, price, commission, realized))
     out += more
     # a late fill from a closed day books into today, or the next bar would close that day again
     s = replace(s, acct=replace(s.acct, day=max(s.acct.day, today)))
-    flipped = rest != 0 and pos.qty != 0 and (rest > 0) != (pos.qty > 0)
     if rest == 0 or flipped:  # the open trade closed
         same_bar = s.opened is not None and _minute(s.opened) == _minute(ts)
         trade = TradeClosed(s.opened or ts, ts, s.acct.balance - s.opened_balance, same_bar)
@@ -270,6 +271,9 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
             )
             s = replace(s, drift=reason)
             out += (Log("alert", {"message": reason}),)
+    if s.position.qty and s.position.stop is None and not s.exiting:  # no broker-side stop known
+        s, more = _flatten(s, ts, "f", f"position {s.position.qty} has no known stop")
+        out += more
     return s, out
 
 
@@ -286,11 +290,13 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
     return s, (Log("alert", {"message": f"send {client_id} failed: {error}"}),)
 
 
-def client_id(account: str, ts: datetime, suffix: str) -> str:
+def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:
     """24 chars and deterministic, so a retry or a restart that re-decides the bar is deduped by
-    the add-on. `ts` is the bar's open; `suffix` the action's index, or "x" for the runner's own
-    Flatten."""
-    tag = hashlib.sha256(f"{account}\0{suffix}".encode()).hexdigest()[:13]
+    the add-on. `ts` is the bar's open (a fill's time for "f"); `suffix` the action's index, or
+    "x" / "f" for the runner's own Flatten on a bar / a fill. The action's type is hashed in, so a
+    re-decided bar whose list changed never gives a Flatten a Bracket's id (a false duplicate)."""
+    key = f"{account}\0{suffix}\0{type(action).__name__}"
+    tag = hashlib.sha256(key.encode()).hexdigest()[:13]
     return f"{ts.astimezone(UTC):%y%m%d%H%M}-{tag}"
 
 
@@ -333,16 +339,20 @@ def ctx(s: RunnerState) -> Ctx:
     )
 
 
-def decide(s: RunnerState, actions: Sequence[Action]) -> Step:
+def decide(s: RunnerState, actions: Sequence[Action], now: datetime, stale_seconds: int) -> Step:
     """Pre-trade check every action `step` returned for the current bar; sim and live send each
     accepted one (`Send` after its "action" log), dry runs only log it.
 
-    `actions` are Action values: the shell parses the child's JSON into them (DEC-1).
+    `actions` are Action values: the shell parses the child's JSON into them (DEC-1). `now` is
+    when they go out: a bar that closed over `stale_seconds` ago (late or replayed) takes no entry.
     """
+    age = (now - s.last_seen).total_seconds()
+    late = f"bar closed {age:.0f}s ago (over {stale_seconds}s): no entry at its close"
+    old = late if age > stale_seconds else None
     decided: list[tuple[Action, str | None]] = []
     pending = None  # index of a bracket accepted earlier this bar, as the backtest's `pending`
     for a in actions:
-        reason = _block(s, a, pending is not None)
+        reason = _block(s, a, pending is not None, old)
         if isinstance(a, (Flatten, Cancel)) and pending is not None:
             # the backtest drops that bracket before it is ever placed
             decided[pending] = (decided[pending][0], f"replaced by a {type(a).__name__} this bar")
@@ -350,16 +360,23 @@ def decide(s: RunnerState, actions: Sequence[Action]) -> Step:
         elif isinstance(a, Bracket) and reason is None:
             pending = len(decided)
         decided.append((a, reason))
-    bar = s.bars[-1]
+    bar, mode = s.bars[-1], s.setup.armed.mode
     out: tuple[Log | Send, ...] = (Log("bar", {**asdict(bar), "actions": len(actions)}),)
     for i, (a, r) in enumerate(decided):
         if r:
             out += (Log("rejection", {"action": _payload(a), "reason": r}),)
             continue
-        cid = client_id(s.setup.armed.account, bar.ts, str(i))
+        if isinstance(a, Flatten) and (s.position.qty == 0 or s.exiting):
+            # one /flatten at a time, and none while flat (the backtest's Flatten is a no-op then)
+            why = f"Flatten {s.exiting} already working" if s.exiting else "flat: nothing to close"
+            out += (Log("action", {**_payload(a), "mode": mode, "sent": False, "reason": why}),)
+            continue
+        cid = client_id(s.setup.armed.account, bar.ts, str(i), a)
         out += _send(s, a, cid)
-        if isinstance(a, Bracket) and s.setup.armed.mode != "dry":
+        if mode != "dry" and isinstance(a, Bracket):
             s = replace(s, working=Working(cid, a, bar.close))
+        elif mode != "dry" and isinstance(a, Flatten):
+            s = replace(s, exiting=cid)
     return s, out
 
 
@@ -473,7 +490,8 @@ def _late(s: RunnerState, bar: Bar) -> str | None:
 
 def _exit(s: RunnerState, bar: Bar) -> Step:
     """Flatten once while holding past flat-by (the backtest's `_flat_time`), after the daily loss
-    limit (its `_dll_exit`) or a breach; the add-on also flattens at 16:40 on its own."""
+    limit (its `_dll_exit`), after a breach, or with no known stop; the add-on also flattens at
+    16:40 on its own."""
     if s.position.qty == 0 or s.exiting:
         return s, ()
     if late := _late(s, bar):
@@ -482,9 +500,16 @@ def _exit(s: RunnerState, bar: Bar) -> Step:
         why = "daily loss limit hit"
     elif s.halt_kind == "breach" and s.halted:
         why = s.halted
+    elif s.position.stop is None:
+        why = f"position {s.position.qty} has no known stop"
     else:
         return s, ()
-    cid = client_id(s.setup.armed.account, bar.ts, "x")
+    return _flatten(s, bar.ts, "x", why)
+
+
+def _flatten(s: RunnerState, ts: datetime, suffix: str, why: str) -> Step:
+    """The runner's own Flatten; no other goes out until flat (`exiting`)."""
+    cid = client_id(s.setup.armed.account, ts, suffix, Flatten())
     return replace(s, exiting=cid), _send(s, Flatten(), cid, reason=why)
 
 
@@ -535,7 +560,7 @@ def _safety(s: RunnerState) -> Step:
     return _halt(s, reason, "safety", a.day)
 
 
-def _block(s: RunnerState, a: Action, pending: bool) -> str | None:
+def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | None:
     """Why this action may not go out, or None. Flatten and Cancel always may."""
     if not isinstance(a, Bracket):
         return None
@@ -545,6 +570,8 @@ def _block(s: RunnerState, a: Action, pending: bool) -> str | None:
         return f"halted: {s.halted}"
     if s.stale or s.drift:
         return f"paused: {s.stale or s.drift}"
+    if old:  # a late or replayed bar: never trade at its old close
+        return old
     if pending:
         return "a bracket was already accepted this bar"
     if s.working:

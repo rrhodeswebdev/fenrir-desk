@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, NQ, bar, make_rules, rules_data, scripted
-from live_helpers import make_setup
+from live_helpers import decide_now, make_setup
 
 from fenrir.backtest.attempt import run_attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
@@ -25,7 +25,7 @@ def run(setup, b=BAR, state=None):
 
 
 def decide(setup, actions, b=BAR):
-    return core.decide(run(setup, b), actions)
+    return decide_now(run(setup, b), actions)
 
 
 def kinds(effects):
@@ -79,13 +79,13 @@ def test_funded_scaling_limits_size_and_status():
     )
     s = run(setup)
     assert core.account_status(s)["limits"]["max_minis"] == 2
-    _, effects = core.decide(s, [replace(LONG, qty=3)])
+    _, effects = decide_now(s, [replace(LONG, qty=3)])
     assert "max_minis 2" in effects[1].payload["reason"]
 
     high = Start(phase_start=50_000.0, peak=51_500.0, balance=51_500.0)  # +1500: tier 4
     s = run(replace(setup, start=high, day_start=DayStart(51_500.0, 51_500.0)))
     assert core.account_status(s)["limits"]["max_minis"] == 4
-    assert kinds(core.decide(s, [replace(LONG, qty=3)])[1]) == ["bar", "action", "send"]
+    assert kinds(decide_now(s, [replace(LONG, qty=3)])[1]) == ["bar", "action", "send"]
 
     # the tier comes from today's opening balance, not a winning morning since
     s = run(replace(setup, start=high, day_start=DayStart(50_500.0, 50_500.0)))
@@ -112,7 +112,7 @@ def test_without_day_start_sim_and_live_take_no_brackets(mode):
     day = DayStart(balance=50_000.0, peak=50_000.0)
     setup = make_setup(make_rules(), mode=mode, start=start)
     _, effects = decide(setup, [LONG, Flatten(), Cancel("x")])
-    assert kinds(effects) == ["bar", "rejection", "action", "send", "action"]
+    assert kinds(effects) == ["bar", "rejection", "action", "action"]  # flat: nothing sent
     assert effects[1].payload["reason"] == "today's opening balance unknown"
     # the open's figures without the phase start and peak: still no brackets
     _, effects = decide(replace(setup, start=None, day_start=day), [LONG])
@@ -133,7 +133,7 @@ def test_day_start_sets_the_daily_loss_room():
     )
     s = run(setup)
     assert (s.acct.day_start_balance, s.session_start) == (0.0, 0.0)
-    _, effects = core.decide(s, [LONG])
+    _, effects = decide_now(s, [LONG])
     assert "daily loss limit" in effects[1].payload["reason"]
 
 
@@ -177,7 +177,7 @@ def test_one_bracket_per_bar_and_flatten_cancel_replace_it():
 def test_halted_account_rejects_brackets():
     s, effects = core.halt(run(make_setup(make_rules())), "test")
     assert kinds(effects) == ["halt"]
-    _, effects = core.decide(s, [LONG])
+    _, effects = decide_now(s, [LONG])
     assert effects[1].payload["reason"] == "halted: test"
 
 
@@ -185,13 +185,13 @@ def test_strategy_error_halts_account():
     s, effects = core.step_failed(run(make_setup(make_rules())), "RuntimeError('bad index')")
     assert kinds(effects) == ["bar", "halt"]
     assert "bad index" in s.halted and s.halt_day is None
-    assert kinds(core.decide(s, [LONG])[1]) == ["bar", "rejection"]
+    assert kinds(decide_now(s, [LONG])[1]) == ["bar", "rejection"]
 
 
 def test_changed_strategy_file_halts_at_start():
     s, effects = core.start(make_setup(make_rules(), strategy_hash="h2"), BAR.ts)
     assert kinds(effects) == ["halt"] and "changed since arming" in s.halted
-    assert kinds(core.decide(run(None, state=s), [LONG])[1]) == ["bar", "rejection"]
+    assert kinds(decide_now(run(None, state=s), [LONG])[1]) == ["bar", "rejection"]
 
 
 def test_sim_without_start_balances_halts_and_dry_ignores_them():
@@ -243,7 +243,7 @@ def test_safety_margin_halts_for_the_day(daily_loss, level):
     assert s.halted.startswith("safety margin")
     s, effects = core.on_bar(s, BAR)
     assert effects == ()  # one halt, not one per bar
-    assert core.decide(s, [LONG])[1][1].kind == "rejection"
+    assert decide_now(s, [LONG])[1][1].kind == "rejection"
 
 
 def test_safety_drawdown_leg_uses_the_session_start_room():
@@ -361,4 +361,4 @@ def test_after_a_loss_accepts_exactly_what_the_backtest_accepts(stop, accepted):
     expected = backtest_brackets(bars, script, rules, NQ, first_fill=2)
     s = run(make_setup(rules), bars[3])
     s = replace(s, acct=replace(s.acct, balance=-1510.0, traded_today=True))
-    assert live_brackets(core.decide(s, [late])[1]) == expected == ([1] if accepted else [])
+    assert live_brackets(decide_now(s, [late])[1]) == expected == ([1] if accepted else [])

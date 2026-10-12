@@ -3,7 +3,7 @@ from datetime import UTC, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, NQ, bar, make_rules, scripted
-from live_helpers import make_setup
+from live_helpers import decide_now, make_setup
 
 from fenrir.backtest import attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
@@ -55,60 +55,80 @@ def sends(effects):
 def entered(setup, price=20000.25, b=None):
     """Sim account with LONG sent on `b` (09:30) and its entry filled 1 s into the next bar."""
     b = b or at("09:30")
-    s, _ = core.decide(started(setup, b), [LONG])
+    s, _ = decide_now(started(setup, b), [LONG])
     entry = fill(1, price, b.ts + timedelta(minutes=1, seconds=1), cid=s.working.client_id)
     return core.on_fill(s, entry)[0]
 
 
 def test_client_id_is_deterministic_and_at_most_24_chars():
-    ts = at("09:30").ts
-    a = core.client_id("Lucid-Account-0001-with-a-long-name", ts, "0")
-    assert a == core.client_id("Lucid-Account-0001-with-a-long-name", ts, "0")
-    assert len(a) <= 24 and a.startswith("2510061330-")
+    ts, name = at("09:30").ts, "Lucid-Account-0001-with-a-long-name"
+    a = core.client_id(name, ts, "0", LONG)
+    assert a == core.client_id(name, ts, "0", replace(LONG, qty=2))  # the action's type only
+    assert len(a) == 24 and a.startswith("2510061330-")
     others = {
-        core.client_id("Lucid-Account-0002-with-a-long-name", ts, "0"),
-        core.client_id("Lucid-Account-0001-with-a-long-name", ts + timedelta(minutes=1), "0"),
-        core.client_id("Lucid-Account-0001-with-a-long-name", ts, "1"),
-        core.client_id("Lucid-Account-0001-with-a-long-name", ts, "x"),
+        core.client_id("Lucid-Account-0002-with-a-long-name", ts, "0", LONG),
+        core.client_id(name, ts + timedelta(minutes=1), "0", LONG),
+        core.client_id(name, ts, "1", LONG),
+        core.client_id(name, ts, "x", LONG),
+        # a re-decided bar whose action list changed never gives a Flatten a Bracket's id
+        core.client_id(name, ts, "0", Flatten()),
     }
-    assert a not in others and len(others) == 4
-    assert all(len(c) <= 24 for c in others)
+    assert a not in others and len(others) == 5
+    assert all(len(c) == 24 for c in others)
 
 
 def test_dry_mode_never_sends():
     s = started(make_setup(make_rules()), at("09:30"))
-    s, effects = core.decide(s, [Flatten(), Cancel("o1"), LONG])
+    s, effects = decide_now(s, [Flatten(), Cancel("o1"), LONG])
     assert sends(effects) == [] and s.working is None
     assert [e.payload["sent"] for e in effects[1:]] == [False, False, False]
 
 
 def test_sim_sends_accepted_actions_with_their_client_ids():
     b = at("09:30")
-    s, effects = core.decide(started(sim(), b), [Flatten(), Cancel("o1"), LONG])
-    # a Cancel is never sent: step cannot know NinjaTrader's order ids (backtest: same-bar only)
-    assert kinds(effects) == ["bar", "action", "send", "action", "action", "send"]
-    ids = [core.client_id("Sim101", b.ts, str(i)) for i in range(3)]
-    assert sends(effects) == [Send(Flatten(), ids[0]), Send(LONG, ids[2])]
-    logs = [effects[i].payload for i in (1, 3, 4)]
+    actions = [Flatten(), Cancel("o1"), LONG]
+    s, effects = decide_now(started(sim(), b), actions)
+    # a Cancel is never sent: step cannot know NinjaTrader's order ids (backtest: same-bar only);
+    # a Flatten while flat has nothing to close (backtest: a no-op)
+    assert kinds(effects) == ["bar", "action", "action", "action", "send"]
+    cid = core.client_id("Sim101", b.ts, "2", LONG)
+    assert sends(effects) == [Send(LONG, cid)]
+    logs = [effects[i].payload for i in (1, 2, 3)]
     assert [(p["sent"], p.get("client_id")) for p in logs] == [
-        (True, ids[0]),
         (False, None),
-        (True, ids[2]),
+        (False, None),
+        (True, cid),
     ]
-    assert s.working == core.Working(ids[2], LONG, b.close)
+    assert logs[0]["reason"] == "flat: nothing to close"
+    assert s.working == core.Working(cid, LONG, b.close)
+
+
+def test_one_flatten_at_a_time():
+    s = entered(sim())
+    s, effects = decide_now(core.on_bar(s, at("09:31"))[0], [Flatten(), Flatten()])
+    cid = core.client_id("Sim101", at("09:31").ts, "0", Flatten())
+    assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
+    assert effects[3].payload["sent"] is False and cid in effects[3].payload["reason"]
+    # on a flat-by bar the runner's own Flatten goes out and the strategy's is held back
+    s = entered(sim(), b=at("16:30"))
+    late = at("16:39")
+    s, effects = core.on_bar(s, late)
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
+    s, effects = decide_now(s, [Flatten()])
+    assert sends(effects) == [] and effects[1].payload["sent"] is False
 
 
 def test_rejected_and_replaced_brackets_are_not_sent():
-    s, effects = core.decide(started(sim(), at("09:30")), [LONG, Flatten()])
-    assert kinds(effects) == ["bar", "rejection", "action", "send"]
-    assert sends(effects)[0].action == Flatten() and s.working is None
+    s, effects = decide_now(started(sim(), at("09:30")), [LONG, Flatten()])
+    assert kinds(effects) == ["bar", "rejection", "action"]
+    assert sends(effects) == [] and s.working is None  # the Flatten has nothing to close
 
 
 def test_working_entry_blocks_a_second_bracket_until_it_fills():
     b0, b1 = at("09:30"), at("09:31")
-    s, _ = core.decide(started(sim(), b0), [LONG])
+    s, _ = decide_now(started(sim(), b0), [LONG])
     s, _ = core.on_bar(s, b1)  # the entry fill is late
-    s2, effects = core.decide(s, [LONG])
+    s2, effects = decide_now(s, [LONG])
     assert kinds(effects) == ["bar", "rejection"] and s2.working == s.working
     assert "still working" in effects[1].payload["reason"]
     s, effects = core.on_fill(
@@ -116,21 +136,21 @@ def test_working_entry_blocks_a_second_bracket_until_it_fills():
     )
     assert kinds(effects) == ["fill"] and s.working is None
     assert s.position == core.Position(1, 20000.25, 19990.0, 20020.0)
-    assert core.decide(s, [LONG])[1][1].payload["reason"] == "already in a position"
+    assert decide_now(s, [LONG])[1][1].payload["reason"] == "already in a position"
 
 
 def test_a_fill_that_is_not_the_entry_keeps_it_working():
-    s, _ = core.decide(started(sim(), at("09:30")), [LONG])
+    s, _ = decide_now(started(sim(), at("09:30")), [LONG])
     w = s.working
     s, _ = core.on_fill(s, fill(1, 20000.0, at("09:31").ts))  # e.g. a manual order
     assert s.working == w and s.position == core.Position(1, 20000.0, None, None)
     s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:31").ts + timedelta(seconds=5)))
     assert s.working == w  # flat again, and still no second bracket until it resolves
-    assert "still working" in core.decide(s, [LONG])[1][1].payload["reason"]
+    assert "still working" in decide_now(s, [LONG])[1][1].payload["reason"]
 
 
 def test_failed_send_alerts_and_frees_the_entry():
-    s, effects = core.decide(started(sim(), at("09:30")), [LONG])
+    s, effects = decide_now(started(sim(), at("09:30")), [LONG])
     cid = sends(effects)[0].client_id
     s, effects = core.send_failed(s, cid, "unmanaged_account")
     assert kinds(effects) == ["alert"] and cid in effects[0].payload["message"]
@@ -185,20 +205,27 @@ def backtest_account(bars, script, rules):
         ("intraday", None, bar("09:32", 20000.0, 20015.0, 19980.0, 19985.0)),
         ("intraday", None, bar("09:32", 20000.0, 20025.0, 19995.0, 20010.0)),  # target
         ("end_of_day", 500.0, bar("09:32", 20000.0, 20005.0, 19980.0, 19985.0)),
+        # gaps through the stop: the realized −$412 crosses the −$300 daily loss limit
+        ("end_of_day", 300.0, bar("09:32", 19980.0, 19985.0, 19975.0, 19980.0)),
+        ("intraday", 300.0, bar("09:32", 19980.0, 19985.0, 19975.0, 19980.0)),
     ],
 )
 def test_live_fills_book_like_the_backtest(trailing, daily_loss, exit_bar):
     rules = make_rules(commission=1.0, trailing=trailing, daily_loss=daily_loss)
-    bars = (at("09:30"), at("09:31"), exit_bar)
-    expected, fills = backtest_account(bars, {"09:30": [LONG]}, rules)
+    bars = (at("09:30"), at("09:31"), exit_bar, at("10:00", D2))  # then the next day's first bar
+    at_exit, fills = backtest_account(bars[:3], {"09:30": [LONG]}, rules)
+    after_roll, _ = backtest_account(bars, {"09:30": [LONG]}, rules)
     assert len(fills) == 2
     s = started(replace(sim(), rules=rules), bars[0])
-    s, _ = core.decide(s, [LONG])
+    s, _ = decide_now(s, [LONG])
     cid = s.working.client_id
-    for b, f in zip(bars[1:], fills, strict=True):
+    for b, f in zip(bars[1:3], fills, strict=True):
         s, _ = core.on_fill(s, fill(f.qty, f.price, f.ts + timedelta(seconds=1), cid=cid))
         s, _ = core.on_bar(s, b)
-    assert s.acct == replace(expected, day=s.acct.day)
+    assert s.acct == at_exit
+    assert s.acct.halted_today is (daily_loss == 300.0)
+    s, _ = core.on_bar(s, bars[3])
+    assert s.acct == after_roll and s.acct.day == D2 and len(s.acct.closed_days) == 1
 
 
 def test_daily_loss_limit_hit_flattens_once():
@@ -210,7 +237,7 @@ def test_daily_loss_limit_hit_flattens_once():
     b = at("09:32", c=19992.0, lo=19990.0)
     s, effects = core.on_bar(s, b)
     assert s.acct.halted_today and (s.halt_kind, s.halt_day) == ("safety", D1)
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x"))]
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x", Flatten()))]
     s, effects = core.on_bar(s, at("09:33", c=19992.0, lo=19990.0))
     assert sends(effects) == []  # once
     s, _ = core.on_fill(s, fill(-1, 19991.75, at("09:34").ts + timedelta(seconds=1)))
@@ -237,7 +264,7 @@ def test_drawdown_breach_halts_and_flattens_once():
     assert (s.halt_kind, s.halt_day) == ("breach", None) and s.halted.startswith(
         "breach max_drawdown"
     )
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x"))]
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x", Flatten()))]
     assert sends(core.on_bar(s, at("09:32"))[1]) == []
 
 
@@ -247,13 +274,42 @@ def test_flat_by_flattens_and_the_day_rolls_after_the_exit_fill():
     s, effects = core.on_bar(s, at("16:38"))
     assert sends(effects) == []
     s, effects = core.on_bar(s, late)
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x"))]
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
     assert sends(core.on_bar(s, at("16:40"))[1]) == []
     s, _ = core.on_fill(s, fill(-1, 20004.75, at("16:40").ts + timedelta(seconds=1)))
     s, effects = core.on_bar(s, at("18:00"))  # 18:00 ET opens trading day D2
     assert s.halted is None and "halt" not in kinds(effects)
     assert s.acct.closed_days == ((D1, pytest.approx(4.5 * 20)),)
     assert core.account_status(s)["session"]["fills"] == []
+
+
+def test_a_flatten_through_zero_flattens_the_reversed_position():
+    s = entered(sim(), b=at("16:30"))
+    s, effects = core.on_bar(s, at("16:39"))  # flat-by: the runner's Flatten goes out
+    over = at("16:40").ts + timedelta(seconds=1)
+    s, effects = core.on_fill(s, fill(-2, 20004.75, over))  # closed one too many
+    cid = core.client_id("Sim101", over, "f", Flatten())
+    assert s.position == core.Position(-1, 20004.75, None, None)
+    assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
+    assert effects[-2].payload["reason"] == "position -1 has no known stop"
+    s, effects = core.on_bar(s, at("16:40"))
+    assert sends(effects) == []  # once
+    s, _ = core.on_fill(s, fill(1, 20004.75, over + timedelta(seconds=1)))
+    assert s.position == core.FLAT and s.exiting is None
+
+
+def test_late_bar_takes_no_entries_but_exits():
+    s = started(sim(), at("09:30"))
+    closed = at("09:31").ts  # the 09:30 bar's close
+    _, effects = core.decide(s, [LONG], closed + timedelta(seconds=90), 90)
+    assert [e.action for e in sends(effects)] == [LONG]
+    _, effects = core.decide(s, [LONG], closed + timedelta(seconds=91), 90)
+    assert kinds(effects) == ["bar", "rejection"]
+    reason = effects[1].payload["reason"]
+    assert reason == "bar closed 91s ago (over 90s): no entry at its close"
+    s = core.on_bar(entered(sim()), at("09:31"))[0]
+    _, effects = core.decide(s, [Flatten()], s.last_seen + timedelta(seconds=91), 90)
+    assert [e.action for e in sends(effects)] == [Flatten()]
 
 
 def test_position_open_at_the_day_roll_is_still_a_breach():
@@ -287,7 +343,7 @@ def test_late_fill_from_a_closed_day_books_into_today():
     ("price", "paused"), [(20001.0, False), (20001.25, True), (19998.75, True)]
 )
 def test_entry_fill_drift_past_4_ticks_pauses_entries(price, paused):
-    s, _ = core.decide(started(sim(), at("09:30")), [LONG])  # checked at the 20000.0 close
+    s, _ = decide_now(started(sim(), at("09:30")), [LONG])  # checked at the 20000.0 close
     s, effects = core.on_fill(
         s, fill(1, price, at("09:31").ts + timedelta(seconds=1), cid=s.working.client_id)
     )
@@ -298,4 +354,4 @@ def test_entry_fill_drift_past_4_ticks_pauses_entries(price, paused):
         assert (st["halted"], st["halt_kind"]) == (True, "drift")
         s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:32").ts))
         s, _ = core.on_bar(s, at("09:33"))
-        assert core.decide(s, [LONG])[1][1].payload["reason"].startswith("paused: entry fill")
+        assert decide_now(s, [LONG])[1][1].payload["reason"].startswith("paused: entry fill")

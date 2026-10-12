@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from backtest_helpers import NQ
 
 from fenrir.core.instruments import ContractSpec
+from fenrir.live import core
 from fenrir.live.arming import Armed
 from fenrir.live.core import DayStart, Setup, Start
 from fenrir.rules.schema import AccountRules
@@ -27,3 +28,8 @@ def make_setup(
         "Sim101", "strategies/orb.py", "h1", "lucid-test-50k", spec.symbol, mode, phase, ARMED_AT
     )
     return Setup(armed, strategy_hash, rules, spec, 80.0, start, day_start)
+
+
+def decide_now(s, actions, stale_seconds: int = 90):
+    """`core.decide` at the current bar's close: the bar is fresh."""
+    return core.decide(s, actions, s.last_seen, stale_seconds)

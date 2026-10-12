@@ -142,6 +142,21 @@ def test_a_symlinked_report_is_a_500_naming_it_without_leaking(env, tmp_path):
     assert "secret-0001" not in response.text
 
 
+def test_a_symlinked_strategies_dir_is_500_without_hashing_or_loading(tmp_path):
+    elsewhere = tmp_path / "elsewhere"  # a dir the terminal user cannot read, but root can
+    elsewhere.mkdir()
+    (elsewhere / "a.py").write_text(STRATEGY)
+    settings = Settings(data_dir=tmp_path / "data", strategies_dir=tmp_path / "strategies")
+    settings.strategies_dir.symlink_to(elsewhere, target_is_directory=True)
+    client = TestClient(create_app(settings, KEY, "c" * 22, None, port=8000), base_url=BASE)
+    client.cookies.set(SESSION_COOKIE, KEY)
+    response = client.get("/api/strategies")
+    assert response.status_code == 500
+    assert response.json() == {"detail": f"{settings.strategies_dir} is a symlink; not reading it"}
+    assert file_hash(elsewhere / "a.py") not in response.text
+    assert not (elsewhere / "a.py.pid").exists()
+
+
 def test_401_without_a_session(env):
     _, settings = env
     client = TestClient(create_app(settings, KEY, "c" * 22, None, port=8000), base_url=BASE)

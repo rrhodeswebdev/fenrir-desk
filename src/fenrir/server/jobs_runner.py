@@ -319,8 +319,12 @@ class JobRunner:
         child. A file that is not one, that the child did not describe (isolation refusal, crash,
         timeout, bad output), described twice, or whose hash is not the one read here gets
         `error` with the reason and hash None. ValueError for a path not directly in
-        `strategies_dir`: the child executes every file it is given.
+        `strategies_dir`: the child executes every file it is given, and for a symlinked
+        `strategies_dir`: the root server would hash files in any directory (DEC-1).
         """
+        # shortcut: checked, not opened O_NOFOLLOW (a swap right after still races), as _symlinked
+        if self._settings.strategies_dir.is_symlink():
+            raise ValueError(f"{self._settings.strategies_dir} is a symlink; not reading it")
         for p in paths:
             if Path(p).parent != self._settings.strategies_dir:
                 raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")

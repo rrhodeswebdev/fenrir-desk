@@ -439,6 +439,18 @@ def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):
             runner.describe([str(s.strategies_dir / "ok.py"), str(bad)])
 
 
+def test_describe_refuses_a_symlinked_strategies_dir(make, tmp_path):
+    # the terminal can swap strategies/ for a link: root would hash files in any directory
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.py").write_text("x = 1\n")
+    s = replace(Settings(data_dir=tmp_path / "data"), strategies_dir=tmp_path / "strategies")
+    s.strategies_dir.symlink_to(elsewhere, target_is_directory=True)
+    runner = make(s, child=CHILD)
+    with pytest.raises(ValueError, match="strategies is a symlink; not reading it"):
+        runner.describe([str(s.strategies_dir / "a.py")])
+
+
 H = "b" * 64
 GOOD = {"path": "/s/a.py", "name": "a", "hash": H, "market": "ES", "params": {"n": [1]}}
 

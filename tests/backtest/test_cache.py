@@ -19,6 +19,7 @@ STRATEGY = (
     "def step(s, b, c):\n    return s, []\n"
 )
 ORB = Path(__file__).parents[2] / "strategies" / "orb.py"
+SHAPE = {"strategy_hash": "h", "periods": {"tuning": {}, "holdout": None}}  # what readers use
 
 
 def write_rules(settings, **kw):
@@ -57,7 +58,12 @@ def runs(monkeypatch):
         calls.append(key)
         created = f"2026-10-10T00:00:{len(calls):02d}Z"
         # a tuple, as a strategy's PARAMS can hold: JSON gives it back as a list
-        return {"key": key, "created_at": created, "account": account, "params": {"t": (1, 2)}}
+        return SHAPE | {
+            "key": key,
+            "created_at": created,
+            "account": account,
+            "params": {"t": (1, 2)},
+        }
 
     monkeypatch.setattr(cache, "run_backtest", fake)
     return calls
@@ -127,7 +133,7 @@ def test_report_stored_under_its_own_key(settings, item, monkeypatch):
 def write_report(settings, key, created_at):
     results = settings.data_dir / "results"
     results.mkdir(parents=True, exist_ok=True)
-    report = {"key": key, "created_at": created_at}
+    report = SHAPE | {"key": key, "created_at": created_at, "account": "a"}
     (results / f"{key}.json").write_text(json.dumps(report))
     return report
 
@@ -146,7 +152,22 @@ def test_list_reports_breaks_created_at_ties_by_key(settings):
     assert list_reports(settings) == (b, a)
 
 
-@pytest.mark.parametrize("text", ["", '{"half": ', '{"key": "k"}', '{"created_at": "x"}'])
+BASE = {"key": "k", "created_at": "x", "account": "a"} | SHAPE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        '{"half": ',
+        '{"key": "k"}',
+        '{"created_at": "x"}',
+        "[]",
+        *(json.dumps({k: v for k, v in BASE.items() if k != gone}) for gone in BASE),
+        json.dumps(BASE | {"periods": None}),
+        json.dumps(BASE | {"periods": {"tuning": [1]}}),
+    ],
+)
 def test_a_corrupt_report_is_an_error_naming_the_file(settings, item, runs, text):
     path = settings.data_dir / "results" / f"{cache_key(item, settings, False)}.json"
     path.parent.mkdir(parents=True)

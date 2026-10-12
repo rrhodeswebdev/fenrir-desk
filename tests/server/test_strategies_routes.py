@@ -185,7 +185,7 @@ def test_only_regular_files_are_read_or_loaded(env):
     client, settings = env
     d = settings.strategies_dir
     (d / "a.py").write_text(STRATEGY)
-    (d / "big.py").write_bytes(b"#" * (1024 * 1024 + 1))
+    (d / "big.py").write_text(STRATEGY + "#" * (1024 * 1024))  # would load, if given
     (d / "link.py").symlink_to(d / "a.py")
     os.mkfifo(d / "z.py")  # opening it for reading would block with no writer
     a, big, link, z = client.get("/api/strategies").json()

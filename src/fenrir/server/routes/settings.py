@@ -162,11 +162,18 @@ async def put_settings(request: Request):
 async def import_repo_secrets():
     # async: on the event loop like PUT, so two saves never interleave. The repo .env is
     # terminal-written: its secrets go through the same checks as PUT
-    repo = _repo_env()
-    found = {f: repo[ENV_KEYS[f]] for f in SECRETS if repo.get(ENV_KEYS[f])}
+    repo, have = _repo_env(), parse_env_text(_read_env(_env_file()))
+    # only into empty keys: never silently replace a secret already in the secrets file
+    found = {f: repo[k] for f in SECRETS if repo.get(k := ENV_KEYS[f]) and not have.get(k)}
     if not found:
-        raise HTTPException(status_code=409, detail="the repo .env holds no secrets to import")
-    return _save(found)
+        detail = (
+            "the repo .env secrets are already set in the secrets file"
+            if has_secrets(repo)
+            else "the repo .env holds no secrets to import"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+    saved = _save(found)
+    return {**saved, "imported": list(found)} if isinstance(saved, dict) else saved
 
 
 def _save(data: dict):

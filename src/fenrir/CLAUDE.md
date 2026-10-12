@@ -2,7 +2,7 @@
 
 The `fenrir` Python package: server, CLI and every pure core the app runs on.
 
-- Entry points: `cli/main.py` (`fenrir` command), `settings.py` (`$FENRIR_ENV_FILE` or `.env`, never the repo `.env` in the image → `Settings`).
+- Entry points: `cli/main.py` (`fenrir` command), `settings.py` (`$FENRIR_ENV_FILE` or `.env`, never the repo `.env` in the image → `Settings`), `files.py` (`read_regular(path, limit)`: how the root server reads a terminal-writable file: no symlink, FIFO, device or oversized file; errors never quote contents).
 - Pure vs shell: each subpackage keeps pure logic in its own modules and I/O in thin shell functions; see each subpackage's `CLAUDE.md`.
 - Not here: strategy files (`strategies/`), rules YAML (`rules/`), web UI (`web/`), NinjaTrader add-on (`addon/`).
 - Tests: `tests/`, mirroring this tree.

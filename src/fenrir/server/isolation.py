@@ -64,7 +64,7 @@ def check(
 
 def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:
     """(env overlay, `Popen` kwargs) that run a child as `user` from its passwd entry, with none
-    of the server's groups; `({}, {})` for None (the server's own user)."""
+    of the server's groups; `({}, {})` for None (the server's own user). KeyError: no such user."""
     if not user:
         return {}, {}
     import pwd  # POSIX only; unset natively on Windows

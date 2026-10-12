@@ -16,6 +16,7 @@ dependencies = [
     "httpx>=0.28.1",
     "ruamel-yaml>=0.19.1,<0.20",  # writer.py subclasses its Emitter
     "websockets>=17.2",
+    "pywinpty>=2 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

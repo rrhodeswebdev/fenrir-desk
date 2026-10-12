@@ -118,6 +118,16 @@ def test_list_accounts_sorted(tmp_path, base):
     assert list_accounts(tmp_path) == ("lucid-flex-50k", "lucid-pro-50k")
 
 
+def test_list_accounts_refuses_a_symlinked_rules_or_firm_dir(tmp_path, base):
+    write(tmp_path / "real", base)
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    with pytest.raises(ValueError, match="linked is a symlink; not reading it"):
+        list_accounts(tmp_path / "linked")
+    (tmp_path / "real" / "other").symlink_to(tmp_path / "real" / "lucid")
+    with pytest.raises(ValueError, match="other is a symlink; not reading it"):
+        list_accounts(tmp_path / "real")
+
+
 def test_dump_round_trip(tmp_path, base):
     write(tmp_path, base)
     rules = load_account("lucid-flex-50k", tmp_path)

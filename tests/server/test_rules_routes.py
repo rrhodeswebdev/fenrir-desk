@@ -58,6 +58,37 @@ def env(tmp_path) -> tuple[TestClient, Path]:
     return client, rules_dir
 
 
+@pytest.fixture
+def outside(tmp_path_factory) -> Path:
+    """A rules-shaped dir the terminal user cannot read."""
+    root = tmp_path_factory.mktemp("elsewhere")
+    shutil.copytree(RULES / "lucid", root / "secretfirm")
+    for p in (root / "secretfirm").glob("*.yaml"):
+        p.write_text(p.read_text().replace("firm: lucid", "firm: secretfirm"))
+    return root
+
+
+def test_a_symlinked_rules_dir_is_500_listing_nothing(env, outside):
+    client, rules_dir = env
+    shutil.rmtree(rules_dir)
+    rules_dir.symlink_to(outside, target_is_directory=True)
+    detail = {"detail": f"{rules_dir} is a symlink; not reading it"}
+    for r in (
+        client.get("/api/rules"),
+        client.get("/api/rules/secretfirm-flex-50k"),
+        client.put("/api/rules/secretfirm-flex-50k", json={}, headers=WRITE),
+    ):
+        assert (r.status_code, r.json()) == (500, detail)
+
+
+def test_a_symlinked_firm_dir_is_500_reading_nothing(env, outside):
+    client, rules_dir = env
+    (rules_dir / "secretfirm").symlink_to(outside / "secretfirm", target_is_directory=True)
+    detail = {"detail": f"{rules_dir / 'secretfirm'} is a symlink; not reading it"}
+    for r in (client.get("/api/rules"), client.get("/api/rules/secretfirm-flex-50k")):
+        assert (r.status_code, r.json()) == (500, detail)
+
+
 def flex(client: TestClient) -> dict:
     return client.get(f"/api/rules/{AID}").json()["rules"]
 

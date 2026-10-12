@@ -52,9 +52,16 @@ def _load(aid: str, rules_dir: Path) -> tuple[dict, AccountRules | None]:
     return {"id": aid, "error": None, **staleness(rules.verified_on, date.today())}, rules
 
 
+def _accounts(rules_dir: Path) -> tuple[str, ...]:
+    try:
+        return list_accounts(rules_dir)
+    except ValueError as e:  # a symlinked rules/ or firm dir: the message names it
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
 def _rules_dir(aid: str, request: Request) -> Path:
     rules_dir = request.app.state.settings.rules_dir
-    if aid not in list_accounts(rules_dir):  # only existing ids reach the disk
+    if aid not in _accounts(rules_dir):  # only existing ids reach the disk
         raise HTTPException(status_code=404, detail=f"unknown account {aid}")
     return rules_dir
 
@@ -62,7 +69,7 @@ def _rules_dir(aid: str, request: Request) -> Path:
 @router.get("")
 def list_rules(request: Request) -> list[dict]:
     rules_dir = request.app.state.settings.rules_dir
-    return [_load(aid, rules_dir)[0] for aid in list_accounts(rules_dir)]
+    return [_load(aid, rules_dir)[0] for aid in _accounts(rules_dir)]
 
 
 @router.get("/{aid}")

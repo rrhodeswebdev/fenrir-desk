@@ -121,15 +121,19 @@ def _read_env(path: Path | None) -> str:
         return ""
 
 
-def _repo_env_secrets() -> bool:
+def _repo_env() -> dict[str, str]:
     if os.environ.get("FENRIR_BIND_ALL") != "1":
-        return False  # natively the repo .env is the secrets file
+        return {}  # natively the repo .env is the secrets file
     try:
         # the terminal owns this file: anything odd (symlink, FIFO, socket, huge) = no secrets
         text = read_regular(REPO_ENV, REPO_ENV_MAX).decode("utf-8", errors="replace")
     except (OSError, ValueError):
-        return False
-    return has_secrets(parse_env_text(text))
+        return {}
+    return parse_env_text(text)
+
+
+def _repo_env_secrets() -> bool:
+    return has_secrets(_repo_env())
 
 
 def _settings_view(text: str) -> dict:
@@ -151,6 +155,21 @@ async def put_settings(request: Request):
         return _invalid(
             "Settings must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
+    return _save(data)
+
+
+@router.post("/import-repo-secrets")
+async def import_repo_secrets():
+    # async: on the event loop like PUT, so two saves never interleave. The repo .env is
+    # terminal-written: its secrets go through the same checks as PUT
+    repo = _repo_env()
+    found = {f: repo[ENV_KEYS[f]] for f in SECRETS if repo.get(ENV_KEYS[f])}
+    if not found:
+        raise HTTPException(status_code=409, detail="the repo .env holds no secrets to import")
+    return _save(found)
+
+
+def _save(data: dict):
     try:
         update = SettingsUpdate.model_validate(data).model_dump(exclude_unset=True)
     except ValidationError as e:

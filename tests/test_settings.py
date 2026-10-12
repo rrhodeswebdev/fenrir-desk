@@ -24,7 +24,6 @@ def test_parse_settings_reads_every_key():
             "FENRIR_HOLDOUT_MONTHS": "6",
             "FENRIR_SAFETY_MARGIN_PCT": "75.5",
             "FENRIR_STALE_SECONDS": "30",
-            "FENRIR_HEARTBEAT_POLICY": "flatten",
             "FENRIR_DATA_DIR": "/tmp/d",
             "FENRIR_RULES_DIR": "/tmp/r",
             "FENRIR_STRATEGIES_DIR": "/tmp/s",
@@ -38,7 +37,6 @@ def test_parse_settings_reads_every_key():
         holdout_months=6,
         safety_margin_pct=75.5,
         stale_seconds=30,
-        heartbeat_policy="flatten",
         data_dir=Path("/tmp/d"),
         rules_dir=Path("/tmp/r"),
         strategies_dir=Path("/tmp/s"),
@@ -53,11 +51,6 @@ def test_parse_settings_empty_value_means_default():
 def test_parse_settings_bad_int_names_key():
     with pytest.raises(ValueError, match="FENRIR_HOLDOUT_MONTHS"):
         parse_settings({"FENRIR_HOLDOUT_MONTHS": "twelve"})
-
-
-def test_parse_settings_bad_policy_names_key():
-    with pytest.raises(ValueError, match="FENRIR_HEARTBEAT_POLICY"):
-        parse_settings({"FENRIR_HEARTBEAT_POLICY": "panic"})
 
 
 def test_parse_env_text_handles_comments_and_quotes():

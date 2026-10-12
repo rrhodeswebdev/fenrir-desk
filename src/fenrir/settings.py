@@ -2,7 +2,7 @@ import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
@@ -13,17 +13,10 @@ class Settings:
     holdout_months: int = 12
     safety_margin_pct: float = 80.0
     stale_seconds: int = 90
-    heartbeat_policy: Literal["keep", "flatten"] = "keep"
     data_dir: Path = Path("data")
     rules_dir: Path = Path("rules")
     strategies_dir: Path = Path("strategies")
     private_dir: Path = Path("data/private")
-
-
-def _policy(value: str) -> str:
-    if value not in ("keep", "flatten"):
-        raise ValueError(f"must be 'keep' or 'flatten', got {value!r}")
-    return value
 
 
 # field name -> (env key, converter)
@@ -34,7 +27,6 @@ _FIELDS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "holdout_months": ("FENRIR_HOLDOUT_MONTHS", int),
     "safety_margin_pct": ("FENRIR_SAFETY_MARGIN_PCT", float),
     "stale_seconds": ("FENRIR_STALE_SECONDS", int),
-    "heartbeat_policy": ("FENRIR_HEARTBEAT_POLICY", _policy),
     "data_dir": ("FENRIR_DATA_DIR", Path),
     "rules_dir": ("FENRIR_RULES_DIR", Path),
     "strategies_dir": ("FENRIR_STRATEGIES_DIR", Path),

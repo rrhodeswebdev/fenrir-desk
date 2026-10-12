@@ -53,6 +53,7 @@ CHILD = (sys.executable, "-P", "-m", "fenrir.server.job_child")
 LINE_MAX = 64 * 1024  # longer child lines are dropped whole
 ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024  # strategy files are small; bounds what the server reads
+JOB_MAX = 16 * 2**20
 
 Listener = Callable[[dict[str, Any]], None]
 
@@ -258,7 +259,7 @@ class JobRunner:
             log.error("not loading backtest jobs: %s is a symlink", link)
         for path in [] if link else sorted(self._dir.glob("*.json")):
             try:
-                job = restart(from_json(json.loads(path.read_text())))
+                job = restart(from_json(json.loads(read_regular(path, JOB_MAX))))
                 if job.id != path.stem:  # the id names the file we write back to
                     raise ValueError(f"id {job.id!r} does not match the file name")
             except (ValueError, TypeError, KeyError, OSError, RecursionError) as e:
@@ -318,8 +319,12 @@ class JobRunner:
         child. A file that is not one, that the child did not describe (isolation refusal, crash,
         timeout, bad output), described twice, or whose hash is not the one read here gets
         `error` with the reason and hash None. ValueError for a path not directly in
-        `strategies_dir`: the child executes every file it is given.
+        `strategies_dir`: the child executes every file it is given, and for a symlinked
+        `strategies_dir`: the root server would hash files in any directory (DEC-1).
         """
+        # shortcut: checked, not opened O_NOFOLLOW (a swap right after still races), as _symlinked
+        if self._settings.strategies_dir.is_symlink():
+            raise ValueError(f"{self._settings.strategies_dir} is a symlink; not reading it")
         for p in paths:
             if Path(p).parent != self._settings.strategies_dir:
                 raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")

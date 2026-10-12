@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -7,7 +8,7 @@ import yaml
 from backtest_helpers import D1, D2, D3, bar, rules_data
 
 from fenrir.backtest import cache
-from fenrir.backtest.cache import cache_key, cached_run, list_reports
+from fenrir.backtest.cache import cache_key, cached_run, list_reports, read_report
 from fenrir.backtest.grid import GridItem
 from fenrir.backtest.run import run_backtest
 from fenrir.core.instruments import front_month, load_instruments
@@ -178,6 +179,37 @@ def test_a_corrupt_report_is_an_error_naming_the_file(settings, item, runs, text
     ):
         with pytest.raises(ValueError, match="corrupt cached report"):
             read()
+
+
+@pytest.mark.parametrize(
+    ("plant", "message"),
+    [
+        (lambda p, secret: p.symlink_to(secret), "is a symlink"),
+        (lambda p, secret: os.mkfifo(p), "is not a regular file"),  # a blocking open would hang
+        (lambda p, secret: p.mkdir(), "is not a regular file"),
+    ],
+    ids=["symlink", "fifo", "directory"],
+)
+def test_a_planted_report_is_refused_never_followed(settings, plant, message):
+    # data/results is terminal-writable and the root server reads it (DEC-1)
+    secret = settings.data_dir / "secret.json"  # a root-only file that parses as a report
+    secret.write_text(json.dumps(BASE | {"key": "secret-0001"}))
+    path = settings.data_dir / "results" / f"{'a' * 64}.json"
+    path.parent.mkdir()
+    plant(path, secret)
+    for read in (lambda: list_reports(settings), lambda: read_report(settings, "a" * 64)):
+        with pytest.raises(ValueError, match=f"{path} {message}") as e:
+            read()
+        assert "secret-0001" not in str(e.value)
+
+
+def test_an_oversized_report_is_refused(settings, monkeypatch):
+    monkeypatch.setattr(cache, "REPORT_MAX", 10)
+    path = settings.data_dir / "results" / f"{'a' * 64}.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps(BASE))
+    with pytest.raises(ValueError, match=f"{path} is over 10 bytes"):
+        list_reports(settings)
 
 
 def test_real_run_computes_once(settings, monkeypatch):

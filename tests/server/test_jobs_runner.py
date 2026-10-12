@@ -144,6 +144,32 @@ def test_a_corrupt_job_file_is_skipped_and_logged(make, settings, caplog):
     ]
 
 
+def test_planted_job_files_are_skipped_never_followed(make, settings, caplog, monkeypatch):
+    # data/jobs is terminal-writable and the root server reads it (DEC-1)
+    jobs = settings.data_dir / "jobs"
+    jobs.mkdir(parents=True)
+    good = Job("good", "2026-10-10T14:00:00.000Z", True, ())
+    (jobs / "good.json").write_text(json.dumps(to_json(good)))
+    secret = settings.data_dir / "secret.json"  # a valid job: following the link would load it
+    secret.write_text(json.dumps(to_json(Job("link", "2026-10-10T14:00:00.000Z", True, ()))))
+    (jobs / "link.json").symlink_to(secret)
+    os.mkfifo(jobs / "fifo.json")  # a blocking open would hang start()
+    (jobs / "dir.json").mkdir()
+    (jobs / "big.json").write_text(json.dumps(to_json(Job("big", "x" * 100, True, ()))))
+    limit = (jobs / "good.json").stat().st_size
+    monkeypatch.setattr(jobs_runner, "JOB_MAX", limit)
+    runner = make()
+    runner.start()
+    assert runner.jobs() == [good]
+    assert sorted(r.message for r in caplog.records) == [
+        f"skipping job file {jobs}/big.json: ValueError('{jobs}/big.json is over {limit} bytes')",
+        f"skipping job file {jobs}/dir.json: ValueError('{jobs}/dir.json is not a regular file')",
+        f"skipping job file {jobs}/fifo.json: ValueError('{jobs}/fifo.json is not a regular file')",
+        f"skipping job file {jobs}/link.json: ValueError('{jobs}/link.json is a symlink; "
+        "not reading it')",
+    ]
+
+
 def test_listeners_see_pending_running_done_and_throttled_progress(make, tmp_path):
     runner = make()
     seen: list[dict] = []
@@ -411,6 +437,18 @@ def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):
     for bad in (tmp_path / "x.py", s.strategies_dir / ".." / "x.py", s.strategies_dir / "d/x.py"):
         with pytest.raises(ValueError, match="not a file in"):
             runner.describe([str(s.strategies_dir / "ok.py"), str(bad)])
+
+
+def test_describe_refuses_a_symlinked_strategies_dir(make, tmp_path):
+    # the terminal can swap strategies/ for a link: root would hash files in any directory
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "a.py").write_text("x = 1\n")
+    s = replace(Settings(data_dir=tmp_path / "data"), strategies_dir=tmp_path / "strategies")
+    s.strategies_dir.symlink_to(elsewhere, target_is_directory=True)
+    runner = make(s, child=CHILD)
+    with pytest.raises(ValueError, match="strategies is a symlink; not reading it"):
+        runner.describe([str(s.strategies_dir / "a.py")])
 
 
 H = "b" * 64

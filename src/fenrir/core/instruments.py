@@ -7,6 +7,9 @@ from typing import Any
 
 import yaml
 
+from fenrir.files import read_regular
+
+INSTRUMENTS_MAX = 1 << 20
 _LETTERS = {3: "H", 6: "M", 9: "U", 12: "Z"}
 
 
@@ -89,7 +92,8 @@ def parse_instruments(doc: Mapping[str, Any]) -> Instruments:
 
 
 def load_instruments(path: Path = Path("instruments.yaml")) -> Instruments:
-    return parse_instruments(yaml.safe_load(path.read_text()))
+    # the terminal can write the repo and the root server reads this (DEC-1)
+    return parse_instruments(yaml.safe_load(read_regular(path, INSTRUMENTS_MAX)))
 
 
 def spec(instruments: Instruments, symbol: str) -> ContractSpec:

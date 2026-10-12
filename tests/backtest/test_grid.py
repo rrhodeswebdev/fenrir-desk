@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def test_overlapping_patterns_give_each_item_once(settings):
 
 
 def test_strategy_globs_are_relative_to_the_cwd_and_ordered(settings, tmp_path, monkeypatch):
-    (tmp_path / "instruments.yaml").symlink_to(Path("instruments.yaml").resolve())  # read from cwd
+    shutil.copy("instruments.yaml", tmp_path)  # read from cwd, never through a symlink
     monkeypatch.chdir(tmp_path)
     items = expand_grid(["strategies/*_nq.py"], ["lucid-flex-*"], None, settings)
     assert items[:4] == tuple(

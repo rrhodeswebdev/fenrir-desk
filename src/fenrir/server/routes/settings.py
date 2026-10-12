@@ -121,15 +121,19 @@ def _read_env(path: Path | None) -> str:
         return ""
 
 
-def _repo_env_secrets() -> bool:
+def _repo_env() -> dict[str, str]:
     if os.environ.get("FENRIR_BIND_ALL") != "1":
-        return False  # natively the repo .env is the secrets file
+        return {}  # natively the repo .env is the secrets file
     try:
         # the terminal owns this file: anything odd (symlink, FIFO, socket, huge) = no secrets
         text = read_regular(REPO_ENV, REPO_ENV_MAX).decode("utf-8", errors="replace")
     except (OSError, ValueError):
-        return False
-    return has_secrets(parse_env_text(text))
+        return {}
+    return parse_env_text(text)
+
+
+def _repo_env_secrets() -> bool:
+    return has_secrets(_repo_env())
 
 
 def _settings_view(text: str) -> dict:
@@ -151,6 +155,28 @@ async def put_settings(request: Request):
         return _invalid(
             "Settings must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
+    return _save(data)
+
+
+@router.post("/import-repo-secrets")
+async def import_repo_secrets():
+    # async: on the event loop like PUT, so two saves never interleave. The repo .env is
+    # terminal-written: its secrets go through the same checks as PUT
+    repo, have = _repo_env(), parse_env_text(_read_env(_env_file()))
+    # only into empty keys: never silently replace a secret already in the secrets file
+    found = {f: repo[k] for f in SECRETS if repo.get(k := ENV_KEYS[f]) and not have.get(k)}
+    if not found:
+        detail = (
+            "the repo .env secrets are already set in the secrets file"
+            if has_secrets(repo)
+            else "the repo .env holds no secrets to import"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+    saved = _save(found)
+    return {**saved, "imported": list(found)} if isinstance(saved, dict) else saved
+
+
+def _save(data: dict):
     try:
         update = SettingsUpdate.model_validate(data).model_dump(exclude_unset=True)
     except ValidationError as e:

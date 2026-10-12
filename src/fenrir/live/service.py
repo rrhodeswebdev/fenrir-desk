@@ -255,7 +255,8 @@ class LiveHub:
                 self.conn, _now(), a.account, "alert", {"message": f"cannot start: {error}"}
             )
             return
-        s, out = core.start(setup, now)
+        halts = journal.rows(self.conn, a.account, kind="halt", since=a.armed_at)
+        s, out = core.start(setup, now, [r.payload for r in halts])
         if s.started:
             try:
                 await self._spawn(a)

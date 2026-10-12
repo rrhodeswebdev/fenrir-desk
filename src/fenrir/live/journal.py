@@ -85,12 +85,22 @@ def day_bounds(day: date) -> tuple[datetime, datetime]:
 
 
 def rows(
-    conn: sqlite3.Connection, account: str | None = None, day: date | None = None
+    conn: sqlite3.Connection,
+    account: str | None = None,
+    day: date | None = None,
+    kind: str | None = None,
+    since: datetime | None = None,
 ) -> tuple[JournalRow, ...]:
     sql, args = "SELECT id, ts, account, kind, payload_json FROM journal WHERE 1=1", []
     if account is not None:
         sql += " AND account = ?"
         args.append(account)
+    if kind is not None:
+        sql += " AND kind = ?"
+        args.append(kind)
+    if since is not None:
+        sql += " AND ts >= ?"
+        args.append(iso(since))
     if day is not None:
         start, end = day_bounds(day)
         sql += " AND ts >= ? AND ts < ?"

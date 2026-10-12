@@ -45,6 +45,14 @@ def test_rows_filter_by_account_and_trading_day(conn):
     assert [r.payload["n"] for r in journal.rows(conn, day=date(2026, 10, 12))] == [1, 2, 3, 5]
 
 
+def test_rows_filter_by_kind_and_since(conn):
+    journal.write(conn, ARMED_AT, "Sim101", "halt", {"n": 0})
+    journal.write(conn, ARMED_AT, "Sim101", "bar", {"n": 1})
+    journal.write(conn, datetime(2026, 10, 12, 12, 59, tzinfo=UTC), "Sim101", "halt", {"n": 2})
+    got = journal.rows(conn, account="Sim101", kind="halt", since=ARMED_AT)
+    assert [r.payload["n"] for r in got] == [0]
+
+
 def test_day_bounds_follow_winter_time():
     assert journal.day_bounds(date(2026, 12, 15)) == (
         datetime(2026, 12, 14, 23, 0, tzinfo=UTC),

@@ -150,6 +150,24 @@ async def test_changed_file_is_journaled_as_halt(hub, conn, armed):
     assert hub.children == {}  # the changed file is never run
 
 
+async def test_halts_survive_a_restart_until_rearmed(hub, conn, armed):
+    arming.insert_armed(conn, armed)
+    error = {"reason": "strategy error: boom", "kind": None, "until": None}
+    breach = {"reason": "breach max_drawdown: x", "kind": "breach", "until": None}
+    journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "halt", error)  # earlier arming
+    journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "halt", breach)
+    await hub.tick(T0)  # a fresh hub: the runner restarted
+    [acc] = hub.status()["accounts"]
+    assert (acc["halted"], acc["halt_kind"]) == (True, "breach")
+    assert acc["halt_reason"] == "breach max_drawdown: x"
+    await hub.handle_bar(bar(T0))
+    assert kinds(conn)[-2:] == ["bar", "rejection"]
+    arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(minutes=5)))  # re-armed
+    await hub.tick(T0 + timedelta(minutes=5))
+    [acc] = hub.status()["accounts"]
+    assert acc["halted"] is False
+
+
 async def test_file_edited_while_armed_halts_on_next_bar(hub, conn, armed):
     arming.insert_armed(conn, armed)
     await hub.handle_bar(bar(T0))

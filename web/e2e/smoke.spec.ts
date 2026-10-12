@@ -45,14 +45,15 @@ test('a deep link renders the report under Backtests', async ({ page }) => {
   await expect(page.getByText('abc', { exact: true })).toBeVisible()
 })
 
+// backtest.spec.ts may have added its result by now: the only one this temp data dir can hold
 test('the compare tabs switch between by account and by strategy', async ({ page }) => {
   await page.goto('/backtests')
   const tab = (name: string) => page.getByRole('tab', { name })
   await expect(tab('By account')).toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByRole('tabpanel')).toHaveText('No results yet.')
+  await expect(page.getByRole('tabpanel')).toHaveText(/No results yet\.|lucid-pro-25k/)
   await tab('By strategy').click()
   await expect(tab('By strategy')).toHaveAttribute('aria-selected', 'true')
-  await expect(page.getByRole('tabpanel')).toHaveText('No results yet.')
+  await expect(page.getByRole('tabpanel')).toHaveText(/No results yet\.|lucid-pro-25k/)
 })
 
 test('an unknown path shows not found', async ({ page }) => {

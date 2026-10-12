@@ -190,9 +190,9 @@ def test_only_regular_files_are_read_or_loaded(env):
     os.mkfifo(d / "z.py")  # opening it for reading would block with no writer
     a, big, link, z = client.get("/api/strategies").json()
     assert (a["market"], a["error"]) == ("NQ", None)
-    assert big["error"] == "ValueError: big.py is over 1 MiB"
-    assert link["error"] == "ValueError: link.py is a symlink, not a strategy file"
-    assert z["error"] == "ValueError: z.py is not a regular file"
+    assert big["error"] == f"ValueError: {d / 'big.py'} is over {1024 * 1024} bytes"
+    assert link["error"] == f"ValueError: {d / 'link.py'} is a symlink; not reading it"
+    assert z["error"] == f"ValueError: {d / 'z.py'} is not a regular file"
     for entry in (big, link, z):
         assert (entry["hash"], entry["market"], entry["reports"]) == (None, None, [])
     assert not (d / "big.py.pid").exists()  # never given to the child

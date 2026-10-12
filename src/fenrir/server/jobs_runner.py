@@ -9,14 +9,12 @@ after the job, so its spawn pool and memoized bars go with it; the server never 
 """
 
 import contextlib
-import errno
 import hashlib
 import json
 import logging
 import os
 import queue
 import signal
-import stat
 import subprocess
 import sys
 import tempfile
@@ -29,6 +27,7 @@ from typing import Any
 
 from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
+from fenrir.files import read_regular
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
 from fenrir.server.isolation import isolation_problems
@@ -156,27 +155,9 @@ def parse_description(line: str, paths: Container[str]) -> dict[str, Any]:
 
 def _strategy_hash(path: Path) -> str:
     """sha256 of `path`'s bytes, read without executing them. The terminal can plant anything
-    there, so: never through a symlink, never blocking on a FIFO, at most STRATEGY_MAX bytes.
-    ValueError for anything but a regular file that size; OSError if it cannot be opened."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    try:
-        fd = os.open(path, flags)
-    except OSError as e:
-        if e.errno == errno.ELOOP:
-            raise ValueError(f"{path.name} is a symlink, not a strategy file") from None
-        raise
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError(f"{path.name} is not a regular file")
-        f = os.fdopen(fd, "rb")
-    except BaseException:
-        os.close(fd)
-        raise
-    with f:
-        data = f.read(STRATEGY_MAX + 1)
-    if len(data) > STRATEGY_MAX:
-        raise ValueError(f"{path.name} is over {STRATEGY_MAX // 1024 // 1024} MiB")
-    return hashlib.sha256(data).hexdigest()
+    there: `read_regular` never follows a symlink, blocks on a FIFO or reads past STRATEGY_MAX
+    (ValueError naming the file)."""
+    return hashlib.sha256(read_regular(path, STRATEGY_MAX)).hexdigest()
 
 
 def _checked(

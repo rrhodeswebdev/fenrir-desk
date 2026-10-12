@@ -9,7 +9,7 @@ from fenrir.backtest.attempt import run_attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
 from fenrir.core.instruments import ContractSpec
 from fenrir.live import core
-from fenrir.live.core import Start
+from fenrir.live.core import DayStart, Start
 from fenrir.rules.drawdown import max_drawdown
 from fenrir.rules.schema import AccountRules
 from fenrir.rules.state import DayClosed
@@ -70,19 +70,25 @@ def test_over_contract_limit_is_rejected():
 
 def test_funded_scaling_limits_size_and_status():
     low = Start(phase_start=50_000.0, peak=50_500.0, balance=50_500.0)  # +500: tier 2
-    setup = make_setup(scaled_rules(), mode="sim", phase="funded", start=low, day_start=50_500.0)
+    setup = make_setup(
+        scaled_rules(),
+        mode="sim",
+        phase="funded",
+        start=low,
+        day_start=DayStart(50_500.0, 50_500.0),
+    )
     s = run(setup)
     assert core.account_status(s)["limits"]["max_minis"] == 2
     _, effects = core.decide(s, [replace(LONG, qty=3)])
     assert "max_minis 2" in effects[1].payload["reason"]
 
     high = Start(phase_start=50_000.0, peak=51_500.0, balance=51_500.0)  # +1500: tier 4
-    s = run(replace(setup, start=high, day_start=51_500.0))
+    s = run(replace(setup, start=high, day_start=DayStart(51_500.0, 51_500.0)))
     assert core.account_status(s)["limits"]["max_minis"] == 4
     assert kinds(core.decide(s, [replace(LONG, qty=3)])[1]) == ["bar", "action"]
 
     # the tier comes from today's opening balance, not a winning morning since
-    s = run(replace(setup, start=high, day_start=50_500.0))
+    s = run(replace(setup, start=high, day_start=DayStart(50_500.0, 50_500.0)))
     assert core.account_status(s)["limits"]["max_minis"] == 2
 
 
@@ -90,7 +96,9 @@ def test_stop_out_past_drawdown_is_rejected_from_ninjatrader_start():
     # peak +1000 → floor -1000; balance +500 → $1,500 of room, so a $1,505 stop-out breaches
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=50_500.0)
     wide = Bracket("long", 1, 19925.0, 20020.0)
-    setup = make_setup(make_rules(), mode="sim", start=start, day_start=50_500.0)
+    setup = make_setup(
+        make_rules(), mode="sim", start=start, day_start=DayStart(50_500.0, 51_000.0)
+    )
     _, effects = decide(setup, [wide])
     assert kinds(effects) == ["bar", "rejection"]  # journalled, nothing sent (SC5)
     assert "drawdown floor -1000.00" in effects[1].payload["reason"]
@@ -98,13 +106,18 @@ def test_stop_out_past_drawdown_is_rejected_from_ninjatrader_start():
     assert kinds(decide(make_setup(make_rules()), [wide])[1]) == ["bar", "action"]
 
 
-def test_sim_without_day_start_takes_no_brackets():
+@pytest.mark.parametrize("mode", ["sim", "live"])
+def test_without_day_start_sim_and_live_take_no_brackets(mode):
     start = Start(phase_start=50_000.0, peak=50_000.0, balance=50_000.0)
-    setup = make_setup(make_rules(), mode="sim", start=start)
+    day = DayStart(balance=50_000.0, peak=50_000.0)
+    setup = make_setup(make_rules(), mode=mode, start=start)
     _, effects = decide(setup, [LONG, Flatten(), Cancel("x")])
     assert kinds(effects) == ["bar", "rejection", "action", "action"]
     assert effects[1].payload["reason"] == "today's opening balance unknown"
-    assert kinds(decide(replace(setup, day_start=50_000.0), [LONG])[1]) == ["bar", "action"]
+    # the open's figures without the phase start and peak: still no brackets
+    _, effects = decide(replace(setup, start=None, day_start=day), [LONG])
+    assert kinds(effects) == ["bar", "rejection"] and "DEC-4a" in effects[1].payload["reason"]
+    assert kinds(decide(replace(setup, day_start=day), [LONG])[1]) == ["bar", "action"]
     # dry runs start fresh and need no opening balance
     assert kinds(decide(make_setup(make_rules()), [LONG])[1]) == ["bar", "action"]
 
@@ -112,7 +125,12 @@ def test_sim_without_day_start_takes_no_brackets():
 def test_day_start_sets_the_daily_loss_room():
     # down $350 today (above the −$400 safety level): a $205 stop-out makes the day −$555
     start = Start(phase_start=50_000.0, peak=50_000.0, balance=49_650.0)
-    setup = make_setup(make_rules(daily_loss=500.0), mode="sim", start=start, day_start=50_000.0)
+    setup = make_setup(
+        make_rules(daily_loss=500.0),
+        mode="sim",
+        start=start,
+        day_start=DayStart(50_000.0, 50_000.0),
+    )
     s = run(setup)
     assert (s.acct.day_start_balance, s.session_start) == (0.0, 0.0)
     _, effects = core.decide(s, [LONG])
@@ -219,9 +237,25 @@ def test_safety_margin_halts_for_the_day(daily_loss, level):
 
 
 def test_safety_drawdown_leg_uses_the_session_start_room():
+    # end-of-day trailing: the floor does not move intraday, so the open's floor is today's
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=50_500.0)  # room 1500
-    s = run(make_setup(make_rules(), mode="sim", start=start))
-    assert core.safety_level(s) == pytest.approx(-1000.0 + 0.2 * 1500)
+    setup = make_setup(make_rules(), mode="sim", start=start)
+    assert core.safety_level(run(setup)) == pytest.approx(-1000.0 + 0.2 * 1500)
+    s = run(replace(setup, day_start=DayStart(balance=50_500.0, peak=51_000.0)))
+    assert core.safety_level(s) == pytest.approx(-700.0)
+
+
+@pytest.mark.parametrize(
+    ("peak", "balance", "level"),
+    [(50_800.0, 50_100.0, -800.0), (52_300.0, 50_400.0, 700.0)],  # floor now + 0.2 × 2000
+)
+def test_intraday_safety_room_is_measured_at_the_open(peak, balance, level):
+    # day opened at +0 with peak +0 (floor −2000); the morning ran up to `peak` before a restart
+    start = Start(phase_start=50_000.0, peak=peak, balance=balance)
+    day = DayStart(balance=50_000.0, peak=50_000.0)
+    s = run(make_setup(make_rules(trailing="intraday"), mode="sim", start=start, day_start=day))
+    assert (s.session_start, s.session_floor) == (0.0, -2000.0)
+    assert core.safety_level(s) == pytest.approx(level)
 
 
 def test_account_status_shape():

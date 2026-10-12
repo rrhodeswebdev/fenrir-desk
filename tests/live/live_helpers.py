@@ -6,7 +6,7 @@ from backtest_helpers import NQ
 
 from fenrir.core.instruments import ContractSpec
 from fenrir.live.arming import Armed
-from fenrir.live.core import Setup, Start
+from fenrir.live.core import DayStart, Setup, Start
 from fenrir.rules.schema import AccountRules
 
 ARMED_AT = datetime(2026, 10, 12, 13, 0, tzinfo=UTC)
@@ -20,7 +20,7 @@ def make_setup(
     start: Start | None = None,
     strategy_hash: str = "h1",
     spec: ContractSpec = NQ,
-    day_start: float | None = None,
+    day_start: DayStart | None = None,
 ) -> Setup:
     """A runner setup (NQ by default), armed with strategy hash "h1" and an 80% safety margin."""
     armed = Armed(

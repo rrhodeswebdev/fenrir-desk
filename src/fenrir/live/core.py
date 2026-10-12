@@ -34,6 +34,14 @@ class Start:
 
 
 @dataclass(frozen=True, slots=True)
+class DayStart:
+    """NinjaTrader figures at today's session open, absolute dollars; 21.5 or 22.2 supplies them."""
+
+    balance: float  # balance at the open
+    peak: float  # the drawdown peak at the open (as Start.peak), which fixes the open's floor
+
+
+@dataclass(frozen=True, slots=True)
 class Setup:
     armed: Armed
     strategy_hash: str  # file_hash of the strategy file on disk now
@@ -41,9 +49,8 @@ class Setup:
     spec: ContractSpec
     safety_margin_pct: float
     start: Start | None = None  # ignored for dry runs, which start fresh (DEC-4a)
-    # NinjaTrader balance at today's session open, absolute $; 21.5 or 22.2 supplies it.
-    # Sim and live take no new brackets while it is None. Ignored for dry runs.
-    day_start: float | None = None
+    # sim and live take no new brackets while it is None; ignored for dry runs
+    day_start: DayStart | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +82,7 @@ def start_account(
     phase: Phase,
     day: date,
     start: Start | None,
-    day_start: float | None = None,
+    day_start: DayStart | None = None,
 ) -> AccountState:
     """State relative to phase start; with NinjaTrader balances the floor trails their peak."""
     fresh = initial_state(rules, phase, day)
@@ -85,24 +92,34 @@ def start_account(
     # an intraday peak is never below the balance, whatever was entered at arming
     top = max(start.peak, start.balance) if dd.trailing == "intraday" else start.peak
     peak = top - start.phase_start
-    level = peak if dd.locks_at is None else min(peak, dd.locks_at)  # as drawdown.trail does
     balance = start.balance - start.phase_start
     return replace(
         fresh,
         balance=balance,
         # without day_start the balance now stands in; brackets are blocked until it arrives
-        day_start_balance=balance if day_start is None else day_start - start.phase_start,
+        day_start_balance=balance if day_start is None else day_start.balance - start.phase_start,
         peak=peak,
-        floor=max(fresh.floor, level - dd.amount),
+        floor=_floor(rules, phase, peak),
     )
+
+
+def _floor(rules: AccountRules, phase: Phase, peak: float) -> float:
+    """The drawdown floor for a peak relative to phase start, as drawdown.trail sets it."""
+    dd = phase_rules(rules, phase).max_drawdown
+    level = peak if dd.locks_at is None else min(peak, dd.locks_at)
+    return max(-dd.amount, level - dd.amount)
 
 
 def start(setup: Setup, now: datetime) -> Step:
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
-    acct = start_account(setup.rules, a.phase, trading_day(now), begin, setup.day_start)
-    # shortcut: session floor = floor at runner start; 21.5's warm-up replays today's fills
-    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, acct.floor)
+    day = setup.day_start if begin else None
+    acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
+    # without day_start these are the restart's figures; brackets are blocked until it arrives
+    floor = (
+        acct.floor if day is None else _floor(setup.rules, a.phase, day.peak - begin.phase_start)
+    )
+    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, floor)
     if setup.strategy_hash != a.strategy_hash:
         return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
     if a.mode != "dry" and setup.start is None:

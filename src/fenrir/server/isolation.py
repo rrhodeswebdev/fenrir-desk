@@ -4,6 +4,7 @@ import os
 import stat
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from fenrir.settings import Settings
 
@@ -59,6 +60,18 @@ def check(
         if not env_file_path.is_relative_to(private_dir_path):
             reasons.append(f"FENRIR_ENV_FILE {env_file_path} is outside the private dir")
     return reasons
+
+
+def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:
+    """(env overlay, `Popen` kwargs) that run a child as `user` from its passwd entry, with none
+    of the server's groups; `({}, {})` for None (the server's own user)."""
+    if not user:
+        return {}, {}
+    import pwd  # POSIX only; unset natively on Windows
+
+    pw = pwd.getpwnam(user)
+    env = {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell}
+    return env, {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []}
 
 
 def isolation_problems(settings: Settings) -> list[str]:

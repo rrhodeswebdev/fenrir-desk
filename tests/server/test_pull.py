@@ -2,8 +2,13 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
+import pytest
+
+from fenrir.server import pull
 from fenrir.server.pull import PullRunner, pull_command, pull_env, pull_status
+from fenrir.settings import Settings
 
 
 def wait_for(cond, timeout: float = 10.0) -> None:
@@ -51,12 +56,15 @@ def test_pull_command_ignores_modules_in_the_cwd(tmp_path):
     assert "--since" in out and "PLANTED" not in out
 
 
-def test_pull_env_passes_the_lse_key_but_not_the_nt_token():
-    env = pull_env({"PATH": "/bin", "FENRIR_NT_TOKEN": "nt", "FENRIR_DATA_DIR": "d"}, "lse")
+def test_pull_env_passes_the_lse_key_but_not_the_nt_token_or_secrets_file():
+    environ = {"PATH": "/bin", "FENRIR_NT_TOKEN": "nt", "FENRIR_ENV_FILE": "/var/lib/fenrir/.env"}
+    env = pull_env(environ, Settings(lse_api_key="lse", data_dir=Path("d")))
     assert env["FENRIR_LSE_API_KEY"] == "lse" and env["FENRIR_DATA_DIR"] == "d"
     assert env["PATH"] == "/bin" and "FENRIR_NT_TOKEN" not in env
+    # the child may run unprivileged: it must not read the root-only secrets file (#135)
+    assert "FENRIR_ENV_FILE" not in env
     # an empty key in settings must not hide one already in the environment
-    assert pull_env({"FENRIR_LSE_API_KEY": "env"}, "")["FENRIR_LSE_API_KEY"] == "env"
+    assert pull_env({"FENRIR_LSE_API_KEY": "env"}, Settings())["FENRIR_LSE_API_KEY"] == "env"
 
 
 def test_successful_pull_reports_done():
@@ -72,7 +80,7 @@ def test_successful_pull_reports_done():
 def test_failed_pull_reports_error_and_log():
     code = "import sys; print('starting'); sys.exit('FENRIR_LSE_API_KEY is not set')"
     # pull_env makes the child unbuffered, so stdout and stderr keep their order
-    runner = PullRunner(py(code), pull_env(os.environ, ""))
+    runner = PullRunner(py(code), pull_env(os.environ, Settings()))
     runner.start()
     wait_for(lambda: runner.status()["state"] == "error")
     assert runner.status()["log_tail"] == ["starting", "FENRIR_LSE_API_KEY is not set"]
@@ -105,7 +113,49 @@ def test_long_lines_are_clipped():
 
 def test_child_gets_the_env_it_is_given():
     code = "import os; print(os.environ['FENRIR_LSE_API_KEY'])"
-    runner = PullRunner(py(code), pull_env({}, "secret-key"))
+    runner = PullRunner(py(code), pull_env({}, Settings(lse_api_key="secret-key")))
     runner.start()
     wait_for(lambda: runner.status()["state"] == "done")
     assert runner.status()["log_tail"] == ["secret-key"]
+
+
+def test_unisolated_image_refuses_to_start(monkeypatch):
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
+    runner = PullRunner(py("print('ran')"), settings=Settings())
+    with pytest.raises(ValueError, match="FENRIR_PTY_USER is unset"):  # the shared check's reasons
+        runner.start()
+    assert runner.status()["state"] == "idle"
+
+
+def test_image_pull_child_runs_as_the_server_user(monkeypatch):
+    # never as FENRIR_PTY_USER: that user could read the LSE key from /proc/<pid>/environ
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
+    monkeypatch.setattr(pull, "isolation_problems", lambda s: [])
+    calls = []
+
+    class Done:
+        stdout = iter(())
+
+        def wait(self) -> int:
+            return 0
+
+    def popen(cmd, **kwargs):
+        calls.append(kwargs)
+        return Done()
+
+    monkeypatch.setattr(pull.subprocess, "Popen", popen)
+    env = {"PATH": "/bin", "FENRIR_LSE_API_KEY": "k"}
+    assert PullRunner(["pull"], env, settings=Settings()).start() is True
+    [kwargs] = calls
+    assert kwargs["env"] == env
+    assert not {"user", "group", "extra_groups"} & kwargs.keys()
+
+
+def test_isolation_problems_refuse_the_pull(monkeypatch):
+    monkeypatch.setattr(pull, "isolation_problems", lambda s: ["first", "second"])
+    runner = PullRunner(py("print('ran')"), settings=Settings())
+    with pytest.raises(ValueError, match="refusing to pull: first; second"):
+        runner.start()
+    assert runner.status()["state"] == "idle"

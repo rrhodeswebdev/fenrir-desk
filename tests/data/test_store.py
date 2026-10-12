@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -8,8 +10,10 @@ import pytest
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import parse_instruments
 from fenrir.core.sessions import trading_day
+from fenrir.data import store
 from fenrir.data.pull import Window
 from fenrir.data.store import (
+    _atomic_write,
     coverage,
     data_version,
     find_gaps,
@@ -214,3 +218,125 @@ def test_with_contract_complete_cutoff(days_back, complete):
     w = Window("NQ", "NQH26", date(2025, 12, 11), today - timedelta(days=days_back))
     m = with_contract({"series": {}}, w, rows=1, today=today, pulled_at="x")
     assert m["series"]["NQ"]["NQH26"]["complete"] is complete
+
+
+# data/ is terminal-writable in the image (DEC-1): no planted link may redirect a write (#135)
+NQ_ROWS = [(utc(2025, 12, 1, 15, 0), 1.0)]
+
+
+@pytest.mark.parametrize("dir_fd", [True, False])  # False: the native Windows fallback
+def test_planted_tmp_symlinks_are_never_followed(tmp_path, monkeypatch, dir_fd):
+    monkeypatch.setattr(store, "_DIR_FD", dir_fd)
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    (data / "bars" / "NQ" / "1m").mkdir(parents=True)
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_text("keep")
+    (data / "bars" / "manifest.json.tmp").symlink_to(secret)
+    (data / "bars" / "NQ" / "1m" / "NQZ25.parquet.tmp").symlink_to(secret)
+    write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    write_manifest(data, {"series": {}})
+    assert secret.read_text() == "keep"
+    assert read_manifest(data) == {"series": {}}
+    assert load_bars(data, INST, "NQ") == (bar(*NQ_ROWS[0], "NQZ25"),)
+    manifest = data / "bars" / "manifest.json"
+    assert not manifest.is_symlink() and manifest.stat().st_mode & 0o777 == 0o644
+    leftovers = {p.name for p in data.rglob("*.tmp")}
+    assert leftovers == {"manifest.json.tmp", "NQZ25.parquet.tmp"}  # only the planted links
+
+
+@pytest.mark.parametrize("dir_fd", [True, False])  # False: the native Windows fallback
+@pytest.mark.parametrize("link", ["", "bars", "bars/NQ", "bars/NQ/1m"])
+def test_symlinked_directory_refuses_the_write(tmp_path, monkeypatch, link, dir_fd):
+    monkeypatch.setattr(store, "_DIR_FD", dir_fd)
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    outside.mkdir()
+    (data / link).parent.mkdir(parents=True, exist_ok=True)
+    (data / link).symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    if link in ("", "bars"):  # on the manifest's path too
+        with pytest.raises(ValueError, match="symlink"):
+            write_manifest(data, {"series": {}})
+    assert list(outside.rglob("*")) == []
+
+
+def test_symlinked_target_is_replaced_not_followed(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_text("keep")
+    (tmp_path / "bars").mkdir()
+    (tmp_path / "bars" / "manifest.json").symlink_to(secret)
+    write_manifest(tmp_path, {"series": {}})
+    assert secret.read_text() == "keep"
+    assert not (tmp_path / "bars" / "manifest.json").is_symlink()
+    assert read_manifest(tmp_path) == {"series": {}}
+
+
+def test_directory_swapped_for_a_symlink_mid_write_is_refused(tmp_path, monkeypatch):
+    # the race a check-then-write walk loses: bars/NQ becomes a link right after it is created
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    outside.mkdir()
+    real_mkdir = os.mkdir
+
+    def mkdir_then_swap(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if Path(path).name == "NQ":
+            (data / "bars" / "NQ").rename(tmp_path / "moved")
+            (data / "bars" / "NQ").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(os, "mkdir", mkdir_then_swap)
+    with pytest.raises(ValueError, match="symlink"):
+        write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    assert list(outside.rglob("*")) == []
+
+
+def test_manifest_reads_refuse_links_fifos_and_huge_files(tmp_path, monkeypatch):
+    bars = tmp_path / "bars"
+    bars.mkdir()
+    manifest = bars / "manifest.json"
+    (tmp_path / "secret.json").write_text("{}")
+    manifest.symlink_to(tmp_path / "secret.json")
+    for read in (read_manifest, data_version):  # data_version runs at the end of every pull
+        with pytest.raises(ValueError, match="symlink"):
+            read(tmp_path)
+    manifest.unlink()
+    os.mkfifo(manifest)  # would block a plain read forever
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="not a regular file"):
+            read(tmp_path)
+    manifest.unlink()
+    manifest.write_text('{"series": {}}')
+    monkeypatch.setattr(store, "MAX_MANIFEST", 5)
+    with pytest.raises(ValueError, match="under 16 MB"):
+        read_manifest(tmp_path)
+
+
+def test_manifest_reads_refuse_a_bars_link_and_a_directory_without_leaking_fds(tmp_path):
+    data, elsewhere = tmp_path / "data", tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "manifest.json").write_text('{"secret": "root-only"}')
+    data.mkdir()
+    for read in (read_manifest, data_version):  # missing data/bars or manifest: empty
+        assert read(tmp_path / "missing") in ({"series": {}}, hashlib.sha256(b"").hexdigest())
+        assert read(data) in ({"series": {}}, hashlib.sha256(b"").hexdigest())
+    (data / "bars").symlink_to(elsewhere, target_is_directory=True)
+    fds = len(os.listdir("/dev/fd"))
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="symlink"):
+            read(data)
+    (data / "bars").unlink()
+    (data / "bars" / "manifest.json").mkdir(parents=True)
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="not a regular file"):
+            read(data)
+    assert len(os.listdir("/dev/fd")) == fds
+
+
+def test_failed_write_leaves_no_temp_file(tmp_path):
+    def fail(f):
+        f.write(b"half")
+        raise OSError("disk full")
+
+    with pytest.raises(OSError, match="disk full"):
+        _atomic_write(tmp_path, tmp_path / "bars" / "manifest.json", fail)
+    assert list((tmp_path / "bars").iterdir()) == []

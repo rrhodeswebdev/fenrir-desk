@@ -98,7 +98,7 @@ def create_app(
     app.state.settings = settings
     app.state.session_key = session_key
     app.state.allowed_origins = allowed_origins(port, dev)
-    app.state.pull = PullRunner(pull_command(), pull_env(os.environ, settings.lse_api_key))
+    app.state.pull = PullRunner(pull_command(), pull_env(os.environ, settings), settings=settings)
     app.state.jobs = JobRunner(settings, secret=session_key)  # started by _lifespan
     app.add_middleware(HostGuard)
     unspent = [launch_code]

@@ -103,6 +103,27 @@ def test_options_lists_files_without_executing_them(settings):
     assert not (settings.strategies_dir / "side.py.pid").exists()
 
 
+def test_a_symlinked_strategies_dir_is_500_listing_nothing(settings, tmp_path_factory):
+    elsewhere = tmp_path_factory.mktemp("elsewhere")  # a dir the terminal user cannot read
+    (elsewhere / "secret_name.py").write_text("x = 1")
+    linked = replace(settings, strategies_dir=Path("linked"))
+    linked.strategies_dir.symlink_to(elsewhere, target_is_directory=True)
+    r = _app(linked)[1].get("/api/backtests/options", headers=COOKIE)
+    assert r.status_code == 500
+    assert r.json() == {"detail": "linked is a symlink; not reading it"}
+
+
+def test_a_planted_instruments_yaml_is_500_naming_it_without_leaking(settings, tmp_path_factory):
+    secret = tmp_path_factory.mktemp("root") / "secret.yaml"  # parses as instruments
+    secret.write_text((REPO / "instruments.yaml").read_text() + "\n# secret-0001\n")
+    Path("instruments.yaml").unlink()
+    Path("instruments.yaml").symlink_to(secret)
+    r = _app(settings)[1].get("/api/backtests/options", headers=COOKIE)
+    assert r.status_code == 500
+    assert r.json() == {"detail": "instruments.yaml is a symlink; not reading it"}
+    assert "secret-0001" not in r.text
+
+
 def test_options_paths_pass_the_post_check_with_an_absolute_strategies_dir(settings, tmp_path):
     absolute = replace(settings, strategies_dir=tmp_path / "strategies")
     runner = FakeRunner()

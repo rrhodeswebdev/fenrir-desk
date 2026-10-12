@@ -53,8 +53,15 @@ def iso(ts: datetime) -> str:
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")  # readers (`open_ro`) never block the hub's writes
     conn.executescript(_SCHEMA)
     return conn
+
+
+def open_ro(path: Path) -> sqlite3.Connection:
+    """A read-only connection to an existing db (sqlite3.OperationalError if missing): the
+    journal API reads on its own, never on the hub's connection, and never creates the file."""
+    return sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)
 
 
 def write(

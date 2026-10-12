@@ -186,7 +186,10 @@ class LiveHub:
                     log.exception("live account %s failed on a bar", account)
                     await self._kill(account)
                     error = f"{type(e).__name__}: {e}"
-                    self._apply(account, *core.halt(s, f"live runner error: {error}"))
+                    try:
+                        self._apply(account, *core.halt(s, f"live runner error: {error}"))
+                    except Exception:  # the journal itself failed: halted in memory, row lost
+                        log.exception("live account %s halted; halt not journalled", account)
 
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
         out: tuple[Log, ...] = ()

@@ -25,6 +25,11 @@ def test_accepts_affordable_bracket(base, make_state):
     assert run(make_state(), base, long(19980.0)) is None
 
 
+@pytest.mark.parametrize("qty", [0, -1, float("nan"), 1.5, True])
+def test_qty_must_be_a_positive_whole_number(base, make_state, qty):
+    assert "positive whole number" in run(make_state(), base, long(19980.0, qty=qty))
+
+
 def test_rejects_stop_out_through_floor(base, make_state):
     reason = run(make_state(), base, long(19900.0))
     assert "drawdown" in reason  # (100 + 0.25) x 20 = 2005 > 2000

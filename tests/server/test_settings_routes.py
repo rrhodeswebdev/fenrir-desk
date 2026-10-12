@@ -178,6 +178,68 @@ def test_repo_env_secrets_only_in_the_image(env, tmp_path, monkeypatch):
     assert flag() is False
 
 
+IMPORT = "/api/settings/import-repo-secrets"
+
+
+@pytest.fixture
+def repo_env(env, tmp_path, monkeypatch) -> Path:
+    path = tmp_path / "repo.env"
+    monkeypatch.setattr(routes, "REPO_ENV", path)
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    return path
+
+
+def test_import_fills_only_empty_secrets_and_never_returns_them(env, repo_env):
+    client, env_file, _ = env
+    env_file.write_bytes(ENV.replace(f'"{TOKEN}"', "").encode())  # token empty, LSE key set
+    new_token = "repo-token-secret-9999"
+    repo_env.write_text(
+        f"FENRIR_NT_TOKEN={new_token}\nFENRIR_LSE_API_KEY=repo-lse-key-8888\nFENRIR_STALE_SECONDS=5\n"
+    )
+    r = client.post(IMPORT, headers=WRITE)
+    assert r.status_code == 200 and new_token not in r.text and "repo-lse" not in r.text
+    assert r.json()["imported"] == ["nt_token"]
+    assert r.json()["nt_token"] == "••••9999" and r.json()["stale_seconds"] == 90
+    saved = parse_env_text(env_file.read_text())
+    assert saved["FENRIR_NT_TOKEN"] == new_token and saved["FENRIR_LSE_API_KEY"] == LSE
+    assert "FENRIR_STALE_SECONDS" not in saved  # only secrets are imported
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+
+def test_import_with_no_repo_secrets_is_409(env, repo_env, monkeypatch):
+    client, env_file, _ = env
+    repo_env.write_text("FENRIR_NT_TOKEN=\n")
+    assert client.post(IMPORT, headers=WRITE).status_code == 409
+    repo_env.write_text("FENRIR_NT_TOKEN=x\nFENRIR_LSE_API_KEY=y\n")
+    r = client.post(IMPORT, headers=WRITE)  # both already set: never overwritten
+    assert r.status_code == 409 and r.json()["detail"].endswith("already set in the secrets file")
+    env_file.write_bytes(b"")
+    monkeypatch.delenv("FENRIR_BIND_ALL")  # natively the repo .env is the secrets file
+    assert client.post(IMPORT, headers=WRITE).status_code == 409
+    assert env_file.read_bytes() == b""
+
+
+def test_import_rejects_a_mask_without_echoing_it(env, repo_env):
+    client, env_file, _ = env
+    env_file.write_bytes(b"")
+    repo_env.write_text("FENRIR_LSE_API_KEY=••••leak\n")
+    r = client.post(IMPORT, headers=WRITE)
+    assert r.status_code == 422 and "leak" not in r.text
+    assert r.json()["errors"] == [
+        {"loc": ["lse_api_key"], "msg": "is a mask, not a secret; reload the page"}
+    ]
+    assert env_file.read_bytes() == b""
+
+
+def test_import_needs_a_session_and_origin(env, repo_env):
+    client, env_file, _ = env
+    repo_env.write_text("FENRIR_NT_TOKEN=x\n")
+    assert client.post(IMPORT).status_code == 403
+    client.cookies.clear()
+    assert client.post(IMPORT, headers=WRITE).status_code == 401
+    assert env_file.read_bytes() == ENV.encode()
+
+
 def test_accounts_default_for_every_rules_account(env):
     client, _, _ = env
     r = client.get("/api/settings/accounts")

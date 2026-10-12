@@ -149,6 +149,29 @@ def test_every_listed_strategy_is_accepted_with_strategies_outside_the_cwd(
     assert [c[0] for c in runner.calls] == ["expand", "submit"] * 3
 
 
+def test_a_wildcard_never_reaches_a_file_outside_strategies_dir(settings, tmp_path_factory):
+    # strategy_glob_ok passes each pattern: a wildcard part hides the symlink from resolve()
+    outside = tmp_path_factory.mktemp("outside")
+    (outside / "evil.py").write_text(SIDE_EFFECT)
+    (outside / "x.py").write_text(SIDE_EFFECT)
+    strategies = settings.strategies_dir
+    (strategies / "link.py").symlink_to(outside / "evil.py")
+    (strategies / "sub").symlink_to(outside)
+    client = _app(settings)[1]  # the real JobRunner and expand child
+    inside = f"is not a file inside {strategies.resolve()}"
+    for pattern, match in (
+        (str(strategies.resolve() / "l*.py"), str(strategies.resolve() / "link.py")),
+        ("strategies/*.py", "strategies/link.py"),
+        ("strategies/s*/x.py", "strategies/sub/x.py"),
+    ):
+        r = client.post("/api/backtests/jobs", headers=WRITE, json=GOOD | {"strategies": [pattern]})
+        assert r.status_code == 422, (pattern, r.text)
+        assert r.json()["detail"] == f"ValueError: {match!r} {inside}"
+    for root in (outside, settings.strategies_dir):
+        assert not list(root.rglob("*.pid"))  # nothing was executed, not even orb.py
+    assert client.get("/api/backtests/jobs", headers=COOKIE).json() == []
+
+
 def test_create_app_holds_a_job_runner_with_the_session_key(settings, monkeypatch):
     calls = []
     monkeypatch.setattr("fenrir.server.app.JobRunner", lambda s, **kw: calls.append((s, kw)))

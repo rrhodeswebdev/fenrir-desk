@@ -41,7 +41,7 @@ from fenrir.server.jobs import (
     update_item,
 )
 from fenrir.settings import Settings
-from fenrir.strategy.loader import MARKETS
+from fenrir.strategy.loader import MARKETS, file_hash
 
 log = logging.getLogger(__name__)
 
@@ -148,6 +148,25 @@ def parse_description(line: str, paths: Container[str]) -> dict[str, Any]:
     if path not in paths or name != Path(path).stem:
         raise ValueError(f"not a file this child was given: {line[:200]!r}")
     return data
+
+
+def _checked(path: str, entries: Sequence[dict[str, Any]], error: str) -> dict[str, Any]:
+    """The child's one description of `path`, with its hash checked against the file's bytes as
+    the server reads them (reading never executes). Strategy code can write to the child's
+    protocol fd, so a second line for a file, or a hash that is not the file's, is an error."""
+    failed = {"path": path, "name": Path(path).stem, "hash": None, "market": None, "params": {}}
+    if not entries:
+        return failed | {"error": error}
+    if len(entries) > 1:
+        return failed | {"error": "the strategy loader described this file more than once"}
+    [entry] = entries
+    try:
+        digest = file_hash(Path(path))
+    except OSError:
+        digest = None
+    if entry["hash"] is not None and entry["hash"] != digest:
+        return failed | {"error": "the file changed while loading"}
+    return entry
 
 
 def strategy_user(settings: Settings) -> str | None:
@@ -287,8 +306,9 @@ class JobRunner:
         """`[{path, name, hash, market, params, error}]` in `paths` order, from an isolated child
         that loads each strategy file (`parse_description`).
 
-        A file the child did not describe (isolation refusal, crash, timeout, bad output) gets
-        `error` with the reason and hash None. ValueError for a path not directly in
+        A file the child did not describe (isolation refusal, crash, timeout, bad output), described
+        twice, or whose hash is not its bytes' as read here gets `error` with the reason and hash
+        None. ValueError for a path not directly in
         `strategies_dir`: the child executes every file it is given.
         """
         for p in paths:
@@ -296,7 +316,7 @@ class JobRunner:
                 raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")
         if not paths:
             return []
-        answers: dict[str, dict[str, Any]] = {}
+        lines: dict[str, list[dict[str, Any]]] = {}
         error = "the strategy loader stopped before describing this file"
         try:
             proc = self._spawn(["--describe"], {"paths": list(paths)})
@@ -310,7 +330,7 @@ class JobRunner:
                     except ValueError:
                         log.warning("strategy loader: ignored child output %r", line[:200])
                         continue
-                    answers.setdefault(entry["path"], entry)
+                    lines.setdefault(entry["path"], []).append(entry)
             except TimeoutError:
                 error = f"loading the strategies took over {self._describe_timeout:g} s"
             finally:
@@ -318,8 +338,7 @@ class JobRunner:
                 proc.wait()
                 with self._lock:
                     self._expanding.discard(proc)
-        failed = {"hash": None, "market": None, "params": {}, "error": error}
-        return [answers.get(p) or {"path": p, "name": Path(p).stem} | failed for p in paths]
+        return [_checked(p, lines.get(p, ()), error) for p in paths]
 
     def submit(self, grid: Sequence[GridItem], include_holdout: bool) -> Job:
         created = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")

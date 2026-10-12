@@ -134,3 +134,67 @@ def test_401_without_a_session(env):
     _, settings = env
     client = TestClient(create_app(settings, KEY, "c" * 22, None, port=8000), base_url=BASE)
     assert client.get("/api/strategies").status_code == 401
+
+
+def test_a_second_concurrent_load_is_a_409(env):
+    from fenrir.server.routes import strategies
+
+    client, _ = env
+    assert strategies._describe_slot.acquire(blocking=False)  # a load in flight
+    try:
+        response = client.get("/api/strategies")
+    finally:
+        strategies._describe_slot.release()
+    assert response.status_code == 409
+    assert response.json() == {"detail": "the strategies are already being loaded"}
+    assert client.get("/api/strategies").status_code == 200
+
+
+def test_a_forged_line_for_another_file_cannot_stand_in_for_it(env):
+    client, settings = env
+    b = settings.strategies_dir / "b.py"
+    b.write_text(STRATEGY)
+    forged = {"path": str(b), "name": "b", "hash": file_hash(b), "market": "ES"}
+    forged |= {"params": {}, "error": None}  # a line parse_description accepts
+    # fd 3 is the child's protocol pipe (the dup of its stdout)
+    forge = f"__import__('os').write(3, b{json.dumps(json.dumps(forged) + chr(10))})\n"
+    (settings.strategies_dir / "a.py").write_text(forge + STRATEGY)
+    write_report(settings, "r", file_hash(b), "2026-10-11T14:00:00Z")
+    a, b_entry = client.get("/api/strategies").json()
+    assert a["error"] is None
+    assert b_entry["error"] == "the strategy loader described this file more than once"
+    assert (b_entry["hash"], b_entry["market"], b_entry["reports"]) == (None, None, [])
+
+
+def test_a_hash_that_is_not_the_files_is_an_error(env):
+    client, settings = env
+    path = settings.strategies_dir / "s.py"
+    path.write_text("open(__file__, 'a').write('# saved mid-load\\n')\n" + STRATEGY)
+    [entry] = client.get("/api/strategies").json()
+    assert entry["error"] == "the file changed while loading"
+    assert (entry["hash"], entry["market"], entry["reports"]) == (None, None, [])
+
+
+@pytest.mark.parametrize(
+    "change", [{"strategy_hash": ...}, {"account": ...}, {"periods": ...}, {"periods": None}]
+)
+def test_a_report_of_the_wrong_shape_is_a_500_naming_it(env, change):
+    client, settings = env
+    write_report(settings, "bad", "h" * 64, "2026-10-11T14:00:00Z")
+    path = settings.data_dir / "results" / "bad.json"
+    report = json.loads(path.read_text()) | change
+    path.write_text(json.dumps({k: v for k, v in report.items() if v is not ...}))  # ...: drop
+    response = client.get("/api/strategies")
+    assert response.status_code == 500
+    assert "bad.json" in response.json()["detail"]
+
+
+def test_an_empty_error_still_gets_no_reports(env, monkeypatch):
+    client, settings = env
+    path = settings.strategies_dir / "s.py"
+    path.write_text(STRATEGY)
+    write_report(settings, "r", file_hash(path), "2026-10-11T14:00:00Z")
+    entry = {"path": str(path), "name": "s", "hash": file_hash(path), "market": None}
+    entry |= {"params": {}, "error": ""}
+    monkeypatch.setattr(client.app.state.jobs, "describe", lambda paths: [entry])
+    assert client.get("/api/strategies").json()[0]["reports"] == []

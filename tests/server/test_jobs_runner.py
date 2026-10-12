@@ -374,12 +374,13 @@ def test_describe_times_out_kills_the_child_and_keeps_what_it_said(make, tmp_pat
     s = real_settings(tmp_path)
     for stem, hang in (("a", ""), ("b", "while True:\n    pass\n"), ("c", "")):
         (s.strategies_dir / f"{stem}.py").write_text(SIDE_EFFECT + hang)
-    runner = make(s, child=CHILD, describe_timeout=2)
+    # silence counts from spawn, and a loaded machine takes seconds to import the child
+    runner = make(s, child=CHILD, describe_timeout=10)
     paths = [str(s.strategies_dir / f"{stem}.py") for stem in "abc"]
     a, b, c = runner.describe(paths)
     assert (a["name"], a["market"], a["error"]) == ("a", "NQ", None)
     for entry in (b, c):
-        assert entry["error"] == "loading the strategies took over 2 s"
+        assert entry["error"] == "loading the strategies took over 10 s"
         assert (entry["hash"], entry["market"], entry["params"]) == (None, None, {})
     assert (b["path"], c["name"]) == (paths[1], "c")
     wait_for(lambda: gone(int(Path(f"{paths[1]}.pid").read_text())))

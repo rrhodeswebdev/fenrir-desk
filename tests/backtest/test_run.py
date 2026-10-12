@@ -1,3 +1,4 @@
+import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
 from datetime import date, timedelta
@@ -204,6 +205,53 @@ def test_bad_account_choices_name_the_file(tmp_path, text):
     (tmp_path / "accounts.yaml").write_text(text)
     with pytest.raises(ValueError, match="accounts.yaml"):
         load_account_choices(tmp_path)
+
+
+def test_account_choices_refuse_a_directory_without_leaking_fds(tmp_path):
+    (tmp_path / "accounts.yaml").mkdir()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(50):
+        with pytest.raises(ValueError, match="accounts.yaml is not a regular file"):
+            load_account_choices(tmp_path)
+    assert len(os.listdir("/dev/fd")) == before
+
+
+def test_deeply_nested_account_choices_are_not_valid_yaml(tmp_path):
+    (tmp_path / "accounts.yaml").write_text("a: " + "[" * 100_000 + "]" * 100_000 + "\n")
+    with pytest.raises(ValueError, match="accounts.yaml: not valid YAML"):
+        load_account_choices(tmp_path)
+
+
+def test_account_choices_never_follow_a_symlink_or_read_a_special_file(tmp_path):
+    secret = tmp_path / "secret.env"
+    secret.write_text("FENRIR_NT_TOKEN=nt-secret-token-0002\n")
+    path = tmp_path / "accounts.yaml"
+    path.symlink_to(secret)
+    with pytest.raises(ValueError, match="symlink"):
+        load_account_choices(tmp_path)
+    path.unlink()
+    os.mkfifo(path)  # a blocking open would hang here
+    with pytest.raises(ValueError, match="not a regular file"):
+        load_account_choices(tmp_path)
+    path.unlink()
+    path.write_text("#" * ((1 << 20) + 1))
+    with pytest.raises(ValueError, match="over"):
+        load_account_choices(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'FENRIR_LSE_API_KEY=x\nFENRIR_NT_TOKEN="nt-secret-token-0002"\n',  # bad YAML
+        "nt-secret-token-0002\n",  # a scalar: pydantic would quote it as input_value
+        "a: {eval_price: nt-secret-token-0002}\n",
+    ],
+)
+def test_account_choice_errors_never_quote_the_file(tmp_path, text):
+    (tmp_path / "accounts.yaml").write_text(text)
+    with pytest.raises(ValueError, match="accounts.yaml") as e:
+        load_account_choices(tmp_path)
+    assert "secret" not in str(e.value)
 
 
 def test_net_per_attempt_subtracts_the_accounts_price():

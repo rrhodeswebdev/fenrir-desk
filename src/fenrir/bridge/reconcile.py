@@ -50,11 +50,12 @@ def reconcile(
     `orders` are working orders; rows for other accounts are ignored."""
     mine = [p for p in positions if p.account == expected.account and p.qty != 0]
     working = [o for o in orders if o.account == expected.account]
-    out = [
-        Mismatch("unexpected_position", f"{p.instrument} qty {p.qty}")
-        for p in mine
-        if p.instrument != expected.instrument
+    out: list[Mismatch] = []
+    unexpected = [
+        f"{p.instrument} qty {p.qty}" for p in mine if p.instrument != expected.instrument
     ]
+    if unexpected:
+        out.append(Mismatch("unexpected_position", ", ".join(unexpected)))
     held = sum(p.qty for p in mine if p.instrument == expected.instrument)
     if held != expected.qty:
         out.append(
@@ -73,6 +74,7 @@ def reconcile(
         and o.instrument == expected.instrument
         and o.role in ("stop", "target")
         and o.action == closing
+        and o.qty > 0
     ]
     if held:
         for role, kind in (("stop", "missing_stop"), ("target", "missing_target")):
@@ -83,7 +85,8 @@ def reconcile(
                 )
     stray = [o for o in working if o not in protective]
     if stray:
-        state = f"holding {held} {expected.instrument}" if held else "flat"
+        holding = ", ".join(f"{p.qty} {p.instrument}" for p in mine)
+        state = f"holding {holding}" if holding else "flat"
         out.append(
             Mismatch(
                 "stray_orders",

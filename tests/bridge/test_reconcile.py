@@ -126,6 +126,32 @@ LONG_1 = [order("stop", order_id="s"), order("target", order_id="t")]
             ["stray_orders"],
             id="other-order-while-held",
         ),
+        pytest.param(
+            2,
+            [pos(1)],
+            [*LONG_1, order("entry", action="buy", order_id="e")],
+            ["position", "stray_orders"],
+            id="partial-fill-with-leftover-entry",
+        ),
+        pytest.param(
+            1,
+            [],
+            [order("target", order_id="t")],
+            ["position", "stray_orders"],
+            id="stop-hit-leftover-target",
+        ),
+        pytest.param(1, [pos(1)], [*LONG_1, LONG_1[0]], ["missing_stop"], id="duplicate-stop-row"),
+        pytest.param(
+            1,
+            [pos(1)],
+            [
+                order("stop", 2, order_id="s1"),
+                order("stop", -1, order_id="s2"),
+                order("target", order_id="t"),
+            ],
+            ["missing_stop", "stray_orders"],
+            id="negative-qty-order-is-not-protection",
+        ),
     ],
 )
 def test_reconcile(expected, positions, orders, want):
@@ -135,6 +161,18 @@ def test_reconcile(expected, positions, orders, want):
 def test_stray_detail_names_the_orders():
     result = reconcile(book(1), [pos(1)], [*LONG_1, order("entry", action="buy", order_id="e9")])
     assert result == (Mismatch("stray_orders", "working orders while holding 1 NQ 12-26: e9"),)
+
+
+def test_unexpected_positions_are_one_mismatch():
+    result = reconcile(book(0), [pos(1, instrument=ES), pos(-2, instrument="MES 12-26")], [])
+    assert result == (Mismatch("unexpected_position", "ES 12-26 qty 1, MES 12-26 qty -2"),)
+
+
+def test_stray_detail_names_the_unexpected_holding():
+    result = reconcile(
+        book(0), [pos(1, instrument=ES)], [order("stop", instrument=ES, order_id="es-s")]
+    )
+    assert result[1] == Mismatch("stray_orders", "working orders while holding 1 ES 12-26: es-s")
 
 
 def test_all_kinds_together_in_fixed_order():

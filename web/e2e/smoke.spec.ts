@@ -1,4 +1,6 @@
 import { type Page, expect, test } from '@playwright/test'
+import { PORT } from '../playwright.config'
+import { SESSION_EXPIRED } from '../src/errorText'
 
 const pages = [
   ['/', 'Workbench'],
@@ -64,13 +66,25 @@ test('the launch link signed the browser in', async ({ page }) => {
   expect(await apiStatus(page)).toBe(200)
 })
 
+// the server closes a socket without a valid session cookie or Origin before accepting it
+test('/backtests opens the jobs socket on the same host and the server accepts it', async ({ page }) => {
+  const socket = page.waitForEvent('websocket')
+  await page.goto('/backtests')
+  const ws = await socket
+  expect(ws.url()).toBe(`ws://localhost:${PORT}/ws/jobs`)
+  await page.waitForTimeout(1_000) // a refused socket closes at once
+  expect(ws.isClosed()).toBe(false)
+  await expect(page.getByText('Live updates stopped')).toHaveCount(0)
+})
+
 test.describe('without the launch link', () => {
   test.use({ storageState: { cookies: [], origins: [] } })
 
-  // Static files are public. Once a page fetches, its 401 shows the "Session expired" line.
+  // Static files are public; the page's 401 shows the "Session expired" line.
   test('the shell still loads but the API refuses', async ({ page }) => {
     await page.goto('/rules')
     await expectPage(page, 'Rules', 'Rules')
+    await expect(page.getByRole('alert')).toHaveText(SESSION_EXPIRED)
     expect(await apiStatus(page)).toBe(401)
   })
 })

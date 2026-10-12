@@ -168,6 +168,24 @@ async def test_halts_survive_a_restart_until_rearmed(hub, conn, armed):
     assert acc["halted"] is False
 
 
+async def test_start_gets_the_peaks_and_last_row_since_arming(hub, conn, armed, monkeypatch):
+    calls = []
+    real = core.start
+
+    def spy(setup, now, halts=(), peaks=(), last_row=None):
+        calls.append((list(peaks), last_row))
+        return real(setup, now, halts, peaks, last_row)
+
+    monkeypatch.setattr(core, "start", spy)
+    arming.insert_armed(conn, armed)
+    mine = {"peak": 50_200.0, "ts": "2026-10-12T13:01:00+00:00"}
+    journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "peak", {"peak": 9e9})  # earlier
+    journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "peak", mine)
+    journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "bar", {})
+    await hub.tick(T0)
+    assert calls == [([mine], ARMED_AT + timedelta(minutes=2))]
+
+
 async def test_file_edited_while_armed_halts_on_next_bar(hub, conn, armed):
     arming.insert_armed(conn, armed)
     await hub.handle_bar(bar(T0))

@@ -127,7 +127,7 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
         "halted": True,
         "halt_kind": None,
         "halt_reason": f"cannot start: {error}",
-    } | dict.fromkeys(("balance", "today_pnl", "limits", "position", "session"))
+    } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
 class LiveHub:
@@ -256,7 +256,11 @@ class LiveHub:
             )
             return
         halts = journal.rows(self.conn, a.account, kind="halt", since=a.armed_at)
-        s, out = core.start(setup, now, [r.payload for r in halts])
+        peaks = journal.rows(self.conn, a.account, kind="peak", since=a.armed_at)
+        last = journal.last_ts(self.conn, a.account, a.armed_at)
+        s, out = core.start(
+            setup, now, [r.payload for r in halts], [r.payload for r in peaks], last
+        )
         if s.started:
             try:
                 await self._spawn(a)

@@ -10,7 +10,7 @@ from typing import Any
 
 from fenrir.core.sessions import NY
 
-KINDS = frozenset({"bar", "action", "rejection", "fill", "alert", "halt"})
+KINDS = frozenset({"bar", "action", "rejection", "fill", "alert", "halt", "peak"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS journal (
@@ -109,3 +109,10 @@ def rows(
         JournalRow(i, datetime.fromisoformat(ts), acc, kind, json.loads(p))
         for i, ts, acc, kind, p in conn.execute(sql + " ORDER BY id", args)
     )
+
+
+def last_ts(conn: sqlite3.Connection, account: str, since: datetime) -> datetime | None:
+    """When the account's latest row at or after `since` was written; None when there is none."""
+    sql = "SELECT MAX(ts) FROM journal WHERE account = ? AND ts >= ?"
+    (ts,) = conn.execute(sql, (account, iso(since))).fetchone()
+    return ts and datetime.fromisoformat(ts)

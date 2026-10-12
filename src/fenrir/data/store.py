@@ -140,7 +140,8 @@ def _atomic_write(data_dir: Path, path: Path, write: Callable[[BinaryIO], Any]) 
                 write(f)
             os.replace(tmp, path.name, src_dir_fd=fd, dst_dir_fd=fd)
         except BaseException:
-            os.unlink(tmp, dir_fd=fd)
+            with contextlib.suppress(FileNotFoundError):  # the terminal may have removed it
+                os.unlink(tmp, dir_fd=fd)
             raise
     finally:
         os.close(fd)
@@ -167,15 +168,15 @@ def _atomic_write_checked(data_dir: Path, path: Path, write: Callable[[BinaryIO]
         raise
 
 
-def read_manifest(data_dir: Path) -> dict[str, Any]:
-    """ValueError for a symlink, a non-regular file or one over 16 MB: the pull reads this as root
-    in the image, where the terminal could plant a link, a FIFO or /dev/zero (DEC-1)."""
+def _manifest_bytes(data_dir: Path) -> bytes:
+    """b"" when missing. ValueError for a symlink, a non-regular file or one over 16 MB: the pull
+    reads this as root in the image, where the terminal could plant a link, a FIFO or /dev/zero."""
     path = _manifest_path(data_dir)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except FileNotFoundError:
-        return {"series": {}}
+        return b""
     except OSError as e:
         if e.errno == errno.ELOOP:
             raise ValueError(f"refusing to read symlink {path}") from None
@@ -184,7 +185,11 @@ def read_manifest(data_dir: Path) -> dict[str, Any]:
         text = f.read(MAX_MANIFEST + 1) if stat.S_ISREG(os.fstat(fd).st_mode) else None
     if text is None or len(text) > MAX_MANIFEST:
         raise ValueError(f"refusing to read {path}: not a regular file under 16 MB")
-    return json.loads(text)
+    return text
+
+
+def read_manifest(data_dir: Path) -> dict[str, Any]:
+    return json.loads(_manifest_bytes(data_dir) or b'{"series": {}}')
 
 
 def write_manifest(data_dir: Path, manifest: Mapping[str, Any]) -> None:
@@ -193,8 +198,7 @@ def write_manifest(data_dir: Path, manifest: Mapping[str, Any]) -> None:
 
 
 def data_version(data_dir: Path) -> str:
-    path = _manifest_path(data_dir)
-    return hashlib.sha256(path.read_bytes() if path.exists() else b"").hexdigest()
+    return hashlib.sha256(_manifest_bytes(data_dir)).hexdigest()
 
 
 def write_contract(data_dir: Path, series: str, contract: str, frame: pl.DataFrame) -> int:

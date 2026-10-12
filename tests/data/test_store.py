@@ -224,7 +224,9 @@ def test_with_contract_complete_cutoff(days_back, complete):
 NQ_ROWS = [(utc(2025, 12, 1, 15, 0), 1.0)]
 
 
-def test_planted_tmp_symlinks_are_never_followed(tmp_path):
+@pytest.mark.parametrize("dir_fd", [True, False])  # False: the native Windows fallback
+def test_planted_tmp_symlinks_are_never_followed(tmp_path, monkeypatch, dir_fd):
+    monkeypatch.setattr(store, "_DIR_FD", dir_fd)
     data, outside = tmp_path / "data", tmp_path / "outside"
     (data / "bars" / "NQ" / "1m").mkdir(parents=True)
     outside.mkdir()
@@ -243,8 +245,10 @@ def test_planted_tmp_symlinks_are_never_followed(tmp_path):
     assert leftovers == {"manifest.json.tmp", "NQZ25.parquet.tmp"}  # only the planted links
 
 
+@pytest.mark.parametrize("dir_fd", [True, False])  # False: the native Windows fallback
 @pytest.mark.parametrize("link", ["", "bars", "bars/NQ", "bars/NQ/1m"])
-def test_symlinked_directory_refuses_the_write(tmp_path, link):
+def test_symlinked_directory_refuses_the_write(tmp_path, monkeypatch, link, dir_fd):
+    monkeypatch.setattr(store, "_DIR_FD", dir_fd)
     data, outside = tmp_path / "data", tmp_path / "outside"
     outside.mkdir()
     (data / link).parent.mkdir(parents=True, exist_ok=True)
@@ -286,18 +290,20 @@ def test_directory_swapped_for_a_symlink_mid_write_is_refused(tmp_path, monkeypa
     assert list(outside.rglob("*")) == []
 
 
-def test_manifest_read_refuses_links_fifos_and_huge_files(tmp_path, monkeypatch):
+def test_manifest_reads_refuse_links_fifos_and_huge_files(tmp_path, monkeypatch):
     bars = tmp_path / "bars"
     bars.mkdir()
     manifest = bars / "manifest.json"
     (tmp_path / "secret.json").write_text("{}")
     manifest.symlink_to(tmp_path / "secret.json")
-    with pytest.raises(ValueError, match="symlink"):
-        read_manifest(tmp_path)
+    for read in (read_manifest, data_version):  # data_version runs at the end of every pull
+        with pytest.raises(ValueError, match="symlink"):
+            read(tmp_path)
     manifest.unlink()
     os.mkfifo(manifest)  # would block a plain read forever
-    with pytest.raises(ValueError, match="not a regular file"):
-        read_manifest(tmp_path)
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="not a regular file"):
+            read(tmp_path)
     manifest.unlink()
     manifest.write_text('{"series": {}}')
     monkeypatch.setattr(store, "MAX_MANIFEST", 5)

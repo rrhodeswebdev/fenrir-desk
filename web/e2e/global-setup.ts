@@ -1,5 +1,5 @@
 import { chromium } from '@playwright/test'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -13,9 +13,17 @@ const LAUNCH = /^Open (http:\/\/localhost:\d+\/launch\?code=\S+)$/m
 export default async function globalSetup() {
   const tmp = await mkdtemp(path.join(tmpdir(), 'fenrir-e2e-'))
   const dir = (name: string) => path.join(tmp, name)
-  await cp(path.join(repo, 'rules'), dir('rules'), { recursive: true })
-  await cp(path.join(repo, 'strategies'), dir('strategies'), { recursive: true })
-  await writeFile(dir('empty.env'), '')
+  try {
+    await cp(path.join(repo, 'rules'), dir('rules'), { recursive: true })
+    await cp(path.join(repo, 'strategies'), dir('strategies'), { recursive: true })
+    await cp(path.join(repo, 'tests/fixtures/e2e/e2e_bracket.py'), path.join(dir('strategies'), 'e2e_bracket.py'))
+    await writeFile(dir('empty.env'), '')
+    // synthetic NQ bars, small enough that a real backtest finishes in seconds
+    execFileSync('uv', ['run', 'python', 'tests/fixtures/e2e/make_bars.py', dir('data')], { cwd: repo })
+  } catch (e) {
+    await rm(tmp, { recursive: true, force: true })
+    throw e
+  }
   const server = spawn('uv', ['run', 'fenrir', 'serve', '--port', String(PORT), '--static-dir', 'web/dist'], {
     cwd: repo,
     env: {

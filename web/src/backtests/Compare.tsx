@@ -24,7 +24,7 @@ export type CompareRow = {
 }
 export type Group = { group: string; rows: CompareRow[] }
 
-const FIGURES = ['P(pass+payout)', 'Pass', 'Net / attempt', 'Microscalp'] as const
+export const FIGURES = ['P(pass+payout)', 'Pass', 'Net / attempt', 'Microscalp'] as const
 
 /** The identity columns a row needs: the group already names the viewed one. */
 export const identity = (view: View) => (['strategy', 'account', 'contract'] as const).filter((k) => k !== view)

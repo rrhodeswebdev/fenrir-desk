@@ -1,6 +1,7 @@
 """Reject a bracket whose stop-out would breach a limit. Shared by backtest and live."""
 
 import math
+from numbers import Integral
 
 from fenrir.core.actions import Bracket
 from fenrir.core.instruments import ContractSpec
@@ -18,8 +19,9 @@ def check(
     entry_price: float,
     held_minis: float,
 ) -> str | None:
-    if bracket.qty <= 0:
-        return f"qty must be positive, got {bracket.qty}"
+    q = bracket.qty  # NaN and 1.5 pass a bare `<= 0`; NinjaTrader trades whole contracts
+    if not isinstance(q, Integral) or isinstance(q, bool) or q <= 0:
+        return f"qty must be a positive whole number, got {q!r}"
     if not all(map(math.isfinite, (entry_price, bracket.stop, bracket.target))):
         return (
             f"prices must be finite: entry {entry_price}, stop {bracket.stop},"

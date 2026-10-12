@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fenrir.backtest.attempt import ADDON_FLATTEN, MINUTE, WINDOW
-from fenrir.core.actions import Action, Bracket
+from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import ContractSpec
 from fenrir.core.sessions import at_or_after, trading_day
@@ -55,6 +55,7 @@ class RunnerState:
     halted: str | None = None  # no new entries while set
     halt_kind: str | None = None  # "safety" | "breach" | ... (Plans 21–24 AccountStatus)
     halt_day: date | None = None  # halt lifts after this trading day; None = until disarmed
+    started: bool = True  # False: start refused, so the figures are not the account's
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +64,7 @@ class Log:
     payload: Mapping[str, Any]
 
 
-Effect = Log
-Step = tuple[RunnerState, tuple[Effect, ...]]
+Step = tuple[RunnerState, tuple[Log, ...]]
 
 
 def start_account(
@@ -75,12 +75,17 @@ def start_account(
     if start is None:
         return fresh
     dd = phase_rules(rules, phase).max_drawdown
-    peak = start.peak - start.phase_start
+    # an intraday peak is never below the balance, whatever was entered at arming
+    top = max(start.peak, start.balance) if dd.trailing == "intraday" else start.peak
+    peak = top - start.phase_start
     level = peak if dd.locks_at is None else min(peak, dd.locks_at)  # as drawdown.trail does
     balance = start.balance - start.phase_start
     return replace(
         fresh,
         balance=balance,
+        # shortcut: treats the balance at start as today's opening balance, which understates
+        # the DLL room after a losing morning and can unlock a higher funded scaling tier after
+        # a winning one; 21.5 or 22.2 must restore it before a sim/live order is sent
         day_start_balance=balance,
         peak=peak,
         floor=max(fresh.floor, level - dd.amount),
@@ -94,9 +99,10 @@ def start(setup: Setup, now: datetime) -> Step:
     # shortcut: session start = balance at runner start; 21.5's warm-up restores today's fills
     s = RunnerState(setup, acct, FLAT, (), (), acct.balance, acct.floor)
     if setup.strategy_hash != a.strategy_hash:
-        return halt(s, "strategy file changed since arming; re-run the backtest and re-arm")
+        return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
     if a.mode != "dry" and setup.start is None:
-        return halt(s, "sim and live need the NinjaTrader start and peak balances (DEC-4a)")
+        reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
+        return halt(replace(s, started=False), reason)
     return s, ()
 
 
@@ -133,17 +139,27 @@ def decide(s: RunnerState, actions: Sequence[Action]) -> Step:
 
     `actions` are Action values: the shell parses the child's JSON into them (DEC-1).
     """
-    out = [Log("bar", {**asdict(s.bars[-1]), "actions": len(actions)})]
-    pending = False  # a bracket accepted earlier this bar, as the backtest's `pending`
+    decided: list[tuple[Action, str | None]] = []
+    pending = None  # index of a bracket accepted earlier this bar, as the backtest's `pending`
     for a in actions:
-        reason = _block(s, a, pending)
-        if reason:
-            out.append(Log("rejection", {"action": _payload(a), "reason": reason}))
-        else:
-            out.append(Log("action", {**_payload(a), "mode": s.setup.armed.mode, "sent": False}))
-        if not reason:
-            pending = isinstance(a, Bracket)  # Flatten and Cancel clear it, as in the backtest
-    return s, tuple(out)
+        reason = _block(s, a, pending is not None)
+        if isinstance(a, (Flatten, Cancel)) and pending is not None:
+            # the backtest drops that bracket before it is ever placed
+            decided[pending] = (decided[pending][0], f"replaced by a {type(a).__name__} this bar")
+            pending = None
+        elif isinstance(a, Bracket) and reason is None:
+            pending = len(decided)
+        decided.append((a, reason))
+    mode = s.setup.armed.mode
+    return s, (
+        Log("bar", {**asdict(s.bars[-1]), "actions": len(actions)}),
+        *(
+            Log("rejection", {"action": _payload(a), "reason": r})
+            if r
+            else Log("action", {**_payload(a), "mode": mode, "sent": False})
+            for a, r in decided
+        ),
+    )
 
 
 def step_failed(s: RunnerState, error: str) -> Step:
@@ -164,7 +180,7 @@ def account_status(s: RunnerState) -> dict[str, Any]:
     """One AccountStatus (Plans 21–24)."""
     a, rules, acct = s.setup.armed, s.setup.rules, s.acct
     p, v = phase_rules(rules, acct.phase), view(acct, rules)
-    return {
+    head = {
         "account": a.account,
         "mode": a.mode,
         "phase": acct.phase,
@@ -174,6 +190,10 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "halted": s.halted is not None,
         "halt_kind": s.halt_kind,
         "halt_reason": s.halted,
+    }
+    if not s.started:
+        return head | dict.fromkeys(("balance", "today_pnl", "limits", "position", "session"))
+    return head | {
         "balance": acct.balance,
         "today_pnl": v.today_pnl,
         "limits": {

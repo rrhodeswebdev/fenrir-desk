@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from backtest_helpers import NQ
 
+from fenrir.core.instruments import ContractSpec
 from fenrir.live.arming import Armed
 from fenrir.live.core import Setup, Start
 from fenrir.rules.schema import AccountRules
@@ -18,9 +19,10 @@ def make_setup(
     phase: str = "evaluation",
     start: Start | None = None,
     strategy_hash: str = "h1",
+    spec: ContractSpec = NQ,
 ) -> Setup:
-    """A runner setup for NQ, armed with strategy hash "h1" and the default 80% safety margin."""
+    """A runner setup (NQ by default), armed with strategy hash "h1" and an 80% safety margin."""
     armed = Armed(
-        "Sim101", "strategies/orb.py", "h1", "lucid-test-50k", "NQ", mode, phase, ARMED_AT
+        "Sim101", "strategies/orb.py", "h1", "lucid-test-50k", spec.symbol, mode, phase, ARMED_AT
     )
-    return Setup(armed, strategy_hash, rules, NQ, 80.0, start)
+    return Setup(armed, strategy_hash, rules, spec, 80.0, start)

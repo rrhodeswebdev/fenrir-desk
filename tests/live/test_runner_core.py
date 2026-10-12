@@ -7,6 +7,7 @@ from live_helpers import make_setup
 
 from fenrir.backtest.attempt import run_attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
+from fenrir.core.instruments import ContractSpec
 from fenrir.live import core
 from fenrir.live.core import Start
 from fenrir.rules.drawdown import max_drawdown
@@ -112,9 +113,10 @@ def test_no_entries_at_or_after_flat_time():
     assert kinds(decide(make_setup(make_rules()), [LONG], early)[1]) == ["bar", "action"]
 
 
-def test_one_bracket_per_bar_and_flatten_cancel_pass():
+def test_one_bracket_per_bar_and_flatten_cancel_replace_it():
     _, effects = decide(make_setup(make_rules()), [LONG, LONG, Cancel("x"), LONG])
-    assert kinds(effects) == ["bar", "action", "rejection", "action", "action"]
+    assert kinds(effects) == ["bar", "rejection", "rejection", "action", "action"]
+    assert effects[1].payload["reason"] == "replaced by a Cancel this bar"
     assert effects[2].payload["reason"] == "a bracket was already accepted this bar"
 
 
@@ -141,6 +143,9 @@ def test_changed_strategy_file_halts_at_start():
 def test_sim_without_start_balances_halts_and_dry_ignores_them():
     s, effects = core.start(make_setup(make_rules(), mode="sim"), BAR.ts)
     assert kinds(effects) == ["halt"] and "DEC-4a" in s.halted
+    st = core.account_status(s)  # cannot start: no figures (Plans 21–24 AccountStatus)
+    assert st["halted"] and "DEC-4a" in st["halt_reason"]
+    assert [st[k] for k in ("balance", "today_pnl", "limits", "position", "session")] == [None] * 5
     start = Start(phase_start=50_000.0, peak=51_000.0, balance=50_500.0)
     s, effects = core.start(make_setup(make_rules(), start=start), BAR.ts)
     assert effects == () and (s.acct.balance, s.acct.floor) == (0.0, -2000.0)
@@ -160,6 +165,13 @@ def test_start_floor_matches_the_drawdown_rule(locks_at):
         replace(fresh, balance=3000.0), DayClosed(D1, BAR.ts)
     )
     assert acct.floor == trailed.floor == (100.0 if locks_at else 1000.0)
+
+
+def test_intraday_start_floor_trails_at_least_the_balance():
+    rules = make_rules(trailing="intraday")
+    start = Start(phase_start=50_000.0, peak=50_500.0, balance=51_000.0)  # peak entered too low
+    acct = core.start_account(rules, "evaluation", D1, start)
+    assert (acct.peak, acct.floor) == (1000.0, -1000.0)
 
 
 @pytest.mark.parametrize(
@@ -216,23 +228,67 @@ def test_account_status_shape():
     )
 
 
+MNQ = ContractSpec("MNQ", "NQ", 2.0, 0.25, 0.1)
+NAN = float("nan")
+
+
+def live_brackets(effects):
+    return [
+        e.payload["qty"] for e in effects if e.kind == "action" and e.payload["type"] == "Bracket"
+    ]
+
+
+def backtest_brackets(bars, script, rules, spec, first_fill=0):
+    """Qty of the bracket the backtest opens from `script`, as a 0- or 1-item list."""
+    result = run_attempt(bars, 0, len(bars), scripted(script), rules, spec)
+    return [abs(f.qty) for f in result.fills[first_fill : first_fill + 1]]
+
+
 @pytest.mark.parametrize(
-    ("hhmm", "bracket", "daily_loss"),
+    ("hhmm", "actions", "daily_loss", "spec"),
     [
-        ("09:30", LONG, None),
-        ("09:30", replace(LONG, qty=5), None),  # contract limit
-        ("09:30", Bracket("long", 1, 19900.0, 20020.0), None),  # drawdown
-        ("09:30", Bracket("long", 1, 19901.0, 20020.0), None),
-        ("09:30", Bracket("long", 1, 19975.0, 20020.0), 500.0),  # daily loss limit
-        ("09:30", Bracket("short", 1, 20010.0, 19980.0), 500.0),
-        ("09:30", Bracket("long", 1, 20010.0, 20020.0), None),  # stop on the wrong side
-        ("16:39", LONG, None),  # flat time
+        ("09:30", [LONG], None, NQ),
+        ("09:30", [replace(LONG, qty=5)], None, NQ),  # contract limit
+        ("09:30", [replace(LONG, qty=NAN)], None, NQ),
+        ("09:30", [replace(LONG, qty=1.5)], None, NQ),
+        ("09:30", [Bracket("long", 1, 19900.0, 20020.0)], None, NQ),  # drawdown
+        ("09:30", [Bracket("long", 1, 19901.0, 20020.0)], None, NQ),
+        ("09:30", [Bracket("long", 1, 19975.0, 20020.0)], 500.0, NQ),  # daily loss limit
+        ("09:30", [Bracket("short", 1, 20010.0, 19980.0)], 500.0, NQ),
+        ("09:30", [Bracket("long", 1, 20010.0, 20020.0)], None, NQ),  # stop on the wrong side
+        ("16:39", [LONG], None, NQ),  # flat time
+        ("09:30", [LONG, replace(LONG, qty=2)], None, NQ),  # first bracket wins
+        ("09:30", [LONG, Flatten(), replace(LONG, qty=2)], None, NQ),  # last bracket wins
+        ("09:30", [LONG, Cancel("x")], None, NQ),
+        ("09:30", [replace(LONG, qty=40)], None, MNQ),  # 4 mini-equivalents
+        ("09:30", [replace(LONG, qty=41)], None, MNQ),
+        ("09:30", [Bracket("long", 10, 19900.0, 20020.0)], None, MNQ),  # $2,005 stop-out
+        ("09:30", [Bracket("long", 10, 19901.0, 20020.0)], None, MNQ),
     ],
 )
-def test_accepts_exactly_what_the_backtest_accepts(hhmm, bracket, daily_loss):
+def test_accepts_exactly_what_the_backtest_accepts(hhmm, actions, daily_loss, spec):
     rules = make_rules(daily_loss=daily_loss)
     b = bar(hhmm, 20000.0, 20005.0, 19995.0, 20000.0)
     following = replace(b, ts=b.ts + timedelta(minutes=1))
-    result = run_attempt((b, following), 0, 2, scripted({hhmm: [bracket]}), rules, NQ)
-    _, effects = decide(make_setup(rules), [bracket], b)
-    assert (kinds(effects)[1] == "action") == bool(result.fills)
+    expected = backtest_brackets((b, following), {hhmm: actions}, rules, spec)
+    _, effects = decide(make_setup(rules, spec=spec), actions, b)
+    assert live_brackets(effects) == expected
+
+
+@pytest.mark.parametrize(("stop", "accepted"), [(19976.0, True), (19975.0, False)])
+def test_after_a_loss_accepts_exactly_what_the_backtest_accepts(stop, accepted):
+    # 09:30 long stops out at 09:32: (20000.25 − 19924.75) × $20 = $1,510 lost, $490 of room left
+    rules = make_rules()
+    bars = (
+        bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0),
+        bar("09:31", 20000.0, 20005.0, 19995.0, 20000.0),
+        bar("09:32", 20000.0, 20005.0, 19900.0, 19950.0),
+        bar("09:33", 20000.0, 20005.0, 19995.0, 20000.0),
+        bar("09:34", 20000.0, 20005.0, 19995.0, 20000.0),
+    )
+    late = Bracket("long", 1, stop, 20020.0)  # $485 or $505 stop-out
+    script = {"09:30": [Bracket("long", 1, 19925.0, 20100.0)], "09:33": [late]}
+    expected = backtest_brackets(bars, script, rules, NQ, first_fill=2)
+    s = run(make_setup(rules), bars[3])
+    s = replace(s, acct=replace(s.acct, balance=-1510.0, traded_today=True))
+    assert live_brackets(core.decide(s, [late])[1]) == expected == ([1] if accepted else [])

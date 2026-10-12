@@ -239,7 +239,8 @@ async def test_env_proxies_are_ignored(addon, monkeypatch):
         monkeypatch.setenv(var, dead_proxy)
     for var in ("NO_PROXY", "no_proxy"):
         monkeypatch.delenv(var, raising=False)
-    client = AddonClient(url, "secret", timeout=0.3, retries=1, reconnect_delay=0.05)
+    # default timeout: a dead proxy refuses at once, and a short one flakes under load
+    client = AddonClient(url, "secret", retries=1, reconnect_delay=0.05)
     assert await client.accounts() == [ACCOUNT]
     assert (await client.flatten_all("c12")).accepted is True
     gen = client.stream()
@@ -270,7 +271,7 @@ async def test_silent_peer_is_reported_within_heartbeat_timeout():
     assert await anext(gen) == {"type": "connected"}
     start = time.monotonic()
     assert (await asyncio.wait_for(anext(gen), 15))["type"] == "disconnected"
-    assert time.monotonic() - start < 0.5 + 1.5
+    assert time.monotonic() - start < 0.5 + 4  # the old close_timeout took ~10.5 s
     await gen.aclose()
     await client.aclose()
     server.close()

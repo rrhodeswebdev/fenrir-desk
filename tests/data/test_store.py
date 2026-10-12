@@ -1,6 +1,8 @@
 import hashlib
 import json
+import os
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import polars as pl
 import pytest
@@ -8,6 +10,7 @@ import pytest
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import parse_instruments
 from fenrir.core.sessions import trading_day
+from fenrir.data import store
 from fenrir.data.pull import Window
 from fenrir.data.store import (
     _atomic_write,
@@ -254,14 +257,52 @@ def test_symlinked_directory_refuses_the_write(tmp_path, link):
     assert list(outside.rglob("*")) == []
 
 
-def test_symlinked_target_refuses_the_write(tmp_path):
+def test_symlinked_target_is_replaced_not_followed(tmp_path):
     secret = tmp_path / "secret"
     secret.write_text("keep")
     (tmp_path / "bars").mkdir()
     (tmp_path / "bars" / "manifest.json").symlink_to(secret)
-    with pytest.raises(ValueError, match="symlink"):
-        write_manifest(tmp_path, {"series": {}})
+    write_manifest(tmp_path, {"series": {}})
     assert secret.read_text() == "keep"
+    assert not (tmp_path / "bars" / "manifest.json").is_symlink()
+    assert read_manifest(tmp_path) == {"series": {}}
+
+
+def test_directory_swapped_for_a_symlink_mid_write_is_refused(tmp_path, monkeypatch):
+    # the race a check-then-write walk loses: bars/NQ becomes a link right after it is created
+    data, outside = tmp_path / "data", tmp_path / "outside"
+    outside.mkdir()
+    real_mkdir = os.mkdir
+
+    def mkdir_then_swap(path, mode=0o777, *, dir_fd=None):
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        if Path(path).name == "NQ":
+            (data / "bars" / "NQ").rename(tmp_path / "moved")
+            (data / "bars" / "NQ").symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(os, "mkdir", mkdir_then_swap)
+    with pytest.raises(ValueError, match="symlink"):
+        write_contract(data, "NQ", "NQZ25", frame(NQ_ROWS))
+    assert list(outside.rglob("*")) == []
+
+
+def test_manifest_read_refuses_links_fifos_and_huge_files(tmp_path, monkeypatch):
+    bars = tmp_path / "bars"
+    bars.mkdir()
+    manifest = bars / "manifest.json"
+    (tmp_path / "secret.json").write_text("{}")
+    manifest.symlink_to(tmp_path / "secret.json")
+    with pytest.raises(ValueError, match="symlink"):
+        read_manifest(tmp_path)
+    manifest.unlink()
+    os.mkfifo(manifest)  # would block a plain read forever
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_manifest(tmp_path)
+    manifest.unlink()
+    manifest.write_text('{"series": {}}')
+    monkeypatch.setattr(store, "MAX_MANIFEST", 5)
+    with pytest.raises(ValueError, match="under 16 MB"):
+        read_manifest(tmp_path)
 
 
 def test_failed_write_leaves_no_temp_file(tmp_path):

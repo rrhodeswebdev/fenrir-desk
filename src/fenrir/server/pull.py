@@ -1,6 +1,5 @@
 """Runs `fenrir data pull` as a child process, one at a time, for the Data page."""
 
-import os
 import subprocess
 import sys
 import threading
@@ -9,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from fenrir.server.isolation import as_user, isolation_problems
+from fenrir.server.isolation import isolation_problems
 from fenrir.settings import Settings
 
 TAIL_LINES = 20
@@ -43,7 +42,7 @@ def pull_command() -> list[str]:
 def pull_env(environ: Mapping[str, str], settings: Settings) -> dict[str, str]:
     # Not strategy code, so DEC-1's no-secrets rule for strategy children does not apply; it still
     # gets only the secret it needs. In Docker the key comes from the secrets file, not the env.
-    # No FENRIR_ENV_FILE: the child may run unprivileged, so its settings come from the env alone.
+    # No FENRIR_ENV_FILE: its settings come from the env alone, so the NT token never reaches it.
     drop = ("FENRIR_NT_TOKEN", "FENRIR_ENV_FILE")
     env = {k: v for k, v in environ.items() if k not in drop}
     key = {"FENRIR_LSE_API_KEY": settings.lse_api_key} if settings.lse_api_key else {}
@@ -53,15 +52,6 @@ def pull_env(environ: Mapping[str, str], settings: Settings) -> dict[str, str]:
         | {"FENRIR_DATA_DIR": str(settings.data_dir)}
         | {"PYTHONUNBUFFERED": "1"}  # unbuffered: log lines arrive as they are printed
     )
-
-
-def pull_user(settings: Settings) -> str | None:
-    """`FENRIR_PTY_USER` in the image (`FENRIR_BIND_ALL=1`), else None: natively the pull runs as
-    the server's user. ValueError with the isolation reasons when the image is not isolated."""
-    if problems := isolation_problems(settings):
-        raise ValueError("refusing to pull: " + "; ".join(problems))
-    # isolation_problems is empty in the image only when FENRIR_PTY_USER names a user
-    return os.environ["FENRIR_PTY_USER"] if os.environ.get("FENRIR_BIND_ALL") == "1" else None
 
 
 def _now() -> str:
@@ -80,7 +70,7 @@ class PullRunner:
         *,
         settings: Settings | None = None,
     ) -> None:
-        """With `settings`, every start runs the child as `pull_user(settings)`."""
+        """With `settings`, every start first passes the DEC-1 isolation check."""
         self._cmd = list(cmd)
         self._env = env
         self._settings = settings
@@ -95,17 +85,19 @@ class PullRunner:
         with self._lock:
             if self._started_at is not None and self._returncode is None:
                 return False
-            # data/ is terminal-writable in the image: never pull into it as root (DEC-1, #135)
-            overlay, drop = as_user(pull_user(self._settings) if self._settings else None)
+            # Runs as the server's user (root in the image): the terminal's user could read the
+            # LSE key from a child of its own (/proc/<pid>/environ). The store's writes are
+            # symlink-safe instead (#135). Fail closed in an image that is not isolated.
+            if self._settings and (problems := isolation_problems(self._settings)):
+                raise ValueError("refusing to pull: " + "; ".join(problems))
             proc = subprocess.Popen(
                 self._cmd,
-                env={**(os.environ if self._env is None else self._env), **overlay},
+                env=self._env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
                 errors="replace",
-                **drop,
             )
             self._started_at, self._finished_at, self._returncode = _now(), None, None
             self._tail.clear()

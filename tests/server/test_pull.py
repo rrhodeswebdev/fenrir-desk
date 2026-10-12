@@ -1,5 +1,4 @@
 import os
-import pwd
 import subprocess
 import sys
 import time
@@ -8,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from fenrir.server import pull
-from fenrir.server.pull import PullRunner, pull_command, pull_env, pull_status, pull_user
+from fenrir.server.pull import PullRunner, pull_command, pull_env, pull_status
 from fenrir.settings import Settings
 
 
@@ -120,22 +119,6 @@ def test_child_gets_the_env_it_is_given():
     assert runner.status()["log_tail"] == ["secret-key"]
 
 
-def test_pull_user_natively_is_the_server_user(monkeypatch):
-    monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
-    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
-    assert pull_user(Settings()) is None
-
-
-def test_pull_user_in_the_image(monkeypatch):
-    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
-    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
-    monkeypatch.setattr(pull, "isolation_problems", lambda s: ["first", "second"])
-    with pytest.raises(ValueError, match="refusing to pull: first; second"):
-        pull_user(Settings())
-    monkeypatch.setattr(pull, "isolation_problems", lambda s: [])
-    assert pull_user(Settings()) == "claude"
-
-
 def test_unisolated_image_refuses_to_start(monkeypatch):
     monkeypatch.setenv("FENRIR_BIND_ALL", "1")
     monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
@@ -145,10 +128,10 @@ def test_unisolated_image_refuses_to_start(monkeypatch):
     assert runner.status()["state"] == "idle"
 
 
-def test_image_pull_child_drops_to_the_pty_user(monkeypatch):
-    me = pwd.getpwuid(os.getuid())
+def test_image_pull_child_runs_as_the_server_user(monkeypatch):
+    # never as FENRIR_PTY_USER: that user could read the LSE key from /proc/<pid>/environ
     monkeypatch.setenv("FENRIR_BIND_ALL", "1")
-    monkeypatch.setenv("FENRIR_PTY_USER", me.pw_name)
+    monkeypatch.setenv("FENRIR_PTY_USER", "claude")
     monkeypatch.setattr(pull, "isolation_problems", lambda s: [])
     calls = []
 
@@ -163,13 +146,16 @@ def test_image_pull_child_drops_to_the_pty_user(monkeypatch):
         return Done()
 
     monkeypatch.setattr(pull.subprocess, "Popen", popen)
-    env = {"PATH": "/bin", "HOME": "/root", "FENRIR_LSE_API_KEY": "k"}
+    env = {"PATH": "/bin", "FENRIR_LSE_API_KEY": "k"}
     assert PullRunner(["pull"], env, settings=Settings()).start() is True
     [kwargs] = calls
-    assert (kwargs["user"], kwargs["group"], kwargs["extra_groups"]) == (me.pw_uid, me.pw_gid, [])
-    assert kwargs["env"] == env | {
-        "HOME": me.pw_dir,
-        "USER": me.pw_name,
-        "LOGNAME": me.pw_name,
-        "SHELL": me.pw_shell,
-    }
+    assert kwargs["env"] == env
+    assert not {"user", "group", "extra_groups"} & kwargs.keys()
+
+
+def test_isolation_problems_refuse_the_pull(monkeypatch):
+    monkeypatch.setattr(pull, "isolation_problems", lambda s: ["first", "second"])
+    runner = PullRunner(py("print('ran')"), settings=Settings())
+    with pytest.raises(ValueError, match="refusing to pull: first; second"):
+        runner.start()
+    assert runner.status()["state"] == "idle"

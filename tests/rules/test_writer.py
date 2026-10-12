@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from fenrir.rules import writer
 from fenrir.rules.loader import list_accounts, load_account, rules_path
 from fenrir.rules.schema import AccountRules
 from fenrir.rules.writer import changes, write_account
@@ -206,6 +207,28 @@ def test_a_symlink_at_the_random_temp_name_fails_cleanly(rules_dir, tmp_path, mo
         )
     assert victim.read_text() == "keep me"
     assert path.read_bytes() == before
+
+
+def test_a_link_swapped_in_after_the_read_is_refused(rules_dir, tmp_path, monkeypatch):
+    # the terminal swaps the rules file for a link between the read and the save (DEC-1)
+    path = rules_path("lucid-flex-50k", rules_dir)
+    rules = edit(load_account("lucid-flex-50k", rules_dir), "verified_on", date(2027, 1, 2))
+    victim = tmp_path / "victim"
+    victim.write_text("keep me")
+    victim.chmod(0o4755)
+    read = writer.read_regular
+
+    def read_then_swap(p, limit):
+        data = read(p, limit)
+        p.unlink()
+        p.symlink_to(victim)
+        return data
+
+    monkeypatch.setattr(writer, "read_regular", read_then_swap)
+    with pytest.raises(ValueError, match="is not a regular file"):
+        write_account(path, rules)
+    assert path.is_symlink() and victim.read_text() == "keep me"
+    assert not list(path.parent.glob("*.tmp"))
 
 
 def test_save_works_without_geteuid(rules_dir, monkeypatch):  # native Windows

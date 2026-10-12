@@ -98,7 +98,9 @@ def write_account(path: Path, rules: AccountRules) -> None:
         raise ValueError(f"the value can't be saved as YAML: {e}") from e
     if changes(saved.model_dump(), rules.model_dump()):
         raise ValueError(f"the value can't be saved as YAML: {path} would not read back the same")
-    st = path.stat()
+    st = path.lstat()  # never a link's target: its mode and owner would land on the new file
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{path} is not a regular file; not saving over it")
     # rules/ is terminal-writable and the server saves as root (DEC-1, #166): a random name
     # opened O_EXCL|O_NOFOLLOW, its mode and owner set on the fd, so a planted link is never
     # followed. Windows has no O_NOFOLLOW (and no terminal user to plant a link).

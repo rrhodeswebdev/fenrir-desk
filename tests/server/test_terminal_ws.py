@@ -182,7 +182,7 @@ def test_pty_user_overlay_and_shell(port, monkeypatch):
     monkeypatch.setenv("SHELL", "/no/such/shell")  # the PTY user's own shell wins
     overlay = {"HOME": "/home/claude", "USER": "claude", "LOGNAME": "claude", "SHELL": "/bin/sh"}
     # privileges cannot drop in a non-root test, so only the env overlay is real here
-    monkeypatch.setattr(terminal, "drop_to", lambda user: (overlay, {}))
+    monkeypatch.setattr(terminal, "as_user", lambda user: (overlay, {}))
     with open_term(port) as ws:
         send(ws, 'echo "h=$HOME u=$USER"\n')
         read_until(ws, rb"h=/home/claude u=claude")

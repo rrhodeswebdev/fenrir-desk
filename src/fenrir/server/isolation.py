@@ -62,23 +62,9 @@ def check(
     return reasons
 
 
-def drop_to(user: str) -> tuple[dict[str, str], dict[str, Any]]:
-    """The env overlay and `Popen` kwargs that run a child as `user` (KeyError: no such user).
-
-    `user=` does not reset HOME, USER, LOGNAME or SHELL, so they come from its passwd entry.
-    """
-    import pwd  # POSIX only; FENRIR_PTY_USER is never set natively on Windows
-
-    pw = pwd.getpwnam(user)
-    return (
-        {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell},
-        {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []},
-    )
-
-
 def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:
     """(env overlay, `Popen` kwargs) that run a child as `user` from its passwd entry, with none
-    of the server's groups; `({}, {})` for None (the server's own user)."""
+    of the server's groups; `({}, {})` for None (the server's own user). KeyError: no such user."""
     if not user:
         return {}, {}
     import pwd  # POSIX only; unset natively on Windows

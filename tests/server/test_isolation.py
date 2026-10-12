@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from fenrir.server import isolation
-from fenrir.server.isolation import check, drop_to, isolation_problems
+from fenrir.server.isolation import as_user, check, isolation_problems
 from fenrir.settings import Settings
 
 pwd = pytest.importorskip("pwd")
@@ -174,10 +174,11 @@ def test_not_enforced_natively(image, monkeypatch):
     assert isolation_problems(Settings(private_dir=Path("nowhere"))) == []
 
 
-def test_drop_to_takes_env_and_ids_from_passwd(monkeypatch):
+def test_as_user_takes_env_and_ids_from_passwd(monkeypatch):
     claude = pwd.struct_passwd(("claude", "x", 1000, 1001, "", "/home/claude", "/bin/zsh"))
     monkeypatch.setattr(pwd, "getpwnam", {"claude": claude}.__getitem__)
-    env, kwargs = drop_to("claude")
+    assert as_user(None) == ({}, {})  # the server's own user
+    env, kwargs = as_user("claude")
     assert env == {
         "HOME": "/home/claude",
         "USER": "claude",

@@ -173,5 +173,5 @@ def spawn(
 ) -> PosixPty | WindowsPty:
     """`argv` in a PTY; OSError when it cannot start (e.g. no such shell), SubprocessError
     when taking the PTY as controlling tty fails. `as_user` holds
-    `isolation.drop_to`'s Popen kwargs (POSIX only)."""
+    `isolation.as_user`'s Popen kwargs (POSIX only)."""
     return (WindowsPty if sys.platform == "win32" else PosixPty)(argv, env, as_user)

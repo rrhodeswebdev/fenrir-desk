@@ -18,7 +18,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 
 from fenrir.server import ptyproc
 from fenrir.server.auth import check_ws
-from fenrir.server.isolation import drop_to, isolation_problems
+from fenrir.server.isolation import as_user, isolation_problems
 from fenrir.server.terminal import Input, Resize, child_env, parse_message, shell_argv
 
 log = logging.getLogger(__name__)
@@ -69,8 +69,8 @@ async def terminal_ws(ws: WebSocket) -> None:
         return
     user = os.environ.get("FENRIR_PTY_USER")
     try:
-        overlay, as_user = drop_to(user) if user else ({}, {})
-    except KeyError:
+        overlay, drop = as_user(user)
+    except KeyError:  # getpwnam: no such user
         log.error("refusing to open the terminal: FENRIR_PTY_USER %r is not a user", user)
         await ws.close()
         return
@@ -78,7 +78,7 @@ async def terminal_ws(ws: WebSocket) -> None:
     argv = shell_argv(env, sys.platform)  # SHELL from the overlay: the PTY user's own shell
     await ws.accept()
     try:
-        pty = ptyproc.spawn(argv, env, as_user)
+        pty = ptyproc.spawn(argv, env, drop)
     except (OSError, subprocess.SubprocessError) as e:  # SubprocessError: preexec_fn failed
         message = f"cannot start the shell {argv[0]}: {getattr(e, 'strerror', None) or e}"
         log.error(message)

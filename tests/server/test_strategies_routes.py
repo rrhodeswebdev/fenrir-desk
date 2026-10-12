@@ -168,11 +168,34 @@ def test_a_forged_line_for_another_file_cannot_stand_in_for_it(env):
 
 def test_a_hash_that_is_not_the_files_is_an_error(env):
     client, settings = env
-    path = settings.strategies_dir / "s.py"
-    path.write_text("open(__file__, 'a').write('# saved mid-load\\n')\n" + STRATEGY)
-    [entry] = client.get("/api/strategies").json()
-    assert entry["error"] == "the file changed while loading"
-    assert (entry["hash"], entry["market"], entry["reports"]) == (None, None, [])
+    b = settings.strategies_dir / "b.py"
+    b.write_text(STRATEGY)
+    forged = {"path": str(b), "name": "b", "hash": "f" * 64, "market": "ES"}
+    forged |= {"params": {}, "error": None}
+    # a.py forges b's line, then ends the child before b's real line is written
+    forge = f"__import__('os').write(3, b{json.dumps(json.dumps(forged) + chr(10))})\n"
+    (settings.strategies_dir / "a.py").write_text(forge + "__import__('os')._exit(0)\n")
+    a, b_entry = client.get("/api/strategies").json()
+    assert a["error"] == "the strategy loader stopped before describing this file"
+    assert b_entry["error"] == "the file changed while loading"
+    assert (b_entry["hash"], b_entry["market"], b_entry["reports"]) == (None, None, [])
+
+
+def test_only_regular_files_are_read_or_loaded(env):
+    client, settings = env
+    d = settings.strategies_dir
+    (d / "a.py").write_text(STRATEGY)
+    (d / "big.py").write_bytes(b"#" * (1024 * 1024 + 1))
+    (d / "link.py").symlink_to(d / "a.py")
+    os.mkfifo(d / "z.py")  # opening it for reading would block with no writer
+    a, big, link, z = client.get("/api/strategies").json()
+    assert (a["market"], a["error"]) == ("NQ", None)
+    assert big["error"] == "ValueError: big.py is over 1 MiB"
+    assert link["error"] == "ValueError: link.py is a symlink, not a strategy file"
+    assert z["error"] == "ValueError: z.py is not a regular file"
+    for entry in (big, link, z):
+        assert (entry["hash"], entry["market"], entry["reports"]) == (None, None, [])
+    assert not (d / "big.py.pid").exists()  # never given to the child
 
 
 @pytest.mark.parametrize(

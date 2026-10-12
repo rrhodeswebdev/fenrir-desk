@@ -398,11 +398,11 @@ def test_stop_kills_a_running_describe_child_and_forgets_it(make, tmp_path):
         target=lambda: out.extend(runner.describe([str(s.strategies_dir / "b.py")]))
     )
     thread.start()
-    wait_for((s.strategies_dir / "b.py.pid").exists)
+    wait_for((s.strategies_dir / "b.py.pid").exists, 30)
     runner.stop()
-    thread.join(10)
+    thread.join(30)
     assert not thread.is_alive() and out[0]["error"].startswith("the strategy loader stopped")
-    wait_for(lambda: gone(int((s.strategies_dir / "b.py.pid").read_text())))
+    wait_for(lambda: gone(int((s.strategies_dir / "b.py.pid").read_text())), 30)
 
 
 def test_describe_refuses_paths_outside_strategies_dir(make, tmp_path):

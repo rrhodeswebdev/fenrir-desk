@@ -9,11 +9,14 @@ after the job, so its spawn pool and memoized bars go with it; the server never 
 """
 
 import contextlib
+import errno
+import hashlib
 import json
 import logging
 import os
 import queue
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,7 +44,7 @@ from fenrir.server.jobs import (
     update_item,
 )
 from fenrir.settings import Settings
-from fenrir.strategy.loader import MARKETS, file_hash
+from fenrir.strategy.loader import MARKETS
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ log = logging.getLogger(__name__)
 CHILD = (sys.executable, "-P", "-m", "fenrir.server.job_child")
 LINE_MAX = 64 * 1024  # longer child lines are dropped whole
 ERROR_MAX = 2048
+STRATEGY_MAX = 1024 * 1024  # strategy files are small; bounds what the server reads
 
 Listener = Callable[[dict[str, Any]], None]
 
@@ -150,20 +154,43 @@ def parse_description(line: str, paths: Container[str]) -> dict[str, Any]:
     return data
 
 
-def _checked(path: str, entries: Sequence[dict[str, Any]], error: str) -> dict[str, Any]:
-    """The child's one description of `path`, with its hash checked against the file's bytes as
-    the server reads them (reading never executes). Strategy code can write to the child's
-    protocol fd, so a second line for a file, or a hash that is not the file's, is an error."""
+def _strategy_hash(path: Path) -> str:
+    """sha256 of `path`'s bytes, read without executing them. The terminal can plant anything
+    there, so: never through a symlink, never blocking on a FIFO, at most STRATEGY_MAX bytes.
+    ValueError for anything but a regular file that size; OSError if it cannot be opened."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ValueError(f"{path.name} is a symlink, not a strategy file") from None
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{path.name} is not a regular file")
+        f = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        data = f.read(STRATEGY_MAX + 1)
+    if len(data) > STRATEGY_MAX:
+        raise ValueError(f"{path.name} is over {STRATEGY_MAX // 1024 // 1024} MiB")
+    return hashlib.sha256(data).hexdigest()
+
+
+def _checked(
+    path: str, entries: Sequence[dict[str, Any]], digest: str | None, error: str
+) -> dict[str, Any]:
+    """The child's one description of `path`, if its hash is `digest` (the file's bytes as the
+    server read them before the child ran). Strategy code can write to the child's protocol fd,
+    so a second line for a file, or a hash that is not the file's, is an error."""
     failed = {"path": path, "name": Path(path).stem, "hash": None, "market": None, "params": {}}
-    if not entries:
+    if digest is None or not entries:
         return failed | {"error": error}
     if len(entries) > 1:
         return failed | {"error": "the strategy loader described this file more than once"}
     [entry] = entries
-    try:
-        digest = file_hash(Path(path))
-    except OSError:
-        digest = None
     if entry["hash"] is not None and entry["hash"] != digest:
         return failed | {"error": "the file changed while loading"}
     return entry
@@ -306,9 +333,10 @@ class JobRunner:
         """`[{path, name, hash, market, params, error}]` in `paths` order, from an isolated child
         that loads each strategy file (`parse_description`).
 
-        A file the child did not describe (isolation refusal, crash, timeout, bad output), described
-        twice, or whose hash is not its bytes' as read here gets `error` with the reason and hash
-        None. ValueError for a path not directly in
+        Each file is hashed here first (`_strategy_hash`); only readable regular files reach the
+        child. A file that is not one, that the child did not describe (isolation refusal, crash,
+        timeout, bad output), described twice, or whose hash is not the one read here gets
+        `error` with the reason and hash None. ValueError for a path not directly in
         `strategies_dir`: the child executes every file it is given.
         """
         for p in paths:
@@ -316,13 +344,22 @@ class JobRunner:
                 raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")
         if not paths:
             return []
+        digests: dict[str, str] = {}
+        unread: dict[str, str] = {}
+        for p in paths:
+            try:
+                digests[p] = _strategy_hash(Path(p))
+            except (OSError, ValueError) as e:
+                unread[p] = f"{type(e).__name__}: {e}"
         lines: dict[str, list[dict[str, Any]]] = {}
         error = "the strategy loader stopped before describing this file"
+        proc = None
         try:
-            proc = self._spawn(["--describe"], {"paths": list(paths)})
+            if digests:
+                proc = self._spawn(["--describe"], {"paths": list(digests)})
         except Exception as e:  # isolation refusal, or the child could not start
             error = f"{type(e).__name__}: {e}"
-        else:
+        if proc is not None:
             try:
                 for line in _read(proc, self._describe_timeout):
                     try:
@@ -338,7 +375,7 @@ class JobRunner:
                 proc.wait()
                 with self._lock:
                     self._expanding.discard(proc)
-        return [_checked(p, lines.get(p, ()), error) for p in paths]
+        return [_checked(p, lines.get(p, ()), digests.get(p), unread.get(p, error)) for p in paths]
 
     def submit(self, grid: Sequence[GridItem], include_holdout: bool) -> Job:
         created = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")

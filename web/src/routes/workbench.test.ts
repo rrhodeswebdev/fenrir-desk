@@ -13,9 +13,13 @@ describe('closeLine', () => {
     expect(closeLine(1000, '')).toBe('Disconnected: the shell exited.')
   })
 
+  it('names a refused or lost connection in plain words', () => {
+    expect(closeLine(1006, '')).toMatch(/^Disconnected: the connection closed or was refused .*Reload to start a new shell\.$/)
+  })
+
   it('gives the server reason, else the code', () => {
     expect(closeLine(1011, 'shell did not start')).toBe('Disconnected: shell did not start.')
     expect(closeLine(1009, 'too much input pending')).toBe('Disconnected: too much input pending.')
-    expect(closeLine(1006, '')).toBe('Disconnected: code 1006.')
+    expect(closeLine(4000, '')).toBe('Disconnected: code 4000.')
   })
 })

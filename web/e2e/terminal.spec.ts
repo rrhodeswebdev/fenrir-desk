@@ -7,8 +7,10 @@ test('the Workbench terminal runs a real shell until it exits', async ({ page })
   await page.goto('/')
   const term = page.getByTestId('terminal')
   await term.click()
-  await page.keyboard.type('echo fenrir-$((40+2))\n') // only the output, not the echoed command, reads fenrir-42
-  await expect(term).toContainText('fenrir-42')
+  // typed at once: keys sent while the socket connects must not be lost
+  await page.keyboard.type('echo fenrir-$((40+2))\n')
+  // a whole row of exactly fenrir-42: not the echoed command, not "sh: fenrir-42: command not found"
+  await expect(term.locator('.xterm-rows > div', { hasText: /^fenrir-42\s*$/ })).toHaveCount(1)
   await page.keyboard.type('exit\n')
   await expect(term).toContainText('Disconnected: the shell exited.')
 })

@@ -38,8 +38,9 @@ export default async function globalSetup() {
       FENRIR_LSE_API_KEY: 'e2e-disabled',
       FENRIR_NT_TOKEN: 'e2e-disabled',
       FENRIR_NT_URL: 'http://127.0.0.1:9',
-      // the terminal's shell: plain sh reads no rc file, so your own shell config never alters the e2e
+      // the terminal's shell: plain sh with no $ENV reads no rc file, so your own shell config never alters the e2e
       SHELL: '/bin/sh',
+      ENV: '',
     },
     // own process group, so teardown stops uv and the python child together
     detached: true,

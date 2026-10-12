@@ -11,9 +11,13 @@ import { rootRoute } from './root'
 export const inputFrame = (data: string): string => JSON.stringify({ type: 'input', data })
 export const resizeFrame = (cols: number, rows: number): string => JSON.stringify({ type: 'resize', cols, rows })
 
-/** The line written when the socket closes. 1000 is the shell exiting; the server names other causes in the reason. */
-export const closeLine = (code: number, reason: string): string =>
-  code === 1000 ? 'Disconnected: the shell exited.' : `Disconnected: ${reason || `code ${code}`}.`
+/** The line written when the socket closes. 1000 is the shell exiting; 1006 (no close frame) is a refused handshake or a lost server; the server names other causes in the reason. */
+export const closeLine = (code: number, reason: string): string => {
+  if (code === 1000) return 'Disconnected: the shell exited.'
+  if (code === 1006)
+    return 'Disconnected: the connection closed or was refused (session expired or server stopped). Reload to start a new shell.'
+  return `Disconnected: ${reason || `code ${code}`}.`
+}
 
 const token = (name: string): string => getComputedStyle(document.documentElement).getPropertyValue(name).trim()
 
@@ -40,10 +44,16 @@ function TerminalPane() {
     fit.fit()
     const ws = new WebSocket(wsUrl('/ws/terminal'))
     ws.binaryType = 'arraybuffer'
+    // keys typed while connecting wait here; the PTY holds them until the shell reads
+    const queued: string[] = []
     const send = (frame: string) => {
       if (ws.readyState === WebSocket.OPEN) ws.send(frame)
+      else if (ws.readyState === WebSocket.CONNECTING) queued.push(frame)
     }
-    ws.onopen = () => send(resizeFrame(term.cols, term.rows)) // the PTY starts at 80x24
+    ws.onopen = () => {
+      ws.send(resizeFrame(term.cols, term.rows)) // the PTY starts at 80x24
+      queued.splice(0).forEach((frame) => ws.send(frame))
+    }
     ws.onmessage = (e: MessageEvent<ArrayBuffer>) => term.write(new Uint8Array(e.data))
     // shortcut: no reconnect; a reload starts a new shell.
     ws.onclose = (e) => term.write(`\r\n${closeLine(e.code, e.reason)}\r\n`)
@@ -60,7 +70,7 @@ function TerminalPane() {
     }
   }, [])
   // no padding here: the fit add-on sizes the terminal to this box
-  return <div ref={ref} data-testid="terminal" className="h-full" />
+  return <div ref={ref} role="group" aria-label="Terminal" data-testid="terminal" className="h-full" />
 }
 
 export const workbenchRoute = createRoute({

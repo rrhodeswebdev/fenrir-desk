@@ -1,4 +1,5 @@
 import { type Page, expect, test } from '@playwright/test'
+import { PORT } from '../playwright.config'
 import { SESSION_EXPIRED } from '../src/errorText'
 
 const pages = [
@@ -53,6 +54,17 @@ test('an unknown path shows not found', async ({ page }) => {
 test('the launch link signed the browser in', async ({ page }) => {
   await page.goto('/')
   expect(await apiStatus(page)).toBe(200)
+})
+
+// the server closes a socket without a valid session cookie or Origin before accepting it
+test('/backtests opens the jobs socket on the same host and the server accepts it', async ({ page }) => {
+  const socket = page.waitForEvent('websocket')
+  await page.goto('/backtests')
+  const ws = await socket
+  expect(ws.url()).toBe(`ws://localhost:${PORT}/ws/jobs`)
+  await page.waitForTimeout(1_000) // a refused socket closes at once
+  expect(ws.isClosed()).toBe(false)
+  await expect(page.getByText('Live updates stopped')).toHaveCount(0)
 })
 
 test.describe('without the launch link', () => {

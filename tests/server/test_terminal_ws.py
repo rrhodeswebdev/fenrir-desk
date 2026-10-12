@@ -1,10 +1,12 @@
 """`WS /ws/terminal` end to end: a real uvicorn server and a real PTY running `/bin/sh`."""
 
+import asyncio
 import contextlib
 import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -114,17 +116,33 @@ def test_exit_closes_the_socket(port):
         assert e.value.rcvd.code == 1000
 
 
-@pytest.mark.parametrize("name", ["bash", "zsh", "dash"])
-def test_disconnect_kills_the_shell_and_its_jobs(port, monkeypatch, name):
+@pytest.fixture(params=["bash", "zsh", "dash"])
+def job_shell(request, monkeypatch):
     # job control puts each job in its own process group; only bash passes SIGHUP on to them
-    path = shutil.which(name) or pytest.skip(f"{name} is not installed")
+    path = shutil.which(request.param) or pytest.skip(f"{request.param} is not installed")
     monkeypatch.setenv("SHELL", path)
+
+
+def test_disconnect_kills_the_shell_and_its_jobs(port, job_shell):
     with open_term(port) as ws:
         send(ws, "sleep 1000 & echo job=$!\n")  # `$!` ends each line: bash's history expansion
         send(ws, "nohup sleep 1000 >/dev/null 2>&1 & echo pids=$$,$!\n")
         out = read_until(ws, rb"pids=\d+,\d+")
         pids = map(int, re.search(rb"job=(\d+).*pids=(\d+),(\d+)", out, re.S).groups())
     assert all(map(gone, pids))
+
+
+def test_disconnect_kills_jobs_forked_during_the_kill(port, job_shell):
+    with open_term(port) as ws:
+        send(ws, "(while :; do sleep 1001 & sleep 0.005; done) & echo pid=$$\n")
+        shell = int(re.search(rb"pid=(\d+)", read_until(ws, rb"pid=\d+\r?\n")).group(1))
+        time.sleep(0.2)  # let it fork a few
+    deadline = time.monotonic() + 5  # a survivor of the sweep sleeps for 1001 s
+    while (survivors := ptyproc._session_pids(shell)) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    for pid in survivors:  # don't leak them if this fails
+        os.kill(pid, signal.SIGKILL)
+    assert survivors == []
 
 
 def test_disconnect_with_unread_input_kills_the_shell(port):
@@ -231,3 +249,31 @@ def test_unexpected_task_error_is_logged(port, monkeypatch, caplog):
             while True:
                 ws.recv(timeout=5)
     assert "terminal session failed" in caplog.text and "resize broke" in caplog.text
+
+
+def test_cancelled_close_still_kills_the_session():
+    async def cancel_close() -> int:
+        # shell and job both ignore the hang-up, so only close()'s kills can end them
+        script = "trap '' HUP; set -m; sleep 1000 & echo job=$!; exec sleep 1000"
+        argv = ["/bin/sh", "-c", script]
+        pty = ptyproc.spawn(argv, {"PATH": os.environ["PATH"]}, {})
+        out = b""
+        while not re.search(rb"job=\d+\r?\n", out):
+            out += await pty.read()
+        task = asyncio.create_task(pty.close())
+        await asyncio.sleep(0.1)  # inside the hang-up grace, before any kill
+        task.cancel()
+        return int(re.search(rb"job=(\d+)", out).group(1))
+
+    assert gone(asyncio.run(cancel_close()))
+
+
+def test_session_scan_without_ps_is_empty_and_logged(monkeypatch, caplog):
+    monkeypatch.setattr(ptyproc.os.path, "isdir", lambda path: False)  # the macOS branch
+
+    def no_ps(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "/bin/ps")
+
+    monkeypatch.setattr(ptyproc.subprocess, "run", no_ps)
+    assert ptyproc._session_pids(1) == []
+    assert "cannot list the shell's session" in caplog.text

@@ -7,6 +7,7 @@ Both start in the server's cwd (the repo) and expose `read`, `write`, `resize`, 
 
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import struct
@@ -20,9 +21,11 @@ if sys.platform != "win32":
     import pty
     import termios
 
+log = logging.getLogger(__name__)
 COLS, ROWS = 80, 24  # until the client's first resize
 CHUNK = 64 * 1024
 HANGUP_GRACE = 1.0  # seconds for the shell to pass SIGHUP on to its jobs
+KILL_ROUNDS = 10  # a job can fork between listing and kill; its children show up next round
 
 
 async def _ready(add: Callable, remove: Callable, fd: int) -> None:
@@ -38,14 +41,26 @@ def _set_size(fd: int, cols: int, rows: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 
 
+def _live(pid: str) -> bool:
+    # Linux getsid() answers for a zombie, and nothing may reap orphans; a zombie is already dead
+    with contextlib.suppress(OSError):
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rpartition(")")[2].split()[0] != "Z"  # state follows "(comm)"
+    return False
+
+
 def _session_pids(sid: int) -> list[int]:
-    """Every process still in session `sid`: the shell's jobs, which job control puts in their
-    own process groups, out of `killpg`'s reach."""
+    """Every live process still in session `sid`: the shell's jobs, which job control puts in
+    their own process groups, out of `killpg`'s reach. [] (logged) when `ps` cannot run."""
     if os.path.isdir("/proc"):  # Linux, the image
-        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
-    else:  # macOS
-        out = subprocess.run(["ps", "-A", "-o", "pid="], capture_output=True, text=True).stdout
-        pids = [int(p) for p in out.split()]
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit() and _live(p)]
+    else:  # macOS: getsid() already fails for a zombie
+        try:
+            ps = subprocess.run(["/bin/ps", "-A", "-o", "pid="], capture_output=True, text=True)
+        except OSError as e:
+            log.error("cannot list the shell's session, its jobs may survive: %s", e)
+            return []
+        pids = [int(p) for p in ps.stdout.split()]
     found = []
     for p in pids:
         with contextlib.suppress(OSError):  # gone, or not ours to ask about
@@ -107,14 +122,23 @@ class PosixPty:
         """Hang up, let the shell SIGHUP its jobs, then kill every process in its session; only
         a job that called `setsid` escapes."""
         os.close(self._fd)
+        # one thread for the whole teardown: cancelling close() cannot stop it halfway
+        await asyncio.to_thread(self._end)
+
+    def _end(self) -> None:
         with contextlib.suppress(subprocess.TimeoutExpired):
-            await asyncio.to_thread(self._proc.wait, HANGUP_GRACE)
+            self._proc.wait(HANGUP_GRACE)
         with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self._proc.pid, signal.SIGKILL)
-        for pid in await asyncio.to_thread(_session_pids, self._proc.pid):
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.kill(pid, signal.SIGKILL)
-        await asyncio.to_thread(self._proc.wait)
+        for _ in range(KILL_ROUNDS):
+            if not (pids := _session_pids(self._proc.pid)):
+                break
+            for pid in pids:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
+        else:
+            log.error("the shell's session still has processes after %d kill rounds", KILL_ROUNDS)
+        self._proc.wait()
 
 
 class WindowsPty:

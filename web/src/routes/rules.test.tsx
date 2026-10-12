@@ -99,7 +99,7 @@ describe('rules editor', () => {
   it('shows the selected file field by field, nulls as None, and Save disabled until an edit', async () => {
     const html = await renderEditor('lucid-daily-100k', { rules })
     expect(html).toContain('aria-label="Edit lucid-daily-100k"')
-    expect([...html.matchAll(/<legend[^>]*>([^<]+)</g)].map((m) => m[1])).toEqual(['Account', 'Evaluation', 'Funded', 'Payout', 'Session', 'Contracts', 'Prohibited', 'Costs'])
+    expect([...html.matchAll(/<legend[^>]*>([^<]+)</g)].map((m) => m[1])).toEqual(['Account', 'Evaluation', 'Funded', 'Payout', 'Scaling', 'Session', 'Contracts', 'Prohibited', 'Costs'])
     expect(input(html, 'Verified on')).toMatch(/type="date"[^>]*value="2026-10-11"/)
     expect(input(html, 'Profit target')).toContain('value="6000"')
     expect(input(html, 'Max % of profit')).toContain('value="13.88"')
@@ -110,6 +110,30 @@ describe('rules editor', () => {
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled=""[^>]*>Save<\/button>/)
     // funded.consistency is null: only the evaluation's field shows
     expect(html.match(/Max day % of profit/g)).toHaveLength(1)
+    // payout extras; scaling null: "No scaling" checked, no tiers
+    expect(input(html, 'Min day profit')).toContain('value="0"')
+    expect(html).toMatch(/aria-checked="true"[^>]*aria-label="Max per payout: none"/)
+    expect(html).toMatch(/aria-checked="true"[^>]*aria-label="Max payouts: none"/)
+    expect(html).toMatch(/aria-checked="true"[^>]*id="([^"]+)"[\s\S]*<label for="\1"[^>]*>No scaling/)
+    expect(html).not.toContain('Tier 1')
+  })
+
+  it('shows each scaling tier with its own remove button and an Add tier button', async () => {
+    const scaling = [{ from_profit: 0, max_minis: 4 }, { from_profit: 1000, max_minis: 6 }]
+    const payout = { ...rules.funded.payout, min_day_profit: 150, max_amount: 2000, max_payouts: 5 }
+    const html = await renderEditor('lucid-daily-100k', { rules: { ...rules, funded: { ...rules.funded, payout, scaling } } })
+    expect(input(html, 'Tier 2 from profit')).toContain('value="1000"')
+    expect(input(html, 'Tier 2 max minis')).toContain('value="6"')
+    expect(input(html, 'Max per payout')).toContain('value="2000"')
+    expect(input(html, 'Max payouts')).toContain('value="5"')
+    expect(html).toMatch(/<button(?![^>]*disabled="")[^>]*>Remove tier 2<\/button>/)
+    expect(html).toContain('>Add tier</button>')
+  })
+
+  it('disables Remove on the last tier: "No scaling" removes it', async () => {
+    const funded = { ...rules.funded, scaling: [{ from_profit: 0, max_minis: 6 }] }
+    const html = await renderEditor('lucid-daily-100k', { rules: { ...rules, funded } })
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Remove tier 1<\/button>/)
   })
 
   it('asks to fix a file that does not validate by hand, with no form', async () => {

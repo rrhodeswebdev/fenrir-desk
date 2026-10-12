@@ -18,6 +18,9 @@ export function setIn<T>(obj: T, path: Path, value: unknown): T {
 export const getIn = (obj: unknown, path: Path): unknown =>
   path.reduce<unknown>((o, k) => (o == null ? undefined : (o as Node)[k]), obj)
 
+/** A copy of `list` without the item at `i` (a scaling tier the user removes). */
+export const removeAt = <T>(list: readonly T[], i: number): T[] => list.filter((_, j) => j !== i)
+
 const same = (a: Path, b: Path) => a.length === b.length && a.every((k, i) => k === b[i])
 
 /** Messages of the errors whose `loc` is exactly `path`. */

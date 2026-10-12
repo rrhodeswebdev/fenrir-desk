@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from './api'
-import { errorsAt, fieldErrors, getIn, setIn } from './rulesForm'
+import { errorsAt, fieldErrors, getIn, removeAt, setIn } from './rulesForm'
 
 const rules = {
   funded: { max_drawdown: { amount: 2000, locks_at: 2100 }, payout: { max_amount: null } },
@@ -37,6 +37,16 @@ describe('getIn', () => {
     expect(getIn(rules, ['scaling', 1, 'max_minis'])).toBe(4)
     expect(getIn(rules, ['funded', 'payout', 'max_amount', 'x'])).toBeUndefined()
     expect(getIn(rules, ['nope', 'x'])).toBeUndefined()
+  })
+})
+
+describe('removeAt', () => {
+  it('drops one item without mutating the list', () => {
+    const tiers = [{ max_minis: 2 }, { max_minis: 3 }, { max_minis: 4 }]
+    expect(removeAt(tiers, 1)).toEqual([{ max_minis: 2 }, { max_minis: 4 }])
+    expect(removeAt(tiers, 1)[1]).toBe(tiers[2])
+    expect(tiers).toHaveLength(3)
+    expect(removeAt(tiers, 3)).toEqual(tiers)
   })
 })
 

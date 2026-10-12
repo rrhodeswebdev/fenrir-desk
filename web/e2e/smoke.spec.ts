@@ -43,6 +43,16 @@ test('a deep link renders the report under Backtests', async ({ page }) => {
   await expect(page.getByText('abc', { exact: true })).toBeVisible()
 })
 
+test('the compare tabs switch between by account and by strategy', async ({ page }) => {
+  await page.goto('/backtests')
+  const tab = (name: string) => page.getByRole('tab', { name })
+  await expect(tab('By account')).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tabpanel')).toHaveText('No results yet.')
+  await tab('By strategy').click()
+  await expect(tab('By strategy')).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('tabpanel')).toHaveText('No results yet.')
+})
+
 test('an unknown path shows not found', async ({ page }) => {
   await page.goto('/no-such-page')
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Not found')

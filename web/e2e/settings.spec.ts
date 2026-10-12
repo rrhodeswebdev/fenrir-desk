@@ -31,6 +31,27 @@ test('a setting saves to the temp secrets file, survives a reload, and a bad val
   await expect(form.getByRole('alert')).toContainText('stale_seconds: Input should be greater than 0')
 })
 
+test('a secret round trip: the PUT sends only the edited key, and after a reload only its mask shows', async ({ page }) => {
+  const token = 'e2e-token-secret-WXYZ'
+  await page.goto('/settings')
+  const form = page.getByRole('region', { name: 'Secrets and limits' })
+  const field = form.getByLabel('NinjaTrader token')
+  await field.fill('x') // the e2e secrets file starts with no token, so its mask is empty
+  await field.fill('')
+  await expect(field).toHaveAccessibleDescription('Clears the NinjaTrader token on save.')
+  await field.fill(token)
+  await expect(field).toHaveAttribute('type', 'password')
+  const put = page.waitForRequest((r) => r.method() === 'PUT' && r.url().endsWith('/api/settings'))
+  await form.getByRole('button', { name: 'Save' }).click()
+  expect((await put).postDataJSON()).toEqual({ nt_token: token })
+  await expect(form.getByRole('status')).toHaveText('Saved.')
+  expect(readFileSync(process.env.FENRIR_E2E_ENV_FILE!, 'utf8')).toContain(`FENRIR_NT_TOKEN=${token}\n`)
+  await page.reload()
+  await expect(field).toHaveValue('••••WXYZ')
+  await expect(field).toHaveAttribute('type', 'text')
+  expect(await page.content()).not.toContain(token)
+})
+
 test('an account price and daily loss limit save and survive a reload', async ({ page }) => {
   await page.goto('/settings')
   const form = page.getByRole('region', { name: 'Accounts' })

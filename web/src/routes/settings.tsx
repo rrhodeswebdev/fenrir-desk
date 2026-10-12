@@ -25,16 +25,20 @@ type Key = Exclude<keyof Settings, 'repo_env_secrets'>
 /** `GET /api/settings/accounts`: account id → the user's own choices. */
 export type Choices = Record<string, { eval_price: number; dll_on: boolean }>
 
-// DEC-4d (#91): arming pins dll_on; the runner halts an armed account whose accounts.yaml value differs.
+// True today and under DEC-4d (#91: an armed account whose dll_on changes halts until re-armed); revisit when #91 lands.
 export const DLL_HELP =
-  'Daily loss limit: when on, backtests simulate it and hitting it halts the day; the attempt continues. Arming needs a backtest run with the current setting. Changing it for an armed account halts that account until you re-arm it.'
+  'Daily loss limit: when on, backtests simulate it and hitting it halts the day; the attempt continues. Arming needs a backtest run with the current setting, so after changing it re-run the backtest and re-arm the account.'
+
+const SECRET_NAMES = { nt_token: 'NinjaTrader token', lse_api_key: 'LSE API key' } as const
+type SecretKey = keyof typeof SECRET_NAMES
 
 type ControlProps = { id: string; 'aria-invalid': boolean; 'aria-describedby'?: string }
 
-/** One labelled row; `unit` is part of the label, `help` describes the control, a server error shows in Red under it. */
-function Field({ label, unit, help, errors, control }: { label: string; unit?: string; help?: string; errors: string[]; control: (p: ControlProps) => ReactNode }) {
+/** One labelled row; `unit` is part of the label, `help` (or an Ember `caution` in its place) describes the control, a server error shows in Red under it. */
+function Field({ label, unit, help, caution, errors, control }: { label: string; unit?: string; help?: string; caution?: string; errors: string[]; control: (p: ControlProps) => ReactNode }) {
   const id = useId()
-  const describedBy = [errors.length > 0 && `${id}-error`, help && `${id}-help`].filter(Boolean).join(' ')
+  const note = caution ?? help
+  const describedBy = [errors.length > 0 && `${id}-error`, note && `${id}-help`].filter(Boolean).join(' ')
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_14rem] items-center gap-x-4 gap-y-1 py-1">
       <label htmlFor={id} className="grid gap-1">
@@ -42,9 +46,9 @@ function Field({ label, unit, help, errors, control }: { label: string; unit?: s
         {unit && <span className="text-ink-3">{unit}</span>}
       </label>
       {control({ id, 'aria-invalid': errors.length > 0, 'aria-describedby': describedBy || undefined })}
-      {help && (
-        <p id={`${id}-help`} className="col-start-1 text-ink-3">
-          {help}
+      {note && (
+        <p id={`${id}-help`} className={caution ? 'col-start-1 text-ember' : 'col-start-1 text-ink-3'}>
+          {note}
         </p>
       )}
       {errors.length > 0 && (
@@ -114,17 +118,19 @@ function SettingsForm({ server }: { server: Settings }) {
   const errors = fieldErrors(save.error)
   const value = (k: Key) => String(draft?.[k] ?? server[k])
   const set = (k: Key, v: unknown) => setDraft((d) => ({ ...d, [k]: v }))
-  const field = (k: Key, label: string, more: { unit?: string; help?: string; input: (p: ControlProps) => ReactNode }) => (
-    <Field label={label} unit={more.unit} help={more.help} errors={errorsAt(errors, [k])} control={more.input} />
+  const field = (k: Key, label: string, more: { unit?: string; help?: string; caution?: string; input: (p: ControlProps) => ReactNode }) => (
+    <Field label={label} unit={more.unit} help={more.help} caution={more.caution} errors={errorsAt(errors, [k])} control={more.input} />
   )
   const text = (k: Key, label: string) =>
     field(k, label, { input: (p) => <Input {...p} value={value(k)} onChange={(e) => set(k, e.target.value)} /> })
   // the mask shows as text until edited; a mask sent back, or no edit, leaves the secret as it is
-  const secret = (k: Key, label: string) =>
-    field(k, label, {
+  const secret = (k: SecretKey) =>
+    field(k, SECRET_NAMES[k], {
       help: 'Masked. Type to replace it; empty clears it.',
+      caution: draft?.[k] === '' ? `Clears the ${SECRET_NAMES[k]} on save.` : undefined,
       input: (p) => (
-        <Input {...p} type={draft?.[k] === undefined ? 'text' : 'password'} autoComplete="off" spellCheck={false} value={value(k)} onFocus={(e) => e.target.select()} onChange={(e) => set(k, e.target.value)} />
+        // new-password: browsers ignore "off" on a password field and would autofill a saved login
+        <Input {...p} type={draft?.[k] === undefined ? 'text' : 'password'} autoComplete="new-password" spellCheck={false} value={value(k)} onFocus={(e) => e.target.select()} onChange={(e) => set(k, e.target.value)} />
       ),
     })
   const num = (k: Key, label: string, more: { unit?: string; help?: string; step: string }) =>
@@ -139,8 +145,8 @@ function SettingsForm({ server }: { server: Settings }) {
       <SaveRow dirty={draft !== null} save={save} errors={errors} note="Saved to the secrets file; applies after a server restart." />
       <Section legend="Connections">
         {text('nt_url', 'NinjaTrader address')}
-        {secret('nt_token', 'NinjaTrader token')}
-        {secret('lse_api_key', 'LSE API key')}
+        {secret('nt_token')}
+        {secret('lse_api_key')}
       </Section>
       <Section legend="Backtest and live">
         {num('holdout_months', 'Hold-out', { unit: 'months, most recent; never used for tuning', step: '1' })}
@@ -155,8 +161,8 @@ function SettingsForm({ server }: { server: Settings }) {
 function RepoSecrets() {
   const qc = useQueryClient()
   const imp = useMutation({
-    mutationFn: () => apiFetch<Settings>('/api/settings/import-repo-secrets', { method: 'POST' }),
-    onSuccess: (data) => qc.setQueryData(['settings'], data),
+    mutationFn: () => apiFetch<Settings & { imported: SecretKey[] }>('/api/settings/import-repo-secrets', { method: 'POST' }),
+    onSuccess: ({ imported: _, ...data }) => qc.setQueryData(['settings'], data),
   })
   return (
     <div className="mb-6 grid max-w-[72ch] gap-3 border border-ember p-4">
@@ -165,9 +171,9 @@ function RepoSecrets() {
         <Button type="button" variant="caution" disabled={imp.isPending} onClick={() => imp.mutate()}>
           Import into the secrets file
         </Button>
-        {imp.isSuccess && (
+        {imp.data && (
           <p role="status" className="text-ink-2">
-            Imported. Now delete them from the repo .env.
+            Imported {imp.data.imported.map((k) => SECRET_NAMES[k]).join(' and ')}. The terminal could read the repo .env: rotate them, then delete them there.
           </p>
         )}
       </div>

@@ -45,6 +45,7 @@ describe('settings page', () => {
     expect(input(html, 'NinjaTrader address')).toContain('value="http://127.0.0.1:7890"')
     expect(input(html, 'NinjaTrader token')).toMatch(/type="text"[^>]*value="••••"/)
     expect(input(html, 'LSE API key')).toMatch(/type="text"[^>]*value="••••0001"/)
+    expect(input(html, 'LSE API key')).toMatch(/autoComplete="new-password"/i)
     expect(input(html, 'Hold-out')).toMatch(/type="number"[^>]*value="12"/)
     expect(input(html, 'Safety margin')).toContain('value="80"')
     expect(input(html, 'Stale threshold')).toContain('value="90"')
@@ -60,7 +61,7 @@ describe('settings page', () => {
     expect(html).toMatch(/aria-checked="false"[^>]*aria-label="lucid-flex-50k daily loss limit"/)
     const helpId = html.match(/<p id="([^"]+)"[^>]*>Daily loss limit: /)?.[1]
     expect(html).toMatch(new RegExp(`aria-label="lucid-flex-50k daily loss limit"[^>]*aria-describedby="${helpId}"`))
-    expect(DLL_HELP).toContain('halts that account until you re-arm it')
+    expect(DLL_HELP).toContain('re-run the backtest and re-arm the account')
   })
 
   it('warns about a repo .env with secrets and offers the import', async () => {

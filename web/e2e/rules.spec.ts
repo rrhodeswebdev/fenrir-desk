@@ -40,6 +40,7 @@ test('an edit saves, survives a reload, and a bad value shows its server error u
 
 // flex-25k, not flex-50k, so the two tests never share a file
 test('scaling tiers: errors land under their input or at the list, and a tier adds and removes', async ({ page }) => {
+  test.setTimeout(60_000) // five reloads and saves: slow on a loaded machine
   await page.goto('/rules?account=lucid-flex-25k')
   const save = page.getByRole('button', { name: 'Save' })
   const scaling = page.getByRole('group', { name: 'Scaling' })

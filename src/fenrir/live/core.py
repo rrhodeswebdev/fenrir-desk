@@ -6,7 +6,7 @@ process (DEC-1), then passes the returned actions to `decide` (or the error to `
 
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -14,13 +14,13 @@ from fenrir.backtest.attempt import ADDON_FLATTEN, MINUTE, WINDOW
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import ContractSpec
-from fenrir.core.sessions import at_or_after, trading_day
+from fenrir.core.sessions import NY, at_or_after, trading_day
 from fenrir.live.arming import Armed
-from fenrir.rules.account import initial_state, phase_rules, view
+from fenrir.rules.account import apply, build_rules, initial_state, phase_rules, view
 from fenrir.rules.contracts import max_minis
 from fenrir.rules.pretrade import check
 from fenrir.rules.schema import AccountRules
-from fenrir.rules.state import AccountState, Phase, at_or_below
+from fenrir.rules.state import AccountState, Breach, DayClosed, Phase, at_or_below
 from fenrir.strategy import FLAT, Ctx, Position
 
 
@@ -62,10 +62,12 @@ class RunnerState:
     equity: tuple[tuple[datetime, float], ...]  # close-mark equity per bar this trading day
     session_start: float  # equity at session start, relative to phase start
     session_floor: float  # drawdown floor at session start
+    last_seen: datetime  # close of the last bar, or the start time
     halted: str | None = None  # no new entries while set
     halt_kind: str | None = None  # "safety" | "breach" | ... (Plans 21–24 AccountStatus)
     halt_day: date | None = None  # halt lifts after this trading day; None = until disarmed
     started: bool = True  # False: start refused, so the figures are not the account's
+    stale: str | None = None  # stale-data pause: no new entries until the next bar
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,11 +95,14 @@ def start_account(
     top = max(start.peak, start.balance) if dd.trailing == "intraday" else start.peak
     peak = top - start.phase_start
     balance = start.balance - start.phase_start
+    # without day_start the balance now stands in; brackets are blocked until it arrives
+    opened = balance if day_start is None else day_start.balance - start.phase_start
     return replace(
         fresh,
         balance=balance,
-        # without day_start the balance now stands in; brackets are blocked until it arrives
-        day_start_balance=balance if day_start is None else day_start.balance - start.phase_start,
+        day_start_balance=opened,
+        # shortcut: a day that nets exactly $0 since the open is not booked; 21.5 replays the fills
+        traded_today=balance != opened,
         peak=peak,
         floor=_floor(rules, phase, peak),
     )
@@ -116,10 +121,12 @@ def start(setup: Setup, now: datetime) -> Step:
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
     # without day_start these are the restart's figures; brackets are blocked until it arrives
-    floor = (
-        acct.floor if day is None else _floor(setup.rules, a.phase, day.peak - begin.phase_start)
-    )
-    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, floor)
+    if day is not None:  # the open's floor, from the open's figures as the start's
+        at_open = Start(begin.phase_start, day.peak, day.balance)
+        floor = start_account(setup.rules, a.phase, acct.day, at_open).floor
+    else:
+        floor = acct.floor
+    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, floor, now)
     if setup.strategy_hash != a.strategy_hash:
         return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
     if a.mode != "dry" and setup.start is None:
@@ -134,15 +141,46 @@ def halt(s: RunnerState, reason: str) -> Step:
 
 
 def on_bar(s: RunnerState, bar: Bar) -> Step:
-    # 21.4 (#78) rolls the trading day here, before anything else sees the bar.
+    s, out = _roll_day(s, bar)
     # 22.1 applies this bar's fills, then its Mark, here (backtest calling order).
     a = s.acct
     s = replace(
         s,
         bars=(*s.bars, bar)[-WINDOW:],
         equity=(*s.equity, (bar.ts, a.balance + a.open_pnl)),
+        last_seen=bar.ts + MINUTE,
+        stale=None,
     )
-    return _safety(s)
+    s, more = _safety(s)
+    return s, out + more
+
+
+def on_tick(s: RunnerState, now: datetime, stale_seconds: int) -> Step:
+    """No bar closed for `stale_seconds` in session: pause new entries, with one alert."""
+    # the whole window in session, so the reopen after a break or weekend is not "stale"
+    window = timedelta(seconds=stale_seconds) + MINUTE
+    if s.stale or not (in_session(now) and in_session(now - window)):
+        return s, ()
+    age = (now - s.last_seen).total_seconds()
+    if age <= stale_seconds:
+        return s, ()
+    reason = f"no {s.setup.spec.series} bar for {age:.0f}s; new entries paused"
+    return replace(s, stale=reason), (Log("alert", {"message": reason}),)
+
+
+def in_session(now: datetime) -> bool:
+    """CME Globex: Sunday 18:00 to Friday 17:00 ET, closed 17:00–18:00 each day."""
+    # shortcut: CME holidays count as in session (a stale pause); add a calendar if noisy
+    t = now.astimezone(NY)
+    hm = (t.hour, t.minute)
+    match t.weekday():
+        case 5:
+            return False
+        case 6:
+            return hm >= (18, 0)
+        case 4:
+            return hm < (17, 0)
+    return not ((17, 0) <= hm < (18, 0))
 
 
 def ctx(s: RunnerState) -> Ctx:
@@ -209,9 +247,9 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "strategy": Path(a.strategy_path).stem,
         "rules_account": a.rules_account,
         "contract": a.contract,
-        "halted": s.halted is not None,
-        "halt_kind": s.halt_kind,
-        "halt_reason": s.halted,
+        "halted": s.halted is not None or s.stale is not None,
+        "halt_kind": s.halt_kind if s.halted else "stale" if s.stale else None,
+        "halt_reason": s.halted or s.stale,
     }
     if not s.started:
         return head | dict.fromkeys(("balance", "today_pnl", "limits", "position", "session"))
@@ -249,6 +287,27 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), (Log("halt", payload),)
 
 
+def _roll_day(s: RunnerState, bar: Bar) -> Step:
+    """Close the last trading day (one DayClosed, as the backtest) and open the bar's day."""
+    day = trading_day(bar.ts)
+    if day <= s.acct.day:
+        return s, ()
+    out: tuple[Log, ...] = ()
+    acct = apply(build_rules(s.setup.rules, s.acct.phase), s.acct, DayClosed(s.acct.day, bar.ts))
+    if isinstance(acct, Breach):
+        s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
+        acct = s.acct  # failed until disarmed: its figures stay as they were
+    acct = replace(acct, day=day)
+    # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break
+    s = replace(
+        s, acct=acct, equity=(), session_start=acct.day_start_balance, session_floor=acct.floor
+    )
+    if s.halt_day is not None and day > s.halt_day:
+        out += (Log("alert", {"message": f"halt lifted: {s.halted}"}),)
+        s = replace(s, halted=None, halt_kind=None, halt_day=None)
+    return s, out
+
+
 def _safety(s: RunnerState) -> Step:
     a = s.acct
     level = safety_level(s)
@@ -266,6 +325,8 @@ def _block(s: RunnerState, a: Action, pending: bool) -> str | None:
         return f"side must be long or short, got {a.side!r}"
     if s.halted:
         return f"halted: {s.halted}"
+    if s.stale:
+        return f"paused: {s.stale}"
     if pending:
         return "a bracket was already accepted this bar"
     if s.position.qty != 0:

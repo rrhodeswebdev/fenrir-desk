@@ -433,7 +433,7 @@ CLI: `fenrir backtest <strategy globs...> --account <glob> [--account ...] [--co
 
 Instrument names are NinjaTrader's (`"NQ 12-26"`). Wrong token → HTTP 401 / WS close. `client_id` is at most 24 characters; `side` ∈ `"long"|"short"`. The `{type: "account"}` message repeats every 2 s per managed account.
 
-Add-on behaviour (DEC-5): its config file lists `managed_accounts`; a request naming any other account → `{accepted: false, error: "unmanaged_account"}` and its `client_id` is not recorded as seen; `/accounts`, the 16:40 flatten and `/flatten-all` cover managed accounts only; an empty list is logged loudly at start. Seen `client_id`s persist to a file beside the config (pruned to 7 days) and are loaded at start. `flatten_on_disconnect_seconds` (default null = off) flattens managed accounts holding a position after no `/stream` client for that long. On every entry fill the add-on sets the OCO stop and target quantity to the total filled so far (placed on the first fill, resized on later ones); an entry not complete after 2 s has its remainder cancelled, and fills arriving after the cancel are still protected. Entry is a market order; stop and target are OCO. `/orders` returns working orders only; `role` adds `"other"` for orders not placed by Fenrir. Fill `qty` is signed (+ buy, − sell). `ts` is UTC ISO 8601 with milliseconds and `Z`. `/flatten-all` flattens and cancels on every managed account.
+Add-on behaviour (DEC-5): its config file lists `managed_accounts`; a request naming any other account → `{accepted: false, error: "unmanaged_account"}` and its `client_id` is not recorded as seen; `/accounts`, the 16:40 flatten and `/flatten-all` cover managed accounts only; an empty list is logged loudly at start. Seen `client_id`s persist to a file beside the config (pruned to 7 days) and are loaded at start. `flatten_on_disconnect_seconds` (default null = off) flattens managed accounts holding a position after no `/stream` client for that long. On every entry fill the add-on sets the OCO stop and target quantity to the total filled so far (placed on the first fill, resized on later ones); an entry not complete after 2 s has its remainder cancelled, and fills arriving after the cancel are still protected. Entry is a market order; stop and target are OCO. `/orders` returns working orders only; `role` adds `"other"` for orders not placed by Fenrir. Fill `qty` is signed (+ buy, − sell); `/orders` `qty` is unsigned, the remaining quantity (> 0), with the side in `action`. `ts` is UTC ISO 8601 with milliseconds and `Z`. `/flatten-all` flattens and cancels on every managed account.
 
 ```python
 # fenrir.bridge.names
@@ -445,8 +445,20 @@ class AddonClient: accounts(), positions(account), orders(account), bracket(...)
     # stream() never ends: yields {"type":"connected"} after each (re)connect and {"type":"disconnected","error":str}
     # on a drop, bad token or missed heartbeats (default 6 s). Plan 22 sets app.state.addon: AddonClient.
 # fenrir.bridge.reconcile
+class NtPosition: account: str; instrument: str; qty: int; avg_price: float          # /positions row, qty signed
+class NtOrder: account: str; order_id: str; client_id: str; instrument: str; role: "entry"|"stop"|"target"|"other"; action: "buy"|"sell"; qty: int; price: float; state: str   # /orders row
+class ExpectedBook: account: str; instrument: str; qty: int                          # signed qty the runner believes it holds
+class Mismatch: kind: MismatchKind; detail: str                                        # all frozen dataclasses
 def reconcile(expected: ExpectedBook, positions: Sequence[NtPosition], orders: Sequence[NtOrder]) -> tuple[Mismatch, ...]
-    # Mismatch.kind ∈ "position" | "unexpected_position" | "missing_stop" | "missing_target" | "stray_orders"
+    # MismatchKind = Literal["position", "unexpected_position", "missing_stop", "missing_target", "stray_orders"]
+    # () when the book matches; at most one of each kind, in that order (several unexpected instruments are
+    # listed in one unexpected_position). Rows for other accounts are ignored;
+    # orders are working orders. While a position is held, only stop/target orders on that instrument whose
+    # action closes it and whose qty > 0 count as protection, and their qty must equal |held| (fewer or more → missing_stop /
+    # missing_target). Every other working order on the account (a stale entry, "other", a wrong-direction
+    # or other-instrument stop, a qty ≤ 0, any order while flat) → stray_orders, naming its order_ids.
+    # Strays are for the user to resolve: plan 22 must not auto-cancel them while an unexpected_position
+    # exists, since a "stray" stop may be the only protection on that position.
 ```
 
 ### Plans 21–24 — live API and storage

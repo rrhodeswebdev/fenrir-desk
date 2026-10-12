@@ -294,6 +294,8 @@ class AccountChoice(BaseModel):   # frozen, extra="forbid", strict; the user's o
 def load_account_choices(data_dir: Path) -> dict[str, AccountChoice]
     # shell: <data_dir>/accounts.yaml, account id → {eval_price, dll_on}; {} when absent/empty; missing account or
     # key = defaults; ValueError naming the file on bad YAML, non-string keys, unknown keys or bad values
+    # or when it is a symlink, not a regular file or over 1 MiB (read via fenrir.files.read_regular, DEC-1);
+    # errors give line/field only, never the file's text
 def net_per_attempt(period: PeriodResult, account_id: str, choices: Mapping[str, AccountChoice]) -> float
     # pure: expected_gross_per_attempt − eval_price. Every net figure shown, ranked or compared uses this,
     # with choices loaded once per command/request. Never stored in a report.

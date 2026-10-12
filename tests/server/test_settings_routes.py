@@ -1,3 +1,4 @@
+import os
 import stat
 from pathlib import Path
 
@@ -250,3 +251,58 @@ def test_a_broken_accounts_file_is_500_and_never_overwritten(env):
     r = client.put("/api/settings/accounts", json={AID: {"dll_on": True}}, headers=WRITE)
     assert r.status_code == 500
     assert path.read_text() == f"{AID}: {{eval_price: lots}}\n"
+
+
+def test_put_without_origin_is_403(env):
+    client, env_file, data_dir = env
+    assert client.put("/api/settings", json={"stale_seconds": 30}).status_code == 403
+    assert client.put("/api/settings/accounts", json={AID: {"dll_on": True}}).status_code == 403
+    assert env_file.read_bytes() == ENV.encode() and not data_dir.exists()
+
+
+def test_a_fifo_at_the_repo_env_is_no_secrets(env, tmp_path, monkeypatch):
+    client, _, _ = env
+    repo_env = tmp_path / "repo.env"
+    os.mkfifo(repo_env)  # a blocking open would hang the request
+    monkeypatch.setattr(routes, "REPO_ENV", repo_env)
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    assert client.get("/api/settings").json()["repo_env_secrets"] is False
+
+
+def test_a_bad_value_in_the_file_is_500_and_put_writes_nothing(env):
+    client, env_file, _ = env
+    env_file.write_bytes(ENV.encode() + b"FENRIR_STALE_SECONDS=soon\r\n")
+    before = env_file.read_bytes()
+    assert client.get("/api/settings").status_code == 500
+    assert client.put("/api/settings", json={"holdout_months": 3}, headers=WRITE).status_code == 500
+    assert env_file.read_bytes() == before
+
+
+def test_accounts_symlinked_to_the_secrets_file_never_leak(env):
+    client, env_file, data_dir = env
+    data_dir.mkdir()
+    (data_dir / "accounts.yaml").symlink_to(env_file)
+    r = client.get("/api/settings/accounts")
+    assert r.status_code == 500 and "symlink" in r.json()["detail"]
+    r2 = client.put("/api/settings/accounts", json={AID: {"dll_on": True}}, headers=WRITE)
+    assert r2.status_code == 500
+    for text in (r.text, r2.text):
+        assert TOKEN not in text and LSE not in text and "secret" not in text
+    assert env_file.read_bytes() == ENV.encode()
+
+
+def test_a_fifo_accounts_file_does_not_hang(env):
+    client, _, data_dir = env
+    data_dir.mkdir()
+    os.mkfifo(data_dir / "accounts.yaml")
+    assert client.get("/api/settings/accounts").status_code == 500
+
+
+def test_accounts_put_refuses_a_symlinked_data_dir(env, tmp_path):
+    client, _, data_dir = env
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    data_dir.symlink_to(elsewhere)
+    r = client.put("/api/settings/accounts", json={AID: {"dll_on": True}}, headers=WRITE)
+    assert r.status_code == 500 and "symlink" in r.json()["detail"]
+    assert list(elsewhere.iterdir()) == []

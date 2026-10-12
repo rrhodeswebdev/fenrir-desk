@@ -1,8 +1,6 @@
 """Settings API (contracts: Plan 24): the secrets file and the per-account choices."""
 
-import errno
 import os
-import stat
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -13,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
+from fenrir.files import read_regular
 from fenrir.rules.loader import list_accounts
 from fenrir.server.isolation import APP_ROOT
 from fenrir.settings import (
@@ -97,7 +96,7 @@ async def _body(request: Request) -> object:
 def _write(path: Path, data: bytes, mode: int) -> None:
     # temp + rename in the same dir: never half a file, and a symlink at `path` is replaced,
     # never written through
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
@@ -126,16 +125,10 @@ def _repo_env_secrets() -> bool:
     if os.environ.get("FENRIR_BIND_ALL") != "1":
         return False  # natively the repo .env is the secrets file
     try:
-        # no symlink, no FIFO: the terminal owns this file
-        fd = os.open(REPO_ENV, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError as e:
-        if e.errno in (errno.ENOENT, errno.ELOOP):
-            return False
-        raise
-    with os.fdopen(fd, "rb") as f:
-        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-            return False
-        text = f.read(REPO_ENV_MAX).decode("utf-8", errors="replace")
+        # the terminal owns this file: anything odd (symlink, FIFO, socket, huge) = no secrets
+        text = read_regular(REPO_ENV, REPO_ENV_MAX).decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return False
     return has_secrets(parse_env_text(text))
 
 
@@ -172,12 +165,13 @@ async def put_settings(request: Request):
         return _invalid("The settings do not validate.", errors)
     if updates:
         try:
-            new = update_env_text(text, updates)
+            text = update_env_text(text, updates)
         except ValueError as e:  # a value with a line break
             return _invalid("The settings do not validate.", [{"loc": [], "msg": str(e)}])
-        _write(path, new.encode("utf-8"), 0o600)
-        text = new
-    return _settings_view(text)
+    response = _settings_view(text)  # built first: a 500 here must not follow a write
+    if updates:
+        _write(path, text.encode("utf-8"), 0o600)
+    return response
 
 
 def _choices(data_dir: Path) -> dict[str, AccountChoice]:

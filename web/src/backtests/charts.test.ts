@@ -31,7 +31,7 @@ describe('equityCaption', () => {
       ['2023-05-03T20:59:00Z', 1250],
     ]
     expect(equityCaption({ start: '2023-05-01', outcome: 'payout', points })).toBe(
-      '2023-05-01 · payout · 3 days · end $1,250.00 · low −$300.00 · high $1,400.00',
+      '2023-05-01 · payout · 3 days · end +$1,250.00 · low -$300.00 · high +$1,400.00',
     )
   })
 

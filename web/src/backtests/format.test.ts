@@ -13,9 +13,10 @@ describe('format', () => {
     expect(num(null)).toBe('—')
   })
 
-  it('shows dollars with a minus sign only when negative', () => {
-    expect(money(87.5)).toBe('$87.50')
-    expect(money(-1250)).toBe('−$1,250.00')
+  it('shows signed dollars as Compare does, a missing median as a dash', () => {
+    expect(money(87.5)).toBe('+$87.50')
+    expect(money(-1250)).toBe('-$1,250.00')
+    expect(money(0)).toBe('$0.00')
     expect(money(null)).toBe('—')
   })
 

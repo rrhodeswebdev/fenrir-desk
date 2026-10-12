@@ -1,3 +1,4 @@
+// TradingView Lightweight Charts™ Copyright (c) 2026 TradingView, Inc. https://www.tradingview.com/ (Apache-2.0; its attribution logo stays on each chart)
 import { ColorType, type DeepPartial, type LineData, type TimeChartOptions, type UTCTimestamp } from 'lightweight-charts'
 import { money } from './format'
 

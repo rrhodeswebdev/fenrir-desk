@@ -76,11 +76,11 @@ describe('report page', () => {
 
   it('shows gross and net per attempt, the daily loss limit and the params', async () => {
     const html = await withReport(report())
-    expect(row(html, 'Gross per attempt')).toEqual(['$87.50', '$87.50'])
-    expect(row(html, 'Net per attempt')).toEqual(['−$42.50', '$10.00'])
+    expect(row(html, 'Gross per attempt')).toEqual(['+$87.50', '+$87.50'])
+    expect(row(html, 'Net per attempt')).toEqual(['-$42.50', '+$10.00'])
     expect(html).toMatch(/<dt class="label">Daily loss limit<\/dt><dd class="value">On<\/dd>/)
-    expect(html).toMatch(/or_minutes<\/dt><dd class="value">15<\/dd>/)
-    expect(html).toMatch(/side<\/dt><dd class="value">long<\/dd>/)
+    expect(html).toMatch(/normal-case">or_minutes<\/dt><dd class="value wrap-anywhere">15<\/dd>/)
+    expect(html).toMatch(/side<\/dt><dd class="value wrap-anywhere">long<\/dd>/)
   })
 
   it('draws the days-to-pass histogram with a text alternative', async () => {
@@ -94,7 +94,7 @@ describe('report page', () => {
 
   it('captions each equity sample, with a chart box only when it has points', async () => {
     const html = await withReport(report())
-    expect(html).toContain('2023-05-01 · payout · 2 days · end $1,250.00 · low $0.00 · high $1,250.00')
+    expect(html).toContain('2023-05-01 · payout · 2 days · end +$1,250.00 · low $0.00 · high +$1,250.00')
     expect(html).toContain('2023-06-01 · breached · no closed day')
     expect(html.match(/aria-hidden="true" class="h-32 border"/g)).toHaveLength(2) // one per period
   })
@@ -102,7 +102,7 @@ describe('report page', () => {
   it('flags a hold-out gap and handles a run without a hold-out', async () => {
     const html = await withReport(report({ holdout_gap: true, dll_on: false, params: {}, periods: { tuning: period(), holdout: null } }))
     expect(html).toContain('likely overfit')
-    expect(row(html, 'Net per attempt')).toEqual(['−$42.50', '—'])
+    expect(row(html, 'Net per attempt')).toEqual(['-$42.50', '—'])
     expect(html).toContain('No hold-out in this run.')
     expect(html).toMatch(/Daily loss limit<\/dt><dd class="value">Off<\/dd>/)
   })
@@ -116,5 +116,15 @@ describe('report page', () => {
     expect(html).toContain(`<span class="value min-w-0 break-all">${KEY}</span>`)
     expect(html).toContain('<p role="alert" class="text-red">500: boom</p>')
     expect(html).toContain('Net per attempt')
+  })
+
+  it('does not retry a missing report or a 401, but retries other errors', async () => {
+    let client!: QueryClient
+    await render((c) => (client = c))
+    const retry = client.getQueryCache().find({ queryKey: ['backtests', 'results', KEY] })!.options.retry as (n: number, e: unknown) => boolean
+    expect(retry(0, new ApiError(404, ''))).toBe(false)
+    expect(retry(0, new ApiError(401, ''))).toBe(false)
+    expect(retry(0, new ApiError(500, ''))).toBe(true)
+    expect(retry(3, new ApiError(500, ''))).toBe(false)
   })
 })

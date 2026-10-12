@@ -112,8 +112,9 @@ export function ReportView({ report }: { report: Report }) {
           <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1">
             {params.map(([name, v]) => (
               <div key={name} className="contents">
-                <dt className="label self-baseline">{name}</dt>
-                <dd className="value">{paramText(v)}</dd>
+                {/* normal-case: the key as spelled in PARAMS */}
+                <dt className="label self-baseline normal-case">{name}</dt>
+                <dd className="value wrap-anywhere">{paramText(v)}</dd>
               </div>
             ))}
           </dl>

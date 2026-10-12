@@ -13,7 +13,7 @@ from typing import Any
 from fenrir.backtest.attempt import ADDON_FLATTEN, MINUTE, WINDOW
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
-from fenrir.core.instruments import ContractSpec
+from fenrir.core.instruments import ContractSpec, in_roll_window
 from fenrir.core.sessions import at_or_after, trading_day
 from fenrir.live.arming import Armed
 from fenrir.rules.account import initial_state, phase_rules, view
@@ -277,6 +277,8 @@ def _block(s: RunnerState, a: Action, pending: bool) -> str | None:
         return f"at or after {flat_at} flat-by: no new entries"
     if s.setup.armed.mode != "dry" and s.setup.day_start is None:
         return "today's opening balance unknown"
-    # 21.3 (#77) adds the roll-window block and 21.4 (#78) the stale-data pause here.
+    if in_roll_window(trading_day(bar.ts)):
+        return "roll window: no new entries"  # the backtest loads no bars on these days
+    # 21.4 (#78) adds the stale-data pause here.
     # 22.2 swaps s.acct for the stricter of it and NinjaTrader's figures (DEC-4b).
     return check(s.acct, rules, a, s.setup.spec, entry_price=bar.close, held_minis=0.0)

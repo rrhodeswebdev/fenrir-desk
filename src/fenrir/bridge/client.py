@@ -104,14 +104,15 @@ EVENT = TypeAdapter(Event, config=_STRICT)
 
 
 def parse[T](adapter: TypeAdapter[T], raw: str | bytes, what: str) -> T:
-    """Validate add-on JSON, or raise ValueError naming the first problem (input not echoed)."""
+    """Validate add-on JSON, or raise ValueError naming the first problem's place and kind
+    (pydantic's `msg` can quote the input, e.g. an unknown `type` tag, so it is left out)."""
     try:
         return adapter.validate_json(raw)
     except ValidationError as e:
         first = e.errors(include_url=False, include_input=False)[0]
         loc = ".".join(str(p) for p in first["loc"]) or "<root>"
         raise ValueError(
-            f"malformed {what}: {e.error_count()} error(s), first at {loc}: {first['msg']}"
+            f"malformed {what}: {e.error_count()} error(s), first at {loc}: {first['type']}"
         ) from None
 
 
@@ -133,7 +134,10 @@ class AddonClient:
         reconnect_delay: float = 1.0,
     ) -> None:
         self._http = httpx.AsyncClient(
-            base_url=base_url, headers={"X-Fenrir-Token": token}, timeout=timeout
+            base_url=base_url,
+            headers={"X-Fenrir-Token": token},
+            timeout=timeout,
+            trust_env=False,  # never via an env proxy: it would see the token and every order
         )
         base = base_url.rstrip("/")
         self._ws_url = "ws" + base.removeprefix("http") + "/stream?token=" + quote(token, safe="")
@@ -202,12 +206,19 @@ class AddonClient:
         delay = self._reconnect_delay
         while True:
             try:
-                async with connect(self._ws_url, logger=_WS_LOG, open_timeout=self._timeout) as ws:
-                    delay = self._reconnect_delay
+                async with connect(
+                    self._ws_url,
+                    logger=_WS_LOG,
+                    open_timeout=self._timeout,
+                    close_timeout=1.0,  # a dead peer never answers the close; don't wait 10 s
+                    proxy=None,
+                ) as ws:
                     yield {"type": "connected"}
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), self._heartbeat_timeout)
-                        yield parse(EVENT, raw, "stream message")
+                        msg = parse(EVENT, raw, "stream message")
+                        delay = self._reconnect_delay  # back off from peers that accept then fail
+                        yield msg
             except TimeoutError:
                 yield {"type": "disconnected", "error": "no heartbeat or open timed out"}
             except (OSError, ValueError, WebSocketException) as e:

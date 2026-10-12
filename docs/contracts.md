@@ -446,13 +446,16 @@ class AddonClient(base_url, token, *, timeout=5.0, retries=3, heartbeat_timeout=
     cancel(client_id, account, order_id), flatten_all(client_id) -> Ack; stream() -> AsyncIterator[dict]; aclose()
     # Account/Position/Order are TypedDicts in the /accounts, /positions, /orders row shapes (plain dicts; keys match
     # reconcile's NtPosition/NtOrder fields). Every response and stream message is validated strictly (no "1" -> 1,
-    # no NaN, ts must be ...HH:MM:SS.mmmZ); malformed -> ValueError naming the first bad field, input not echoed.
+    # no NaN, ts must be ...HH:MM:SS.mmmZ); malformed -> ValueError naming the first bad field and error kind,
+    # input not echoed.
     # HTTP errors and an unreachable add-on raise httpx.HTTPError; a 401 is never retried. POSTs retry only on a
     # transport error (timeouts included) with the same body, so a retry after a landed order comes back duplicate.
     # stream() never ends: yields {"type":"connected"} after each (re)connect, then validated events, and
     # {"type":"disconnected","error":str} on a drop, bad token, malformed message or no message at all for
-    # heartbeat_timeout (default 6 s = 3 missed heartbeats); reconnects with backoff doubling to 30 s.
-    # The token is never logged or put in an error. Plan 22 sets app.state.addon: AddonClient.
+    # heartbeat_timeout (default 6 s = 3 missed heartbeats; at most ~1 s more to give up on a half-open peer);
+    # reconnects with backoff doubling to 30 s, reset only by a valid message.
+    # The token is never logged or put in an error. Env proxies (HTTP_PROXY etc.) are ignored: the add-on is always
+    # a direct peer. Plan 22 sets app.state.addon: AddonClient.
 # fenrir.bridge.fake_addon  (test support, shared with live tests)
 class FakeAddon: token, accounts, positions, orders, requests, seen, delays, heartbeats, heartbeat_every; push(msg), kick()
 async def running(fake) -> AsyncContextManager[str]   # serves make_app(fake) on a free loopback port, yields base URL

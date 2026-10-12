@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import hashlib
 import logging
 import re
+import time
 
 import httpx
 import pytest
@@ -32,11 +35,6 @@ ORDER = {
     "price": 20010.0,
     "state": "Working",
 }
-
-
-@pytest.fixture
-def anyio_backend():
-    return "asyncio"
 
 
 @pytest.fixture
@@ -223,3 +221,56 @@ async def test_stream_with_bad_token_keeps_reporting_disconnected(addon, caplog)
     await client.aclose()
     assert first["type"] == second["type"] == "disconnected"
     assert BAD_TOKEN not in first["error"] + caplog.text
+
+
+def test_unknown_type_is_not_echoed():
+    marker = "x" * 50
+    with pytest.raises(ValueError) as err:
+        parse(EVENT, f'{{"type": "{marker}"}}', "stream message")
+    assert marker not in str(err.value)
+    assert "union_tag_invalid" in str(err.value)
+
+
+async def test_env_proxies_are_ignored(addon, monkeypatch):
+    _, _, url = addon
+    async with running(FakeAddon()) as dead_proxy:
+        pass  # its port is closed again: anything routed through it fails
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        monkeypatch.setenv(var, dead_proxy)
+    for var in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    client = AddonClient(url, "secret", timeout=0.3, retries=1, reconnect_delay=0.05)
+    assert await client.accounts() == [ACCOUNT]
+    assert (await client.flatten_all("c12")).accepted is True
+    gen = client.stream()
+    assert await anext(gen) == {"type": "connected"}
+    await gen.aclose()
+    await client.aclose()
+
+
+async def test_silent_peer_is_reported_within_heartbeat_timeout():
+    """A half-open link: the peer completes the handshake, then never sends or answers again."""
+
+    async def handshake_then_silence(reader, writer):
+        request = (await reader.readuntil(b"\r\n\r\n")).decode()
+        key = re.search(r"(?im)^sec-websocket-key:\s*(\S+)", request)[1]
+        guid = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept = base64.b64encode(hashlib.sha1(key.encode() + guid).digest()).decode()
+        writer.write(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            + f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode()
+        )
+        await writer.drain()
+        await asyncio.sleep(30)
+
+    server = await asyncio.start_server(handshake_then_silence, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    client = AddonClient(f"http://127.0.0.1:{port}", "secret", heartbeat_timeout=0.5)
+    gen = client.stream()
+    assert await anext(gen) == {"type": "connected"}
+    start = time.monotonic()
+    assert (await asyncio.wait_for(anext(gen), 15))["type"] == "disconnected"
+    assert time.monotonic() - start < 0.5 + 1.5
+    await gen.aclose()
+    await client.aclose()
+    server.close()

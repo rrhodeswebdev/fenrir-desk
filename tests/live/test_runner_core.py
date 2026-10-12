@@ -29,7 +29,7 @@ def decide(setup, actions, b=BAR):
 
 
 def kinds(effects):
-    return [e.kind for e in effects]
+    return [e.kind if isinstance(e, core.Log) else "send" for e in effects]
 
 
 def scaled_rules() -> AccountRules:
@@ -85,7 +85,7 @@ def test_funded_scaling_limits_size_and_status():
     high = Start(phase_start=50_000.0, peak=51_500.0, balance=51_500.0)  # +1500: tier 4
     s = run(replace(setup, start=high, day_start=DayStart(51_500.0, 51_500.0)))
     assert core.account_status(s)["limits"]["max_minis"] == 4
-    assert kinds(core.decide(s, [replace(LONG, qty=3)])[1]) == ["bar", "action"]
+    assert kinds(core.decide(s, [replace(LONG, qty=3)])[1]) == ["bar", "action", "send"]
 
     # the tier comes from today's opening balance, not a winning morning since
     s = run(replace(setup, start=high, day_start=DayStart(50_500.0, 50_500.0)))
@@ -112,12 +112,12 @@ def test_without_day_start_sim_and_live_take_no_brackets(mode):
     day = DayStart(balance=50_000.0, peak=50_000.0)
     setup = make_setup(make_rules(), mode=mode, start=start)
     _, effects = decide(setup, [LONG, Flatten(), Cancel("x")])
-    assert kinds(effects) == ["bar", "rejection", "action", "action"]
+    assert kinds(effects) == ["bar", "rejection", "action", "send", "action"]
     assert effects[1].payload["reason"] == "today's opening balance unknown"
     # the open's figures without the phase start and peak: still no brackets
     _, effects = decide(replace(setup, start=None, day_start=day), [LONG])
     assert kinds(effects) == ["bar", "rejection"] and "DEC-4a" in effects[1].payload["reason"]
-    assert kinds(decide(replace(setup, day_start=day), [LONG])[1]) == ["bar", "action"]
+    assert kinds(decide(replace(setup, day_start=day), [LONG])[1]) == ["bar", "action", "send"]
     # dry runs start fresh and need no opening balance
     assert kinds(decide(make_setup(make_rules()), [LONG])[1]) == ["bar", "action"]
 

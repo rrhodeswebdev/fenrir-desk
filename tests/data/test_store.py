@@ -311,6 +311,27 @@ def test_manifest_reads_refuse_links_fifos_and_huge_files(tmp_path, monkeypatch)
         read_manifest(tmp_path)
 
 
+def test_manifest_reads_refuse_a_bars_link_and_a_directory_without_leaking_fds(tmp_path):
+    data, elsewhere = tmp_path / "data", tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "manifest.json").write_text('{"secret": "root-only"}')
+    data.mkdir()
+    for read in (read_manifest, data_version):  # missing data/bars or manifest: empty
+        assert read(tmp_path / "missing") in ({"series": {}}, hashlib.sha256(b"").hexdigest())
+        assert read(data) in ({"series": {}}, hashlib.sha256(b"").hexdigest())
+    (data / "bars").symlink_to(elsewhere, target_is_directory=True)
+    fds = len(os.listdir("/dev/fd"))
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="symlink"):
+            read(data)
+    (data / "bars").unlink()
+    (data / "bars" / "manifest.json").mkdir(parents=True)
+    for read in (read_manifest, data_version):
+        with pytest.raises(ValueError, match="not a regular file"):
+            read(data)
+    assert len(os.listdir("/dev/fd")) == fds
+
+
 def test_failed_write_leaves_no_temp_file(tmp_path):
     def fail(f):
         f.write(b"half")

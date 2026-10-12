@@ -98,15 +98,16 @@ _DIR_FD = {os.open, os.mkdir, os.rename, os.unlink} <= os.supports_dir_fd
 MAX_MANIFEST = 16 * 2**20
 
 
-def _open_dirs(data_dir: Path, parts: Sequence[str]) -> int:
-    """A fd for data_dir/parts..., creating missing ones; each is opened O_NOFOLLOW, so a link
-    there, even one swapped in a moment ago, fails with ELOOP instead of being followed."""
+def _open_dirs(data_dir: Path, parts: Sequence[str], *, create: bool = True) -> int:
+    """A fd for data_dir/parts..., creating missing ones if `create`. Each is opened O_NOFOLLOW,
+    so a link there, even one swapped in a moment ago, fails with ELOOP, never followed."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fd = os.open(data_dir, flags)
     try:
         for part in parts:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(part, 0o755, dir_fd=fd)
+            if create:
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(part, 0o755, dir_fd=fd)
             fd, parent = os.open(part, flags, dir_fd=fd), fd
             os.close(parent)
     except BaseException:
@@ -169,21 +170,36 @@ def _atomic_write_checked(data_dir: Path, path: Path, write: Callable[[BinaryIO]
 
 
 def _manifest_bytes(data_dir: Path) -> bytes:
-    """b"" when missing. ValueError for a symlink, a non-regular file or one over 16 MB: the pull
-    reads this as root in the image, where the terminal could plant a link, a FIFO or /dev/zero."""
+    """b"" when missing. ValueError for a symlinked data dir, `bars/` or manifest, a non-regular
+    file or one over 16 MB: the pull reads this as root in the image, where the terminal could
+    plant a link, a FIFO or /dev/zero."""
     path = _manifest_path(data_dir)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
-        fd = os.open(path, flags)
+        if _DIR_FD:  # a planted bars/ link fails too, not only a manifest.json link
+            bars = _open_dirs(data_dir, ("bars",), create=False)
+            try:
+                fd = os.open(path.name, flags, dir_fd=bars)
+            finally:
+                os.close(bars)
+        else:
+            fd = os.open(path, flags)
     except FileNotFoundError:
         return b""
     except OSError as e:
-        if e.errno == errno.ELOOP:
-            raise ValueError(f"refusing to read symlink {path}") from None
+        if e.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError(f"refusing to read through a symlink to {path}") from None
         raise
-    with os.fdopen(fd, "rb") as f:
-        text = f.read(MAX_MANIFEST + 1) if stat.S_ISREG(os.fstat(fd).st_mode) else None
-    if text is None or len(text) > MAX_MANIFEST:
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):  # on the raw fd: fdopen raises on a directory
+            raise ValueError(f"refusing to read {path}: not a regular file under 16 MB")
+        f = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
+        text = f.read(MAX_MANIFEST + 1)
+    if len(text) > MAX_MANIFEST:
         raise ValueError(f"refusing to read {path}: not a regular file under 16 MB")
     return text
 

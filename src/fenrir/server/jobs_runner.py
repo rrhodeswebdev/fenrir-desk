@@ -53,6 +53,7 @@ CHILD = (sys.executable, "-P", "-m", "fenrir.server.job_child")
 LINE_MAX = 64 * 1024  # longer child lines are dropped whole
 ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024  # strategy files are small; bounds what the server reads
+JOB_MAX = 16 * 2**20
 
 Listener = Callable[[dict[str, Any]], None]
 
@@ -258,7 +259,7 @@ class JobRunner:
             log.error("not loading backtest jobs: %s is a symlink", link)
         for path in [] if link else sorted(self._dir.glob("*.json")):
             try:
-                job = restart(from_json(json.loads(path.read_text())))
+                job = restart(from_json(json.loads(read_regular(path, JOB_MAX))))
                 if job.id != path.stem:  # the id names the file we write back to
                     raise ValueError(f"id {job.id!r} does not match the file name")
             except (ValueError, TypeError, KeyError, OSError, RecursionError) as e:

@@ -27,9 +27,13 @@ def front_months(instruments: Instruments, day: date) -> dict[str, str | None]:
 def overview(request: Request) -> dict[str, Any]:
     # the same coverage() as `fenrir data summary --json`, so the page and the CLI agree
     data_dir = request.app.state.settings.data_dir
-    instruments = load_instruments()
+    try:
+        instruments = load_instruments()
+        series = [asdict(coverage(data_dir, s)) for s in SERIES]
+    except ValueError as e:  # a symlinked, special or huge file the root server won't read
+        raise HTTPException(status_code=500, detail=str(e)) from e
     return {
-        "series": [asdict(coverage(data_dir, s)) for s in SERIES],
+        "series": series,
         "rolls": [asdict(r) for r in instruments.rolls],
         "front": front_months(instruments, trading_day(datetime.now(UTC))),
         "pull": request.app.state.pull.status(),

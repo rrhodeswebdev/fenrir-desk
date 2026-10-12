@@ -12,7 +12,8 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 from ruamel.yaml.emitter import Emitter
 
-from fenrir.rules.loader import parse_account
+from fenrir.files import read_regular
+from fenrir.rules.loader import RULES_MAX, parse_account
 from fenrir.rules.schema import AccountRules
 
 Loc = tuple[str | int, ...]
@@ -80,7 +81,7 @@ def write_account(path: Path, rules: AccountRules) -> None:
     """Save `rules` over the account file at `path`; raises ValueError and writes nothing
     if the file does not load now, or would not load as `rules` afterwards."""
     aid = f"{path.parent.name}-{path.stem}"
-    text = path.read_text(encoding="utf-8")
+    text = read_regular(path, RULES_MAX).decode("utf-8")
     edits = changes(parse_account(text, aid, path).model_dump(), rules.model_dump())
     if not edits:
         return

@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 import sys
 import time
 from datetime import UTC, date, datetime
@@ -105,6 +107,28 @@ def test_series_match_the_cli_summary(tmp_path, monkeypatch):
         "days": 2,
         "gaps": [["2026-10-07", "2026-10-07"]],
     }
+
+
+def test_a_fifo_parquet_is_500_naming_it_and_the_server_keeps_answering(tmp_path):
+    # the Data page polls every 2 s: a blocking read would take a server thread each time
+    fifo = tmp_path / "bars" / "NQ" / "1m" / "NQZ26.parquet"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+    client = _client(tmp_path)[1]
+    for _ in range(3):
+        r = client.get("/api/data", headers=COOKIE)
+        assert r.status_code == 500 and r.json()["detail"] == f"{fifo} is not a regular file"
+    fifo.unlink()
+    assert client.get("/api/data", headers=COOKIE).status_code == 200
+
+
+def test_a_symlinked_instruments_file_is_500_naming_it(tmp_path, monkeypatch):
+    shutil.copy("instruments.yaml", tmp_path / "real.yaml")
+    (tmp_path / "instruments.yaml").symlink_to(tmp_path / "real.yaml")
+    monkeypatch.chdir(tmp_path)
+    r = _client(tmp_path / "data")[1].get("/api/data", headers=COOKIE)
+    assert r.status_code == 500
+    assert r.json()["detail"] == "instruments.yaml is a symlink; not reading it"
 
 
 def test_create_app_holds_an_idle_runner(tmp_path):

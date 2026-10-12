@@ -1,3 +1,4 @@
+import os
 import shutil
 from datetime import date, timedelta
 from pathlib import Path
@@ -201,3 +202,25 @@ def test_cross_origin_put_is_403(env):
     evil = {"origin": "http://evil.example"}
     assert client.put(f"/api/rules/{AID}", json=rules, headers=evil).status_code == 403
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_a_planted_rules_file_is_refused_never_followed(env, tmp_path, kind):
+    # the terminal can write rules/ and the root server reads and writes it (DEC-1)
+    client, rules_dir = env
+    secret = tmp_path / "secret.yaml"
+    secret.write_text("token: [secret-0001\n")  # a YAML error would quote it
+    path = rules_dir / "lucid" / "flex-50k.yaml"
+    body = flex(client)
+    path.unlink()
+    path.symlink_to(secret) if kind == "symlink" else os.mkfifo(path)
+    message = "lucid/flex-50k.yaml " + ("is a symlink" if kind == "symlink" else "is not a regular")
+    rows = {r["id"]: r for r in client.get("/api/rules").json()}
+    assert rows[AID]["error"].startswith(message)
+    got = client.get(f"/api/rules/{AID}")
+    assert got.json()["rules"] is None and got.json()["error"].startswith(message)
+    put = client.put(f"/api/rules/{AID}", json=body, headers=WRITE)
+    assert put.status_code == 422 and put.json()["detail"].startswith(message)
+    for r in (rows, got.text, put.text):
+        assert "secret-0001" not in str(r)
+    assert secret.read_text() == "token: [secret-0001\n"

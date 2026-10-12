@@ -5,7 +5,10 @@ from pathlib import Path
 
 import yaml
 
+from fenrir.files import read_regular
 from fenrir.rules.schema import AccountRules
+
+RULES_MAX = 1 << 20
 
 _ID = re.compile(r"([a-z0-9]+)-([a-z0-9]+(?:-[a-z0-9]+)*)")
 
@@ -41,10 +44,12 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
 def load_account(aid: str, rules_dir: Path) -> AccountRules:
     path = rules_path(aid, rules_dir)
     try:
-        text = path.read_text(encoding="utf-8")
+        # the terminal can write rules/ and the root server reads it (DEC-1); read_regular's
+        # ValueError (symlink, not a regular file, too big) already names the file
+        text = read_regular(path, RULES_MAX).decode("utf-8")
     except FileNotFoundError:
         raise ValueError(f"unknown account {aid!r}: {path} not found") from None
-    except (ValueError, OSError) as e:  # ValueError: not UTF-8
+    except (UnicodeDecodeError, OSError) as e:
         raise ValueError(f"{path}: {e}") from e
     return parse_account(text, aid, path)
 

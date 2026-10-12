@@ -147,6 +147,30 @@ def test_coverage_skips_cme_holidays(tmp_path):
     assert (c.first_day, c.last_day, c.days) == (date(2025, 12, 22), date(2025, 12, 29), 4)
 
 
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory", "oversized"])
+def test_bars_refuse_a_planted_parquet_never_following_it(tmp_path, monkeypatch, kind):
+    # data/ is terminal-writable and coverage() runs in the root server (DEC-1)
+    days = [utc(2025, 12, 22, 15, 0)]
+    secret = tmp_path / "secret"
+    write_contract(secret, "NQ", "NQZ25", frame([(d, 1.0) for d in days]))
+    data = tmp_path / "data"
+    path = data / "bars" / "NQ" / "1m" / "NQH26.parquet"
+    path.parent.mkdir(parents=True)
+    if kind == "symlink":
+        path.symlink_to(secret / "bars" / "NQ" / "1m" / "NQZ25.parquet")
+    elif kind == "fifo":
+        os.mkfifo(path)  # a blocking open would hang the 2 s Data page poll
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        write_contract(data, "NQ", "NQH26", frame([(d, 1.0) for d in days]))
+        monkeypatch.setattr(store, "MAX_PARQUET", path.stat().st_size - 1)
+    message = {"symlink": "is a symlink", "oversized": "is over"}.get(kind, "is not a regular file")
+    for read in (lambda: coverage(data, "NQ"), lambda: load_bars(data, INST, "NQ")):
+        with pytest.raises(ValueError, match=f"{path} {message}"):
+            read()
+
+
 def test_coverage_skips_roll_window(tmp_path):
     days = [(2025, 12, 10), (2025, 12, 11), (2025, 12, 17)]
     write_contract(tmp_path, "NQ", "NQZ25", frame([(utc(*d, 15, 0), 1.0) for d in days]))

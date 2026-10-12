@@ -1,3 +1,4 @@
+import glob
 import json
 import shutil
 import threading
@@ -111,6 +112,42 @@ def test_options_paths_pass_the_post_check_with_an_absolute_strategies_dir(setti
     assert client.post("/api/backtests/jobs", headers=WRITE, json=post).status_code == 200
 
 
+def test_every_listed_strategy_is_accepted_with_strategies_outside_the_cwd(
+    settings, tmp_path_factory
+):
+    outside = tmp_path_factory.mktemp("elsewhere") / "strategies"
+    outside.mkdir()
+    shutil.copy(REPO / "strategies" / "orb.py", outside)
+    shutil.copy(REPO / "strategies" / "orb.py", outside / "orb[1].py")  # a glob char in the name
+    (outside / "evil.py").write_text(SIDE_EFFECT)
+    away = replace(settings, strategies_dir=outside)
+    runner = FakeRunner()
+    client = _app(away, runner)[1]
+    listed = client.get("/api/backtests/options", headers=COOKIE).json()["strategies"]
+    assert listed == [glob.escape(str(outside / n)) for n in ("evil.py", "orb.py", "orb[1].py")]
+    for pattern in listed:
+        body = GOOD | {"strategies": [pattern]}
+        r = client.post("/api/backtests/jobs", headers=WRITE, json=body)
+        assert r.status_code == 200, r.text
+    (outside / "evil.py").unlink()
+    # the real expand child globs the listed names: each matches exactly its own file
+    grid = JobRunner(away).expand(listed[1:], ["lucid-*"], ["MNQ"])
+    assert [g.strategy_path for g in grid] == [outside / "orb.py", outside / "orb[1].py"]
+    # still never a path outside it
+    (outside.parent / "evil.py").write_text(SIDE_EFFECT)
+    (outside / "link.py").symlink_to(outside.parent / "evil.py")
+    for pattern in (
+        str(outside.parent / "evil.py"),
+        str(outside / ".." / "evil.py"),
+        str(outside / "link.py"),
+        "strategies/orb.py",  # relative ones resolve against the cwd, not strategies_dir
+    ):
+        body = GOOD | {"strategies": [pattern]}
+        r = client.post("/api/backtests/jobs", headers=WRITE, json=body)
+        assert r.status_code == 422, pattern
+    assert [c[0] for c in runner.calls] == ["expand", "submit"] * 3
+
+
 def test_create_app_holds_a_job_runner_with_the_session_key(settings, monkeypatch):
     calls = []
     monkeypatch.setattr("fenrir.server.app.JobRunner", lambda s, **kw: calls.append((s, kw)))
@@ -150,12 +187,13 @@ def test_a_strategy_outside_strategies_is_422_and_nothing_runs(settings, pattern
     assert runner.calls == []
 
 
-def test_an_absolute_or_symlinked_strategy_is_422(settings, tmp_path):
+def test_an_absolute_or_symlinked_strategy_outside_is_422(settings, tmp_path):
     (tmp_path / "evil.py").write_text(SIDE_EFFECT)
     (settings.strategies_dir / "link.py").symlink_to(tmp_path / "evil.py")
     runner = FakeRunner()
     client = _app(settings, runner)[1]
-    for pattern in (str(tmp_path / "strategies" / "orb.py"), "strategies/link.py"):
+    outside = (str(tmp_path / "evil.py"), str(tmp_path / "strategies" / ".." / "evil.py"))
+    for pattern in (*outside, "strategies/link.py"):
         body = GOOD | {"strategies": [pattern]}
         assert client.post("/api/backtests/jobs", headers=WRITE, json=body).status_code == 422
     assert runner.calls == []

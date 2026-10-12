@@ -19,6 +19,7 @@ from fenrir.backtest.attempts import Period, periods
 from fenrir.backtest.report import PeriodResult, Report, build_report, period_result
 from fenrir.core.instruments import load_instruments, spec
 from fenrir.data.store import data_version, load_bars
+from fenrir.files import read_regular
 from fenrir.rules.account import with_dll
 from fenrir.rules.loader import load_account, rules_path
 from fenrir.settings import Settings
@@ -47,18 +48,29 @@ class AccountChoice(BaseModel):
 
 
 _CHOICES = TypeAdapter(dict[str, AccountChoice])
+ACCOUNTS_MAX = 1 << 20
 
 
 def load_account_choices(data_dir: Path) -> dict[str, AccountChoice]:
     """Absent file, account or key = the defaults (price 0, DLL off)."""
     path = data_dir / "accounts.yaml"
-    if not path.exists():
-        return {}
     try:
-        data = yaml.safe_load(path.read_text())
+        # the terminal can write data/: no symlink, FIFO or huge file, read as root (DEC-1)
+        text = read_regular(path, ACCOUNTS_MAX)
+    except FileNotFoundError:
+        return {}
+    # errors name the file, line and field but never quote it: the text may not be ours
+    try:
+        data = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError) as e:  # deep nesting overflows the parser
+        mark = getattr(e, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ValueError(f"{path}: not valid YAML{where}") from None
+    try:
         return {} if data is None else _CHOICES.validate_python(data)
-    except (yaml.YAMLError, ValidationError) as e:
-        raise ValueError(f"{path}: {e}") from e
+    except ValidationError as e:
+        problems = "; ".join(f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors())
+        raise ValueError(f"{path}: {problems}") from None
 
 
 def net_per_attempt(

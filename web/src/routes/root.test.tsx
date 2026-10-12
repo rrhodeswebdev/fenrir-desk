@@ -41,7 +41,7 @@ describe('shell', () => {
   })
 
   it('shows the report key in the strip', async () => {
-    expect(await render('/backtests/abc123')).toContain('<span class="value">abc123</span>')
+    expect(await render('/backtests/abc123')).toContain('<span class="value min-w-0 break-all">abc123</span>')
   })
 })
 

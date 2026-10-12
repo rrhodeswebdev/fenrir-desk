@@ -27,7 +27,7 @@ from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
-from fenrir.server.isolation import drop_to, isolation_problems
+from fenrir.server.isolation import as_user, isolation_problems
 from fenrir.server.jobs import (
     KEY,
     Job,
@@ -374,10 +374,8 @@ class JobRunner:
             "FENRIR_STRATEGIES_DIR": str(self._settings.strategies_dir),
             "FENRIR_HOLDOUT_MONTHS": str(self._settings.holdout_months),
         }
-        as_user: dict[str, Any] = {}
-        if user:
-            overlay, as_user = drop_to(user)
-            env |= overlay
+        overlay, drop = as_user(user)
+        env |= overlay
         with self._lock:
             if self._stopping:
                 raise RuntimeError("the job runner is stopping")
@@ -389,7 +387,7 @@ class JobRunner:
                 errors="replace",
                 env=env,
                 start_new_session=True,
-                **as_user,
+                **drop,
             )
             if job:
                 self._proc = proc

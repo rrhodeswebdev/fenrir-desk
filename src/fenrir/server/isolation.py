@@ -76,6 +76,18 @@ def drop_to(user: str) -> tuple[dict[str, str], dict[str, Any]]:
     )
 
 
+def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:
+    """(env overlay, `Popen` kwargs) that run a child as `user` from its passwd entry, with none
+    of the server's groups; `({}, {})` for None (the server's own user)."""
+    if not user:
+        return {}, {}
+    import pwd  # POSIX only; unset natively on Windows
+
+    pw = pwd.getpwnam(user)
+    env = {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell}
+    return env, {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []}
+
+
 def isolation_problems(settings: Settings) -> list[str]:
     """`check` on this process; always empty natively (`FENRIR_BIND_ALL` unset), where the
     terminal and strategies run as the user, unisolated by design."""

@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
@@ -85,3 +86,23 @@ def test_reopening_keeps_existing_rows(tmp_path):
     conn = journal.open_db(path)
     assert arming.list_armed(conn) == (a,)
     assert [r.kind for r in journal.rows(conn)] == ["halt"]
+
+
+def test_a_reader_never_blocks_a_write(tmp_path):
+    """WAL: GET /api/live/journal reading must never stall the hub's journal writes."""
+    path = tmp_path / "fenrir.db"
+    conn = journal.open_db(path)
+    conn.execute("PRAGMA busy_timeout = 0")  # a lock would raise at once
+    reader = journal.open_ro(path)
+    reader.execute("BEGIN")
+    assert reader.execute("SELECT count(*) FROM journal").fetchone() == (0,)  # holds its snapshot
+    journal.write(conn, ARMED_AT, "Sim101", "bar", {})
+    assert reader.execute("SELECT count(*) FROM journal").fetchone() == (0,)
+    reader.close()
+    assert len(journal.rows(journal.open_ro(path))) == 1
+
+
+def test_read_only_never_creates_the_file(tmp_path):
+    with pytest.raises(sqlite3.OperationalError):
+        journal.open_ro(tmp_path / "fenrir.db")
+    assert not (tmp_path / "fenrir.db").exists()

@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -268,6 +269,29 @@ async def test_an_unexpected_error_in_one_account_spares_the_others(hub, conn, a
     assert kinds(conn) == ["halt"]
     assert hub.states["Sim101"].halted == "live runner error: OverflowError: boom"
     assert "Sim101" not in hub.children
+    assert kinds(conn, "Sim102") == ["bar", "action"]
+
+
+async def test_a_lost_halt_row_still_halts_and_spares_the_others(hub, conn, armed, monkeypatch):
+    """The journal itself fails (sqlite locked past its busy timeout) for one account's halt."""
+    on_bar, write = core.on_bar, journal.write
+
+    def failing(s, b):
+        if s.setup.armed.account == "Sim101":
+            raise OverflowError("boom")
+        return on_bar(s, b)
+
+    def locked(conn, ts, account, kind, payload):
+        if kind == "halt":
+            raise sqlite3.OperationalError("database is locked")
+        write(conn, ts, account, kind, payload)
+
+    monkeypatch.setattr(core, "on_bar", failing)
+    monkeypatch.setattr(journal, "write", locked)
+    arming.insert_armed(conn, armed)
+    arming.insert_armed(conn, replace(armed, account="Sim102"))
+    await hub.handle_bar(bar(T0))
+    assert hub.states["Sim101"].halted == "live runner error: OverflowError: boom"
     assert kinds(conn, "Sim102") == ["bar", "action"]
 
 

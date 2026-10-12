@@ -1,10 +1,14 @@
-import { createRoute } from '@tanstack/react-router'
+import { useQuery } from '@tanstack/react-query'
+import { Link, createRoute } from '@tanstack/react-router'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
 import '@xterm/xterm/css/xterm.css'
 import { useEffect, useRef } from 'react'
-import { wsUrl } from '@/api'
+import { ApiError, apiFetch, wsUrl } from '@/api'
+import { type CompareRow, FIGURES, figures } from '@/backtests/Compare'
 import { Page } from '@/components/page'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { pageError } from '@/errorText'
 import { rootRoute } from './root'
 
 // WS /ws/terminal (docs/contracts.md): text frames in, binary PTY output back.
@@ -73,6 +77,87 @@ function TerminalPane() {
   return <div ref={ref} role="group" aria-label="Terminal" data-testid="terminal" className="h-full" />
 }
 
+// GET /api/backtests/results: summaries newest first; only the fields shown here.
+export type Latest = CompareRow & { created_at: string }
+
+/** /ws/jobs only sees UI jobs, so poll to catch a report the CLI writes in the terminal; a 401 will not fix itself. */
+export const latestPollMs = ({ error }: { error: unknown }): number | false =>
+  error instanceof ApiError && error.status === 401 ? false : 3000
+
+// as on Compare: hold-out muted, any microscalp flag Ember
+const flagged = (p: Latest['periods']['holdout'], i: number): boolean => i === FIGURES.length - 1 && (p?.microscalp_flags ?? 0) > 0
+
+function LatestReport() {
+  // shortcut: each poll reads every cached report on the server; add a newest-only endpoint if results/ grows large.
+  const q = useQuery({
+    queryKey: ['backtests', 'results'],
+    queryFn: () => apiFetch<Latest[]>('/api/backtests/results'),
+    refetchInterval: (query) => latestPollMs(query.state),
+  })
+  const latest = q.data?.[0]
+  const error = pageError(q.error)
+  return (
+    <div className="mt-4 grid gap-6">
+      {error && (
+        <p role="alert" className="text-red">
+          {error}
+        </p>
+      )}
+      {q.isPending && <p className="text-ink-3">Loading…</p>}
+      {q.data?.length === 0 && <p className="max-w-[44ch] text-ink-2">No backtest yet. Run one from the terminal or the Backtests page.</p>}
+      {latest && (
+        <>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1">
+            {(
+              [
+                ['Strategy', latest.strategy],
+                ['Account', latest.account],
+                ['Contract', latest.contract],
+                ['Created', latest.created_at],
+              ] as const
+            ).map(([label, value]) => (
+              <div key={label} className="contents">
+                <dt className="label self-baseline">{label}</dt>
+                <dd className="value wrap-anywhere">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          {latest.holdout_gap && <p className="text-ember">Hold-out P(pass and payout) is under half of tuning's: likely overfit.</p>}
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead scope="col">Metric</TableHead>
+                <TableHead scope="col" className="text-right">
+                  Tuning
+                </TableHead>
+                <TableHead scope="col" className="text-right">
+                  Hold-out
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {FIGURES.map((label, i) => (
+                <TableRow key={label}>
+                  <TableHead scope="row">{label}</TableHead>
+                  <TableCell className={`value text-right ${flagged(latest.periods.tuning, i) ? 'text-ember' : ''}`}>
+                    {figures(latest.periods.tuning)[i]}
+                  </TableCell>
+                  <TableCell className={`value text-right ${flagged(latest.periods.holdout, i) ? 'text-ember' : 'text-ink-3'}`}>
+                    {figures(latest.periods.holdout)[i]}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          <Link to="/backtests/$key" params={{ key: latest.key }}>
+            Full report
+          </Link>
+        </>
+      )}
+    </div>
+  )
+}
+
 export const workbenchRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -86,7 +171,7 @@ export const workbenchRoute = createRoute({
       </div>
       <section aria-labelledby="latest-backtest" className="border-l p-8 max-md:border-t max-md:border-l-0 max-md:px-4">
         <h2 id="latest-backtest">Latest backtest</h2>
-        <p className="mt-4 max-w-[44ch] text-ink-2">Not built yet. The latest report lands here.</p>
+        <LatestReport />
       </section>
     </Page>
   ),

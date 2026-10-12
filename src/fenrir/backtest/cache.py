@@ -36,8 +36,11 @@ def _read(path: Path) -> Report:
     try:
         report = json.loads(path.read_text())
         report["created_at"], report["key"]  # noqa: B018 - list_reports sorts on both
+        report["strategy_hash"], report["account"]  # noqa: B018 - the API matches and nets on both
+        if not all(p is None or isinstance(p, dict) for p in report["periods"].values()):
+            raise TypeError("a period is not an object or null")
         return report
-    except (json.JSONDecodeError, KeyError, TypeError) as e:
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
         raise ValueError(f"{path}: corrupt cached report, delete it ({e!r})") from e
 
 

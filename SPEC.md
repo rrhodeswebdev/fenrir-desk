@@ -120,7 +120,7 @@ Every directory with its own job has a short `CLAUDE.md` and a row in root `CLAU
 | `skill` | Claude project skill | backtest | 17 | Not started |
 | `docker` | Image and compose | server, web | 18 | Not started |
 | `addon` | NinjaTrader C# add-on | — | 19 | Not started |
-| `bridge` | Python add-on client, reconciliation | addon (contract only), core | 20 | 20.1 instrument names done |
+| `bridge` | Python add-on client, reconciliation | addon (contract only), core | 20 | 20.1 instrument names, 20.2 reconciliation done |
 | `live` | Runner, journal, safety, orders, arming, kill switch | data, strategy, backtest, server, bridge | 21–24 | Not started |
 
 Build order: core → data, rules → strategy → backtest → server → web, skill → docker. In parallel: addon → bridge. Then live (needs both chains). A plan may start once every plan it needs is merged.

@@ -8,6 +8,9 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from fenrir.server.isolation import isolation_problems
+from fenrir.settings import Settings
+
 TAIL_LINES = 20
 LINE_CHARS = 500
 
@@ -36,12 +39,19 @@ def pull_command() -> list[str]:
     return [sys.executable, "-P", "-c", "from fenrir.cli.main import app; app()", "data", "pull"]
 
 
-def pull_env(environ: Mapping[str, str], lse_api_key: str) -> dict[str, str]:
+def pull_env(environ: Mapping[str, str], settings: Settings) -> dict[str, str]:
     # Not strategy code, so DEC-1's no-secrets rule for strategy children does not apply; it still
     # gets only the secret it needs. In Docker the key comes from the secrets file, not the env.
-    env = {k: v for k, v in environ.items() if k != "FENRIR_NT_TOKEN"}
-    key = {"FENRIR_LSE_API_KEY": lse_api_key} if lse_api_key else {}
-    return env | key | {"PYTHONUNBUFFERED": "1"}  # unbuffered: log lines arrive as they are printed
+    # No FENRIR_ENV_FILE: its settings come from the env alone, so the NT token never reaches it.
+    drop = ("FENRIR_NT_TOKEN", "FENRIR_ENV_FILE")
+    env = {k: v for k, v in environ.items() if k not in drop}
+    key = {"FENRIR_LSE_API_KEY": settings.lse_api_key} if settings.lse_api_key else {}
+    return (
+        env
+        | key
+        | {"FENRIR_DATA_DIR": str(settings.data_dir)}
+        | {"PYTHONUNBUFFERED": "1"}  # unbuffered: log lines arrive as they are printed
+    )
 
 
 def _now() -> str:
@@ -53,9 +63,17 @@ class PullRunner:
 
     # shortcut: state lives in memory, so after a server restart an orphaned pull keeps running
     # and a new one can overlap it (same Parquet files); persist the pid or a lock if that bites
-    def __init__(self, cmd: Sequence[str], env: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        cmd: Sequence[str],
+        env: Mapping[str, str] | None = None,
+        *,
+        settings: Settings | None = None,
+    ) -> None:
+        """With `settings`, every start first passes the DEC-1 isolation check."""
         self._cmd = list(cmd)
         self._env = env
+        self._settings = settings
         self._lock = threading.Lock()
         self._started_at: str | None = None
         self._finished_at: str | None = None
@@ -63,9 +81,15 @@ class PullRunner:
         self._tail: deque[str] = deque(maxlen=TAIL_LINES)
 
     def start(self) -> bool:
+        """False while a pull runs; ValueError (nothing started) when the image is not isolated."""
         with self._lock:
             if self._started_at is not None and self._returncode is None:
                 return False
+            # Runs as the server's user (root in the image): the terminal's user could read the
+            # LSE key from a child of its own (/proc/<pid>/environ). The store's writes are
+            # symlink-safe instead (#135). Fail closed in an image that is not isolated.
+            if self._settings and (problems := isolation_problems(self._settings)):
+                raise ValueError("refusing to pull: " + "; ".join(problems))
             proc = subprocess.Popen(
                 self._cmd,
                 env=self._env,

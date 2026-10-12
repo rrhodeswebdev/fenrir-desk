@@ -1,13 +1,15 @@
 """Shell for backtest jobs: `data/jobs/<id>.json`, one runner thread, one child process per job.
 
 Strategy code never runs in the server (DEC-1): grid expansion (`expand`, which loads each
-strategy to read its MARKET) and each job's unfinished items run in `fenrir.server.job_child`
-(one child per job, so the bars load once) with no `FENRIR_*` secrets in its environment, as
-`FENRIR_PTY_USER` when set. The child exits after the job, so its spawn pool and memoized bars
-go with it; the server never needs `fenrir.backtest.run.release()`.
+strategy to read its MARKET), `describe` (each strategy's MARKET and PARAMS) and each job's
+unfinished items run in `fenrir.server.job_child` (one child per job, so the bars load once)
+with no `FENRIR_*` secrets in its environment, as `FENRIR_PTY_USER` when set. The child exits
+after the job, so its spawn pool and memoized bars go with it; the server never needs
+`fenrir.backtest.run.release()`.
 """
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -25,9 +27,10 @@ from typing import Any
 
 from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
+from fenrir.files import read_regular
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
-from fenrir.server.isolation import isolation_problems
+from fenrir.server.isolation import as_user, isolation_problems
 from fenrir.server.jobs import (
     KEY,
     Job,
@@ -40,6 +43,7 @@ from fenrir.server.jobs import (
     update_item,
 )
 from fenrir.settings import Settings
+from fenrir.strategy.loader import MARKETS
 
 log = logging.getLogger(__name__)
 
@@ -48,13 +52,18 @@ log = logging.getLogger(__name__)
 CHILD = (sys.executable, "-P", "-m", "fenrir.server.job_child")
 LINE_MAX = 64 * 1024  # longer child lines are dropped whole
 ERROR_MAX = 2048
+STRATEGY_MAX = 1024 * 1024  # strategy files are small; bounds what the server reads
 
 Listener = Callable[[dict[str, Any]], None]
 
 
+def _no_constant(name: str) -> None:
+    raise ValueError(f"{name} is not JSON")  # NaN would 500 the response that carries it
+
+
 def _json(line: str) -> Any:
     try:
-        return json.loads(line)  # JSONDecodeError is a ValueError
+        return json.loads(line, parse_constant=_no_constant)  # JSONDecodeError is a ValueError
     except RecursionError:
         raise ValueError("JSON nested too deep") from None
 
@@ -106,6 +115,66 @@ def parse_grid(line: str, settings: Settings) -> tuple[GridItem, ...]:
             case _:
                 raise ValueError(f"not a grid row: {row!r}"[:300])
     return tuple(grid)
+
+
+def parse_description(line: str, paths: Container[str]) -> dict[str, Any]:
+    """One `--describe` child line -> `{path, name, hash, market, params, error}`; ValueError for
+    anything else. Loaded: market and params set, error None; failed: error set, market None,
+    params {}, hash None only when the file could not be read."""
+    match data := _json(line):
+        case {
+            "path": str(path),
+            "name": str(name),
+            "hash": str(digest),
+            "market": str(market),
+            "params": dict(),
+            "error": None,
+            **rest,
+        } if not rest and KEY.fullmatch(digest) and market in MARKETS:
+            pass
+        case {
+            "path": str(path),
+            "name": str(name),
+            "hash": digest,
+            "market": None,
+            "params": dict(params),
+            "error": str(error),
+            **rest,
+        } if (
+            not rest
+            and not params  # a mapping pattern `{}` would match any dict
+            and (digest is None or isinstance(digest, str) and KEY.fullmatch(digest))
+        ):
+            data["error"] = error[:ERROR_MAX]
+        case _:
+            raise ValueError(f"not a strategy description: {line[:200]!r}")
+    if path not in paths or name != Path(path).stem:
+        raise ValueError(f"not a file this child was given: {line[:200]!r}")
+    return data
+
+
+def _strategy_hash(path: Path) -> str:
+    """sha256 of `path`'s bytes, read without executing them. The terminal can plant anything
+    there: `read_regular` never follows a symlink, blocks on a FIFO or reads past STRATEGY_MAX
+    (ValueError naming the file)."""
+    return hashlib.sha256(read_regular(path, STRATEGY_MAX)).hexdigest()
+
+
+def _checked(
+    path: str, entries: Sequence[dict[str, Any]], digest: str | None, error: str
+) -> dict[str, Any]:
+    """The child's one description of `path`, if its hash is `digest` (the file's bytes as the
+    server read them before the child ran). Strategy code can write to the child's protocol fd,
+    so a second line for a file, or a hash that is not the file's, is an error."""
+    failed = {"path": path, "name": Path(path).stem, "hash": None, "market": None, "params": {}}
+    if digest is None or not entries:
+        return failed | {"error": error}
+    if len(entries) > 1:
+        return failed | {"error": "the strategy loader described this file more than once"}
+    [entry] = entries
+    if entry["hash"] is not None and entry["hash"] != digest:
+        return failed | {"error": "the file changed while loading"}
+    return entry
 
 
 def strategy_user(settings: Settings) -> str | None:
@@ -160,6 +229,7 @@ class JobRunner:
         secret: str = "",
         idle: float = 30 * 60,
         expand_timeout: float = 60,
+        describe_timeout: float = 30,
     ) -> None:
         """`secret` (the session key): no env var holding it reaches the child."""
         self._settings = settings
@@ -167,6 +237,7 @@ class JobRunner:
         self._secret = secret
         self._idle = idle
         self._expand_timeout = expand_timeout
+        self._describe_timeout = describe_timeout
         self._dir = settings.data_dir / "jobs"
         self._lock = threading.Lock()
         self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
@@ -199,8 +270,8 @@ class JobRunner:
         self._thread.start()
 
     def stop(self) -> None:
-        """Kill the running child and its workers, and any expand child; a job's unfinished
-        items re-run on next start."""
+        """Kill the running child and its workers, and any expand or describe child; a job's
+        unfinished items re-run on next start."""
         with self._lock:
             self._stopping = True
             for proc in [self._proc, *self._expanding]:
@@ -238,6 +309,54 @@ class JobRunner:
         if len(lines) != 1:
             raise ValueError(f"the strategy loader exited with code {code} without an answer")
         return parse_grid(lines[0], self._settings)
+
+    def describe(self, paths: Sequence[str]) -> list[dict[str, Any]]:
+        """`[{path, name, hash, market, params, error}]` in `paths` order, from an isolated child
+        that loads each strategy file (`parse_description`).
+
+        Each file is hashed here first (`_strategy_hash`); only readable regular files reach the
+        child. A file that is not one, that the child did not describe (isolation refusal, crash,
+        timeout, bad output), described twice, or whose hash is not the one read here gets
+        `error` with the reason and hash None. ValueError for a path not directly in
+        `strategies_dir`: the child executes every file it is given.
+        """
+        for p in paths:
+            if Path(p).parent != self._settings.strategies_dir:
+                raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")
+        if not paths:
+            return []
+        digests: dict[str, str] = {}
+        unread: dict[str, str] = {}
+        for p in paths:
+            try:
+                digests[p] = _strategy_hash(Path(p))
+            except (OSError, ValueError) as e:
+                unread[p] = f"{type(e).__name__}: {e}"
+        lines: dict[str, list[dict[str, Any]]] = {}
+        error = "the strategy loader stopped before describing this file"
+        proc = None
+        try:
+            if digests:
+                proc = self._spawn(["--describe"], {"paths": list(digests)})
+        except Exception as e:  # isolation refusal, or the child could not start
+            error = f"{type(e).__name__}: {e}"
+        if proc is not None:
+            try:
+                for line in _read(proc, self._describe_timeout):
+                    try:
+                        entry = parse_description(line, paths)
+                    except ValueError:
+                        log.warning("strategy loader: ignored child output %r", line[:200])
+                        continue
+                    lines.setdefault(entry["path"], []).append(entry)
+            except TimeoutError:
+                error = f"loading the strategies took over {self._describe_timeout:g} s"
+            finally:
+                _kill_group(proc.pid)  # first: a child that closed stdout may still hang
+                proc.wait()
+                with self._lock:
+                    self._expanding.discard(proc)
+        return [_checked(p, lines.get(p, ()), digests.get(p), unread.get(p, error)) for p in paths]
 
     def submit(self, grid: Sequence[GridItem], include_holdout: bool) -> Job:
         created = datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
@@ -374,13 +493,8 @@ class JobRunner:
             "FENRIR_STRATEGIES_DIR": str(self._settings.strategies_dir),
             "FENRIR_HOLDOUT_MONTHS": str(self._settings.holdout_months),
         }
-        as_user: dict[str, Any] = {}
-        if user:
-            import pwd  # POSIX only; unset natively on Windows
-
-            pw = pwd.getpwnam(user)
-            env |= {"HOME": pw.pw_dir, "USER": user, "LOGNAME": user, "SHELL": pw.pw_shell}
-            as_user = {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []}
+        overlay, drop = as_user(user)
+        env |= overlay
         with self._lock:
             if self._stopping:
                 raise RuntimeError("the job runner is stopping")
@@ -392,7 +506,7 @@ class JobRunner:
                 errors="replace",
                 env=env,
                 start_new_session=True,
-                **as_user,
+                **drop,
             )
             if job:
                 self._proc = proc

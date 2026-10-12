@@ -443,8 +443,17 @@ class AddonClient: accounts(), positions(account), orders(account), bracket(...)
     # stream() never ends: yields {"type":"connected"} after each (re)connect and {"type":"disconnected","error":str}
     # on a drop, bad token or missed heartbeats (default 6 s). Plan 22 sets app.state.addon: AddonClient.
 # fenrir.bridge.reconcile
+class NtPosition: account: str; instrument: str; qty: int; avg_price: float          # /positions row, qty signed
+class NtOrder: account: str; order_id: str; client_id: str; instrument: str; role: "entry"|"stop"|"target"|"other"; action: "buy"|"sell"; qty: int; price: float; state: str   # /orders row
+class ExpectedBook: account: str; instrument: str; qty: int                          # signed qty the runner believes it holds
+class Mismatch: kind: MismatchKind; detail: str                                        # all frozen dataclasses
 def reconcile(expected: ExpectedBook, positions: Sequence[NtPosition], orders: Sequence[NtOrder]) -> tuple[Mismatch, ...]
-    # Mismatch.kind ∈ "position" | "unexpected_position" | "missing_stop" | "missing_target" | "stray_orders"
+    # MismatchKind = Literal["position", "unexpected_position", "missing_stop", "missing_target", "stray_orders"]
+    # () when the book matches; at most one of each kind, in that order. Rows for other accounts are ignored;
+    # orders are working orders. While a position is held, only stop/target orders on that instrument whose
+    # action closes it count as protection, and their qty must equal |held| (fewer or more → missing_stop /
+    # missing_target). Every other working order on the account (a stale entry, "other", a wrong-direction
+    # or other-instrument stop, any order while flat) → stray_orders, naming its order_ids.
 ```
 
 ### Plans 21–24 — live API and storage

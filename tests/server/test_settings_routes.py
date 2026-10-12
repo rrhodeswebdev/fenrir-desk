@@ -248,6 +248,19 @@ def test_accounts_default_for_every_rules_account(env):
     assert r.json()[AID] == {"eval_price": 0.0, "dll_on": False}
 
 
+def test_accounts_with_a_symlinked_rules_dir_is_500_listing_nothing(tmp_path, env):
+    client, _, _ = env
+    linked = tmp_path / "linked"
+    linked.symlink_to(RULES, target_is_directory=True)
+    client.app.state.settings = Settings(rules_dir=linked, data_dir=tmp_path / "data")
+    detail = {"detail": f"{linked} is a symlink; not reading it"}
+    for r in (
+        client.get("/api/settings/accounts"),
+        client.put("/api/settings/accounts", json={}, headers=WRITE),
+    ):
+        assert (r.status_code, r.json()) == (500, detail)
+
+
 def test_accounts_put_merges(env):
     client, _, data_dir = env
     data_dir.mkdir()

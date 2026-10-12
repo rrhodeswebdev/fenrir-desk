@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, NQ, bar, make_rules, rules_data, scripted
@@ -155,6 +155,16 @@ def test_no_entries_at_or_after_flat_time():
     assert "16:40" in effects[1].payload["reason"]
     early = bar("16:38", 20000.0, 20005.0, 19995.0, 20000.0)
     assert kinds(decide(make_setup(make_rules()), [LONG], early)[1]) == ["bar", "action"]
+
+
+def test_no_entries_in_the_roll_window():
+    # NQ Z25 -> H26: trading days 2025-12-11 .. 2025-12-16 are the roll window
+    inside = bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 16))
+    _, effects = decide(make_setup(make_rules()), [LONG, Flatten()], inside)
+    assert kinds(effects) == ["bar", "rejection", "action"]  # exits still allowed
+    assert effects[1].payload["reason"] == "roll window: no new entries"
+    after = bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 17))
+    assert kinds(decide(make_setup(make_rules()), [LONG], after)[1]) == ["bar", "action"]
 
 
 def test_one_bracket_per_bar_and_flatten_cancel_replace_it():

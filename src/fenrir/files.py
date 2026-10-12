@@ -6,13 +6,25 @@ import stat
 from pathlib import Path
 
 
+def refuse_symlink(path: Path) -> None:
+    """ValueError naming `path` when it is a symlink: a dir the terminal can swap for a link."""
+    # shortcut: checked, not opened O_NOFOLLOW (a swap right after still races)
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symlink; not reading it")
+
+
 def read_regular(path: Path, limit: int) -> bytes:
     """`path`'s bytes. Never follows a symlink at `path`, never blocks on a FIFO or device,
     never reads past `limit`. FileNotFoundError when missing, PermissionError when denied;
     ValueError naming the file (never its contents) when it is a symlink, not a regular file
     or over `limit`."""
     # Windows has neither flag (and no FIFOs or terminal user to plant a symlink)
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOCTTY", 0)
+    )
     try:
         fd = os.open(path, flags)
     except OSError as e:
@@ -26,7 +38,8 @@ def read_regular(path: Path, limit: int) -> bytes:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise ValueError(f"{path} is not a regular file")
         chunks, size = [], 0
-        while size <= limit and (chunk := os.read(fd, limit + 1 - size)):
+        # 1 MiB reads: os.read allocates its whole size up front, and limits run to 256 MiB
+        while size <= limit and (chunk := os.read(fd, min(limit + 1 - size, 1 << 20))):
             chunks.append(chunk)
             size += len(chunk)
     finally:

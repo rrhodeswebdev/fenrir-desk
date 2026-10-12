@@ -2,7 +2,8 @@
 
 import io
 import os
-import shutil
+import secrets
+import stat
 from functools import reduce
 from operator import getitem
 from pathlib import Path
@@ -97,14 +98,23 @@ def write_account(path: Path, rules: AccountRules) -> None:
         raise ValueError(f"the value can't be saved as YAML: {e}") from e
     if changes(saved.model_dump(), rules.model_dump()):
         raise ValueError(f"the value can't be saved as YAML: {path} would not read back the same")
-    st = path.stat()
-    tmp = path.with_name(f".{path.name}.tmp")
+    st = path.lstat()  # never a link's target: its mode and owner would land on the new file
+    if not stat.S_ISREG(st.st_mode):
+        raise ValueError(f"{path} is not a regular file; not saving over it")
+    # rules/ is terminal-writable and the server saves as root (DEC-1, #166): a random name
+    # opened O_EXCL|O_NOFOLLOW, its mode and owner set on the fd, so a planted link is never
+    # followed. Windows has no O_NOFOLLOW (and no terminal user to plant a link).
+    tmp = path.with_name(f"{path.name}.{secrets.token_hex(8)}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
     try:
-        tmp.write_text(out.getvalue(), encoding="utf-8")
-        shutil.copymode(path, tmp)
-        # a save from Docker must not leave the host user a root-owned file; Windows has no geteuid
-        if getattr(os, "geteuid", lambda: -1)() == 0:
-            os.chown(tmp, st.st_uid, st.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(out.getvalue())
+            if hasattr(os, "fchmod"):
+                os.fchmod(f.fileno(), stat.S_IMODE(st.st_mode))
+            # a save from Docker must not leave the host a root-owned file; Windows has no geteuid
+            if getattr(os, "geteuid", lambda: -1)() == 0:
+                os.fchown(f.fileno(), st.st_uid, st.st_gid)
         os.replace(tmp, path)  # atomic: readers see the old file or the new one, never half
     except BaseException:
         tmp.unlink(missing_ok=True)

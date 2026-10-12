@@ -27,7 +27,7 @@ from typing import Any
 
 from fenrir.backtest.grid import GridItem
 from fenrir.core.instruments import load_instruments
-from fenrir.files import read_regular
+from fenrir.files import read_regular, refuse_symlink
 from fenrir.rules.loader import list_accounts
 from fenrir.server import terminal
 from fenrir.server.isolation import as_user, isolation_problems
@@ -322,9 +322,7 @@ class JobRunner:
         `strategies_dir`: the child executes every file it is given, and for a symlinked
         `strategies_dir`: the root server would hash files in any directory (DEC-1).
         """
-        # shortcut: checked, not opened O_NOFOLLOW (a swap right after still races), as _symlinked
-        if self._settings.strategies_dir.is_symlink():
-            raise ValueError(f"{self._settings.strategies_dir} is a symlink; not reading it")
+        refuse_symlink(self._settings.strategies_dir)
         for p in paths:
             if Path(p).parent != self._settings.strategies_dir:
                 raise ValueError(f"{p!r} is not a file in {self._settings.strategies_dir}")

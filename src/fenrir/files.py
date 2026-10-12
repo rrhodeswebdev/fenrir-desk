@@ -6,6 +6,13 @@ import stat
 from pathlib import Path
 
 
+def refuse_symlink(path: Path) -> None:
+    """ValueError naming `path` when it is a symlink: a dir the terminal can swap for a link."""
+    # shortcut: checked, not opened O_NOFOLLOW (a swap right after still races)
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symlink; not reading it")
+
+
 def read_regular(path: Path, limit: int) -> bytes:
     """`path`'s bytes. Never follows a symlink at `path`, never blocks on a FIFO or device,
     never reads past `limit`. FileNotFoundError when missing, PermissionError when denied;

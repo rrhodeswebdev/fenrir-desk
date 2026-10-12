@@ -220,3 +220,13 @@ def test_duplicate_host_header_400():
 
     asyncio.run(app(scope, receive, send))
     assert sent[0]["status"] == 400
+
+
+def test_live_hub_opens_nothing_and_stops_with_the_server(tmp_path):
+    app = create_app(Settings(private_dir=tmp_path / "private"), KEY, CODE, None)
+    hub = app.state.live
+    with TestClient(app, base_url=BASE):
+        [ticks] = hub._tasks
+        assert not ticks.done()
+    assert ticks.cancelled() and hub._tasks == []
+    assert not (tmp_path / "private").exists()  # no fenrir.db until something is armed

@@ -115,12 +115,26 @@ def test_create_app_holds_an_idle_runner(tmp_path):
 
 def test_create_app_runs_the_cli_pull_with_the_lse_key(tmp_path, monkeypatch):
     calls = []
-    monkeypatch.setattr("fenrir.server.app.PullRunner", lambda cmd, env: calls.append((cmd, env)))
+    monkeypatch.setattr(
+        "fenrir.server.app.PullRunner",
+        lambda cmd, env, *, settings: calls.append((cmd, env, settings)),
+    )
     app, _ = _client(tmp_path, lse_api_key="lse-secret")
-    [(cmd, env)] = calls
+    [(cmd, env, settings)] = calls
     assert cmd[-2:] == ["data", "pull"]
     assert env["FENRIR_LSE_API_KEY"] == "lse-secret"
+    assert settings is app.state.settings  # checked for isolation on every start
     assert app.state.pull is None  # the recorder's return: create_app keeps what it built
+
+
+def test_unisolated_image_pull_is_500(tmp_path, monkeypatch):
+    app, client = _client(tmp_path)
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    monkeypatch.delenv("FENRIR_PTY_USER", raising=False)
+    response = client.post("/api/data/pull", headers=WRITE)
+    assert response.status_code == 500
+    assert response.json()["detail"].startswith("refusing to pull: ")
+    assert client.get("/api/data", headers=COOKIE).json()["pull"]["state"] == "idle"
 
 
 def test_pull_202_then_409_while_running(tmp_path):

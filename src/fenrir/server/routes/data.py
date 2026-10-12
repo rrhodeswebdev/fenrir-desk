@@ -38,6 +38,10 @@ def overview(request: Request) -> dict[str, Any]:
 
 @router.post("/pull")
 def pull(request: Request) -> Response:
-    if not request.app.state.pull.start():
+    try:
+        started = request.app.state.pull.start()
+    except ValueError as e:  # the image fails the DEC-1 isolation check: a server fault, not yours
+        raise HTTPException(status_code=500, detail=str(e)) from None
+    if not started:
         raise HTTPException(status_code=409, detail="a pull is already running")
     return Response(status_code=202)

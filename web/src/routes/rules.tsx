@@ -36,8 +36,8 @@ export function freshness(row: RuleRow): { tone: Tone; text: string } {
 /** `GET /api/rules/{id}`: the row plus the rules object, null when the file does not validate. */
 type RuleDetail = RuleRow & { rules: Record<string, unknown> | null }
 
-/** The draft being edited, the server copy it started from, and the last save's field errors. */
-type Form = { rules: unknown; server: unknown; errors: FieldError[]; set: (path: Path, value: unknown) => void }
+/** The draft being edited, the server copy it started from, and the last save's field errors (`reset` clears them). */
+type Form = { rules: unknown; server: unknown; errors: FieldError[]; set: (path: Path, value: unknown) => void; reset: () => void }
 
 type ControlProps = { id: string; 'aria-invalid': boolean; 'aria-describedby'?: string }
 
@@ -197,8 +197,16 @@ function ScalingTiers({ f }: { f: Form }) {
           <Num f={f} path={[...SCALING, i, 'max_minis']} label={`Tier ${i + 1} max minis`} />
           <Errors f={f} path={[...SCALING, i]} />
           {/* the last tier goes with "No scaling", so the list is never empty */}
-          <Button type="button" size="sm" disabled={tiers.length === 1} onClick={() => f.set(SCALING, removeAt(tiers, i))}>
-            Remove tier {i + 1}
+          <Button
+            type="button"
+            size="sm"
+            disabled={tiers.length === 1}
+            onClick={() => {
+              f.reset() // the last save's errors name tiers by index, which a removal shifts
+              f.set(SCALING, removeAt(tiers, i))
+            }}
+          >
+            {`Remove tier ${i + 1}`}
           </Button>
         </div>
       ))}
@@ -240,6 +248,8 @@ function RulesFields({ f }: { f: Form }) {
         <Optional f={f} path={SCALING} none="No scaling (max minis throughout)" empty={[{ ...NEW_TIER, from_profit: 0 }]}>
           <ScalingTiers f={f} />
         </Optional>
+        {/* the one model check at the root: the top tier must equal contracts.max_minis */}
+        <Errors f={f} path={[]} />
       </Section>
       <Section legend="Session">
         <Text f={f} path={['session', 'flat_by']} label="Flat by (HH:MM)" />
@@ -291,7 +301,7 @@ function RuleEditor({ id }: { id: string }) {
     )
   else if (server) {
     const errors = fieldErrors(save.error)
-    const f: Form = { rules: draft ?? server, server, errors, set: (path, value) => setDraft((d: unknown) => setIn(d ?? server, path, value)) }
+    const f: Form = { rules: draft ?? server, server, errors, set: (path, value) => setDraft((d: unknown) => setIn(d ?? server, path, value)), reset: save.reset }
     body = (
       <form
         onSubmit={(e) => {

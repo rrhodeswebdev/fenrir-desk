@@ -126,8 +126,14 @@ describe('rules editor', () => {
     expect(input(html, 'Tier 2 max minis')).toContain('value="6"')
     expect(input(html, 'Max per payout')).toContain('value="2000"')
     expect(input(html, 'Max payouts')).toContain('value="5"')
-    expect(html).toMatch(/<button[^>]*>Remove tier <!-- -->2<\/button>/)
+    expect(html).toMatch(/<button(?![^>]*disabled="")[^>]*>Remove tier 2<\/button>/)
     expect(html).toContain('>Add tier</button>')
+  })
+
+  it('disables Remove on the last tier: "No scaling" removes it', async () => {
+    const funded = { ...rules.funded, scaling: [{ from_profit: 0, max_minis: 6 }] }
+    const html = await renderEditor('lucid-daily-100k', { rules: { ...rules, funded } })
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Remove tier 1<\/button>/)
   })
 
   it('asks to fix a file that does not validate by hand, with no form', async () => {

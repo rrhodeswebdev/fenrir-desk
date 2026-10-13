@@ -144,6 +144,25 @@
   transition-timing-function: steps(2);
 }
 
+/* The meter's safety mark: an inset Ember edge along the top of the safety cell (DESIGN.md: inset only, never outward). */
+@utility safety-mark {
+  box-shadow: inset 0 3px var(--ember);
+}
+
+/* The one authored moment (DESIGN.md Motion): the focused dial's live trace draws itself when focus changes.
+   Its path has pathLength="1" and stroke-dasharray 1; motion-reduce:animate-none turns it off. */
+@theme {
+  --animate-trace: trace 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  @keyframes trace {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+}
+
 @layer base {
   * {
     @apply border-border;

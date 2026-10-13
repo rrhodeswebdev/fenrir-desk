@@ -1,9 +1,13 @@
 import { type MutationState, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createRoute } from '@tanstack/react-router'
+import { useState } from 'react'
 import { ApiError, apiFetch } from '@/api'
 import { Page } from '@/components/page'
 import { pageError } from '@/errorText'
-import { KILL_TIMEOUT_MS, type KillResult, type LiveStatus, killErrorText, killText, nyTime } from '@/live/model'
+import { toneClass } from '@/components/state-text'
+import { tradingDay } from '@/live/journal'
+import { KILL_TIMEOUT_MS, type KillResult, type LiveStatus, focusOf, killErrorText, killText, nyTime, resolveText } from '@/live/model'
+import { FocusField, JournalTape, Sleeves } from '@/live/parts'
 import { KillSwitch, SystemStrip } from '@/live/strip'
 import { rootRoute } from './root'
 
@@ -37,6 +41,19 @@ function LivePage() {
   const last = useMutationState<MutationState<KillResult>>({ filters: { mutationKey: killKey } }).at(-1)
   // When the last read failed the hub's state is unknown: never show the previous status as current.
   const fresh = status.isError ? undefined : status.data
+  // Resolve, then re-read the status whatever came back: a 500 may already have lifted the pause.
+  const resolve = useMutation({
+    mutationFn: (account: string) =>
+      apiFetch<{ ok: boolean }>('/api/live/resolve', { method: 'POST', body: JSON.stringify({ account }) }),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['live'] }),
+  })
+  const resolved = resolve.variables && (resolve.data || resolve.error) ? resolveText(resolve.variables, resolve.data, resolve.error) : null
+  const resolveProps = { onResolve: (account: string) => resolve.mutate(account), resolving: resolve.isPending ? resolve.variables : null }
+  // The user's pick holds while that account is armed; otherwise the most severe account is in focus.
+  // Only a fresh status: while the read fails, the focus field, sleeves and tape are not shown at all.
+  const [picked, setPicked] = useState<string | null>(null)
+  const accounts = fresh?.accounts ?? []
+  const focused = focusOf(accounts, picked)
   const statusError = pageError(status.error)
   return (
     <Page
@@ -47,16 +64,35 @@ function LivePage() {
           <KillSwitch status={fresh} pending={last?.status === 'pending'} onKill={() => kill.mutate()} />
         </>
       }
+      className=""
     >
-      <div className="grid gap-4">
+      <div className="grid gap-4 px-8 py-6 empty:hidden max-md:px-4">
         {last && <KillLine run={last} />}
         {statusError && (
           <p role="alert" className="text-red">
             Status: {statusError}
           </p>
         )}
+        {resolved && (
+          <p role={resolved.tone === 'normal' ? 'status' : 'alert'} className={toneClass[resolved.tone]}>
+            {resolved.text}
+          </p>
+        )}
+        {status.isError && <p className="text-ink-3">Accounts unavailable until the status reads again.</p>}
         {fresh?.accounts.length === 0 && <p className="text-ink-3">No account is armed.</p>}
       </div>
+      {focused && (
+        <>
+          <FocusField a={focused} {...resolveProps} />
+          <section
+            aria-label="Armed accounts and journal"
+            className="grid grid-cols-[minmax(0,3fr)_minmax(320px,1.3fr)] max-[1181px]:grid-cols-1"
+          >
+            <Sleeves accounts={accounts} focused={focused.account} onFocus={setPicked} {...resolveProps} />
+            <JournalTape accounts={accounts.map((a) => a.account)} day={tradingDay(Date.now())} />
+          </section>
+        </>
+      )}
     </Page>
   )
 }

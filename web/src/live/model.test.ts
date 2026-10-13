@@ -1,9 +1,22 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '@/api'
-import { account, status } from './fixtures'
+import { account, desk, status } from './fixtures'
 import {
   type LiveStatus,
+  type Meter,
   KILL_TIMEOUT_MS,
+  accountStrip,
+  alertTone,
+  bracketText,
+  canResolve,
+  focusOf,
+  meterLabel,
+  meters,
+  positionText,
+  resolveText,
+  segments,
+  typeText,
+  usd,
   age,
   alarmName,
   killErrorText,
@@ -178,5 +191,137 @@ describe('kill switch', () => {
       'Kill switch got no answer in 90 s. It may not have run: check NinjaTrader and press it again.',
     )
     expect(KILL_TIMEOUT_MS).toBe(90_000)
+  })
+})
+
+describe('account strip', () => {
+  it('is Risk · Book: Risk caution on a safety halt, alarm on a breach; Book alarm on a mismatch', () => {
+    const states = (a: Parameters<typeof accountStrip>[0]) => accountStrip(a).map((c) => `${c.name} ${c.state}`)
+    expect(states(account())).toEqual(['Risk normal', 'Book normal'])
+    expect(states(account({ halted: true, halt_kind: 'safety' }))).toEqual(['Risk caution', 'Book normal'])
+    expect(states(account({ halted: true, halt_kind: 'breach' }))).toEqual(['Risk alarm', 'Book normal'])
+    expect(states(account({ halted: true, halt_kind: 'reconcile' }))).toEqual(['Risk normal', 'Book alarm'])
+  })
+
+  it('stays normal for stale and drift pauses (the system strip carries them)', () => {
+    for (const kind of ['stale', 'drift'] as const)
+      expect(accountStrip(account({ halted: true, halt_kind: kind })).map((c) => c.state)).toEqual(['normal', 'normal'])
+  })
+})
+
+describe('focus', () => {
+  const accounts = desk().accounts
+
+  it('focuses the most severe account: the book mismatch (alarm) over the safety halt (caution)', () => {
+    expect(focusOf(accounts, null)?.account).toBe('LFE 0911')
+  })
+
+  it("keeps the user's pick while it is armed, and falls back when it is gone", () => {
+    expect(focusOf(accounts, 'LDA 0042')?.account).toBe('LDA 0042')
+    expect(focusOf(accounts, 'LFE 9999')?.account).toBe('LFE 0911')
+  })
+
+  it('with nothing wrong, focuses real money first: live, then sim, then dry run', () => {
+    const calm = [account({ account: 'D', mode: 'dry' }), account({ account: 'S', mode: 'sim' }), account({ account: 'L' })]
+    expect(focusOf(calm, null)?.account).toBe('L')
+    expect(focusOf(calm.slice(0, 2), null)?.account).toBe('S')
+    expect(focusOf([], null)).toBeNull()
+  })
+})
+
+describe('resolve', () => {
+  it('shows for reconcile and drift pauses only, never for a halt or breach', () => {
+    expect(canResolve(account({ halted: true, halt_kind: 'reconcile' }))).toBe(true)
+    expect(canResolve(account({ halted: true, halt_kind: 'drift' }))).toBe(true)
+    for (const kind of ['safety', 'breach', 'stale', null] as const) expect(canResolve(account({ halted: true, halt_kind: kind }))).toBe(false)
+  })
+
+  it('says what came back: ran, could not read the book, not running (404), server error (500)', () => {
+    expect(resolveText('LFE 0911', { ok: true }, null)).toEqual({
+      tone: 'normal',
+      text: 'Resolve ran for LFE 0911: pauses lifted, NinjaTrader re-checked. A mismatch still there pauses it again.',
+    })
+    expect(resolveText('LFE 0911', { ok: false }, null).tone).toBe('caution')
+    const missing = resolveText('LFE 0911', undefined, new ApiError(404, '{"detail":"\'LFE 0911\' is not running"}'))
+    expect(missing).toEqual({ tone: 'caution', text: 'LFE 0911 is not running: nothing to resolve.' })
+    expect(missing.text).not.toContain('armed')
+    const failed = resolveText('LFE 0911', undefined, new ApiError(500, 'Internal Server Error'))
+    expect(failed.tone).toBe('alarm')
+    expect(failed.text).toContain('the pause may already be lifted')
+    expect(resolveText('LFE 0911', undefined, new TypeError('Failed to fetch')).text).toBe(
+      'Resolve request for LFE 0911 failed (Failed to fetch): it may not have run.',
+    )
+  })
+})
+
+describe('alert tone', () => {
+  it('is the need, caution for a stale or drift pause, null when all is well', () => {
+    expect(alertTone(account({ halted: true, halt_kind: 'reconcile' }))).toBe('alarm')
+    expect(alertTone(account({ halted: true, halt_kind: 'safety' }))).toBe('caution')
+    expect(alertTone(account({ halted: true, halt_kind: 'drift' }))).toBe('caution')
+    expect(alertTone(account())).toBeNull()
+  })
+})
+
+describe('figures', () => {
+  it('dollars with cents only when there are any, P&L signed', () => {
+    expect(usd(2000)).toBe('$2,000')
+    expect(usd(1412.5)).toBe('$1,412.50')
+    expect(usd(-588)).toBe('−$588')
+    expect(usd(212, true)).toBe('+$212')
+    expect(usd(-812.25, true)).toBe('−$812.25')
+    expect(usd(0, true)).toBe('$0')
+  })
+
+  it('position and bracket', () => {
+    expect(positionText({ qty: 2, entry: 25412.25, stop: 25402.25, target: 25432.25 })).toBe('Long 2 @ 25,412.25')
+    expect(positionText({ qty: -1, entry: null, stop: null, target: null })).toBe('Short 1')
+    expect(positionText({ qty: 0, entry: null, stop: null, target: null })).toBe('Flat')
+    expect(positionText(null)).toBe('—')
+    expect(bracketText({ qty: 2, entry: 1, stop: 25402.25, target: 25432.25 })).toBe('Stop 25,402.25 · Target 25,432.25')
+    expect(bracketText({ qty: 2, entry: 1, stop: null, target: null })).toBe('No stop known')
+    expect(bracketText({ qty: 0, entry: null, stop: null, target: null })).toBe('—')
+  })
+
+  it('account type in words', () => {
+    expect(typeText(account({ rules_account: 'lucid-flex-50k' }))).toBe('lucid flex 50k')
+  })
+})
+
+describe('meters', () => {
+  const [, safety, mismatch] = desk().accounts as [unknown, LiveStatus['accounts'][number], LiveStatus['accounts'][number]]
+
+  it('drawdown, daily loss, contracts and, in evaluation, the target', () => {
+    expect(meters(mismatch).map((m) => m.name)).toEqual(['Drawdown left', 'Daily loss left', 'Contracts', 'Target'])
+    expect(meters(mismatch)[1]).toEqual({ name: 'Daily loss left', none: 'No limit' })
+    // funded: no target
+    expect(meters(safety).map((m) => m.name)).toEqual(['Drawdown left', 'Daily loss left', 'Contracts'])
+    expect(meters(account({ limits: null }))).toEqual([])
+  })
+
+  it('marks the safety level: today’s loss at the safety equity, and the drawdown left there', () => {
+    const daily = meters(safety)[1] as Exclude<Meter, { none: string }>
+    expect(daily).toMatchObject({ figure: '$188', of: 'of $1,000', used: 812, max: 1000, limit: true })
+    expect(daily.safety).toBeCloseTo(0.8) // (start 172 − safety −628) / 1000
+    const dd = meters(mismatch)[0] as Exclude<Meter, { none: string }>
+    expect(dd.safety).toBeCloseTo(0.78) // 1 − (−2340 − −3000) / 3000
+  })
+
+  it('lights cells Steel, Ember past the safety mark, Red at 100% of a limit only', () => {
+    const m = { name: 'Daily loss left', figure: '', of: '', used: 812, max: 1000, safety: 0.8, limit: true }
+    const cells = segments(m)
+    expect(cells).toHaveLength(20)
+    expect(cells.filter((c) => c.state === 'caution')).toHaveLength(16)
+    expect(cells.findIndex((c) => c.mark)).toBe(15)
+    expect(segments({ ...m, used: 500 }).filter((c) => c.state === 'on')).toHaveLength(10)
+    expect(segments({ ...m, used: 1200 }).every((c) => c.state === 'alarm')).toBe(true)
+    expect(segments({ ...m, used: 1000, limit: false, safety: null }).every((c) => c.state === 'on')).toBe(true)
+    expect(segments({ ...m, safety: null }).some((c) => c.mark)).toBe(false)
+  })
+
+  it('says each meter in words', () => {
+    expect(meterLabel(meters(safety)[1]!)).toBe('Daily loss left: 81% used, safety mark at 80%')
+    expect(meterLabel({ name: 'Daily loss left', none: 'No limit' })).toBe('Daily loss left: no limit')
+    expect(meterLabel(meters(mismatch)[3]!)).toBe('Target: 7% of target')
   })
 })

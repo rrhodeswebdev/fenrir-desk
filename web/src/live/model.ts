@@ -1,5 +1,6 @@
 // Pure state for the Live page: the `GET /api/live/status` shape, the code-strip rules and the
 // most severe account (docs/contracts.md "Code strips", DESIGN.md "Code Strip").
+import { ApiError } from '@/api'
 import type { Tone } from '@/components/state-text'
 import { errorText } from '@/errorText'
 
@@ -14,8 +15,8 @@ type Limits = {
   max_minis: number
   held_minis: number
 }
-type Position = { qty: number; entry: number | null; stop: number | null; target: number | null }
-type Session = {
+export type Position = { qty: number; entry: number | null; stop: number | null; target: number | null }
+export type Session = {
   start: number
   floor: number
   target: number | null
@@ -162,3 +163,156 @@ export const killErrorText = (e: unknown): string =>
   e instanceof DOMException && e.name === 'TimeoutError'
     ? `Kill switch got no answer in ${KILL_TIMEOUT_MS / 1000} s. It may not have run: check NinjaTrader and press it again.`
     : `Kill switch request failed (${errorText(e)}). It may not have run: check NinjaTrader and press it again.`
+
+// ---- Focus field, sleeves and meters (#98) ----
+
+/** An account's own strip, Risk · Book (contract "Code strips"): stale and drift pauses never light it. */
+export function accountStrip(a: AccountStatus): Cell[] {
+  const n = need(a)
+  return [
+    { name: 'Risk', state: n?.cell === 'Risk' ? n.state : 'normal' },
+    { name: 'Book', state: n?.cell === 'Book' ? n.state : 'normal' },
+  ]
+}
+
+/** The focused account: the one the user picked while it is still armed, else the most severe, else
+ * the first by real money (live, sim, dry run; ties keep the server's order). */
+export function focusOf(accounts: AccountStatus[], picked: string | null): AccountStatus | null {
+  const own = accounts.find((a) => a.account === picked)
+  if (own) return own
+  const severe = mostSevere(accounts)
+  if (severe) return severe.account
+  return [...accounts].sort((x, y) => modeRank[x.mode] - modeRank[y.mode])[0] ?? null
+}
+
+/** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only. */
+export const canResolve = (a: AccountStatus): boolean => a.halt_kind === 'reconcile' || a.halt_kind === 'drift'
+
+/** The colour of an account's alert line and sleeve outline: its need, or caution for a stale or drift pause
+ * (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
+export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
+  return need(a)?.state ?? (a.halted ? 'caution' : null)
+}
+
+export const modeText: Record<Mode, string> = { dry: 'Dry run', sim: 'Sim', live: 'Live' }
+export const phaseText = { evaluation: 'Evaluation', funded: 'Funded' } as const
+/** `lucid-flex-50k` → `lucid flex 50k`; shown in Account Name caps. */
+export const typeText = (a: AccountStatus): string => a.rules_account.replaceAll('-', ' ')
+
+const dollars = (digits: number) =>
+  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits })
+const whole = dollars(0)
+const cents = dollars(2)
+/** Dollars, cents only when there are any; `signed` puts + or − on a P&L. */
+export function usd(x: number, signed = false): string {
+  const s = (Math.round(Math.abs(x) * 100) % 100 === 0 ? whole : cents).format(Math.abs(x))
+  return x < 0 && s !== '$0' ? `−${s}` : signed && s !== '$0' ? `+${s}` : s
+}
+/** A price, e.g. 25,412.25. */
+export const price = (x: number): string => x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 })
+
+export function positionText(p: Position | null): string {
+  if (!p) return '—'
+  if (p.qty === 0) return 'Flat'
+  const side = `${p.qty > 0 ? 'Long' : 'Short'} ${Math.abs(p.qty)}`
+  return p.entry === null ? side : `${side} @ ${price(p.entry)}`
+}
+export function bracketText(p: Position | null): string {
+  if (!p || p.qty === 0) return '—'
+  const parts = [p.stop !== null && `Stop ${price(p.stop)}`, p.target !== null && `Target ${price(p.target)}`].filter(Boolean)
+  return parts.length ? parts.join(' · ') : 'No stop known'
+}
+
+/** Equity now, relative to phase start: the session start plus today's (stricter) P&L. */
+export const equityNow = (a: AccountStatus): number | null =>
+  a.session && a.today_pnl !== null ? a.session.start + a.today_pnl : null
+
+/** One segmented meter. `used`/`max` fill it; `safety` (0..1) marks the safety margin's cell and turns lit
+ * cells Ember past it; `limit` meters go Red at 100%, a progress or size meter never does. */
+export type Meter = {
+  name: string
+  figure: string
+  of: string
+  used: number
+  max: number
+  safety: number | null
+  limit: boolean
+} | { name: string; none: string }
+
+const frac = (x: number) => (x > 0 && x < 1 ? x : null)
+
+export function meters(a: AccountStatus): Meter[] {
+  const l = a.limits
+  const s = a.session
+  if (!l) return []
+  const out: Meter[] = [
+    {
+      name: 'Drawdown left',
+      figure: usd(l.drawdown_remaining),
+      of: `of ${usd(l.drawdown_max)}`,
+      used: l.drawdown_max - l.drawdown_remaining,
+      max: l.drawdown_max,
+      // at the safety level the distance to the floor is safety − floor
+      safety: s ? frac(1 - (s.safety - s.floor) / l.drawdown_max) : null,
+      limit: true,
+    },
+    l.daily_loss_max === null || l.daily_loss_remaining === null
+      ? { name: 'Daily loss left', none: 'No limit' }
+      : {
+          name: 'Daily loss left',
+          figure: usd(l.daily_loss_remaining),
+          of: `of ${usd(l.daily_loss_max)}`,
+          used: l.daily_loss_max - l.daily_loss_remaining,
+          max: l.daily_loss_max,
+          // at the safety level today's loss is start − safety
+          safety: s ? frac((s.start - s.safety) / l.daily_loss_max) : null,
+          limit: true,
+        },
+    {
+      name: 'Contracts',
+      figure: String(l.held_minis),
+      of: `of ${l.max_minis} minis`,
+      used: l.held_minis,
+      max: l.max_minis,
+      safety: null,
+      limit: false,
+    },
+  ]
+  const eq = equityNow(a)
+  if (s?.target != null && eq !== null)
+    out.push({ name: 'Target', figure: usd(eq), of: `of ${usd(s.target)}`, used: Math.max(0, eq), max: s.target, safety: null, limit: false })
+  return out
+}
+
+export type Segment = { state: 'idle' | 'on' | 'caution' | 'alarm'; mark: boolean }
+export const SEGMENTS = 20
+
+/** The meter's 20 cells: lit Steel, Ember past the safety fraction, Red at 100% of a limit; `mark` on the safety cell. */
+export function segments(m: Exclude<Meter, { none: string }>): Segment[] {
+  const f = m.max > 0 ? Math.min(1, Math.max(0, m.used / m.max)) : 0
+  const on = Math.round(f * SEGMENTS)
+  const markAt = m.safety === null ? -1 : Math.max(0, Math.round(m.safety * SEGMENTS) - 1)
+  return Array.from({ length: SEGMENTS }, (_, i) => ({
+    state: i >= on ? 'idle' : m.limit && f >= 1 ? 'alarm' : m.safety !== null && f >= m.safety ? 'caution' : 'on',
+    mark: i === markAt,
+  }))
+}
+
+/** The meter's `aria-label`. */
+export function meterLabel(m: Meter): string {
+  if ('none' in m) return `${m.name}: ${m.none.toLowerCase()}`
+  const f = m.max > 0 ? Math.round((Math.min(1, Math.max(0, m.used / m.max)) * 100)) : 0
+  const safety = m.safety === null ? '' : `, safety mark at ${Math.round(m.safety * 100)}%`
+  return `${m.name}: ${f}% ${m.name === 'Target' ? 'of target' : 'used'}${safety}`
+}
+
+/** `POST /api/live/resolve`'s answer, or its request error, as a line: 404 is "not running" (the hub has no runner
+ * for it); any other error may have lifted the pause already, so the page re-reads the status either way. */
+export function resolveText(account: string, r: { ok: boolean } | undefined, e: unknown): { tone: Tone; text: string } {
+  if (r?.ok) return { tone: 'normal', text: `Resolve ran for ${account}: pauses lifted, NinjaTrader re-checked. A mismatch still there pauses it again.` }
+  if (r) return { tone: 'caution', text: `Resolve for ${account} could not read NinjaTrader's book: nothing lifted. Check the add-on, then resolve again.` }
+  if (e instanceof ApiError && e.status === 404) return { tone: 'caution', text: `${account} is not running: nothing to resolve.` }
+  if (e instanceof ApiError && e.status === 500)
+    return { tone: 'alarm', text: `Resolve for ${account} failed on the server (500): the pause may already be lifted. The status shows what holds.` }
+  return { tone: 'alarm', text: `Resolve request for ${account} failed (${errorText(e)}): it may not have run.` }
+}

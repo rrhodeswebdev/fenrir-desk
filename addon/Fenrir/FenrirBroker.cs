@@ -495,6 +495,16 @@ namespace NinjaTrader.NinjaScript.AddOns
             return utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
         }
 
+        // every managed account: close every position and cancel every working order (16:40 flatten)
+        public void FlattenManaged(string why)
+        {
+            Post(() =>
+            {
+                foreach (Account a in Managed())
+                    if (FlattenAccount(a, true)) FenrirLog.Alert(why + ": flattened and cancelled on " + a.Name);
+            });
+        }
+
         // managed accounts holding a position: flatten them (flatten_on_disconnect_seconds)
         public void FlattenHeld(string why)
         {

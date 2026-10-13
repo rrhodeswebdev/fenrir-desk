@@ -2,7 +2,9 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Web.Script.Serialization;
 using NinjaTrader.Cbi;
 #endregion
@@ -18,6 +20,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         public string Token = "";
         public HashSet<string> ManagedAccounts = new HashSet<string>();
         public int FlattenOnDisconnectSeconds; // 0 = off (null in the file)
+        public TimeSpan FlattenAt = new TimeSpan(16, 40, 0); // America/New_York; configurable only to test it
 
         public static string Dir
         {
@@ -41,6 +44,14 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (raw.TryGetValue("managed_accounts", out v) && v is IEnumerable && !(v is string))
                 foreach (object name in (IEnumerable)v)
                     if (name is string) config.ManagedAccounts.Add((string)name);
+            if (raw.TryGetValue("flatten_at", out v))
+            {
+                TimeSpan at;
+                if (v is string && TimeSpan.TryParseExact((string)v, "hh\\:mm", CultureInfo.InvariantCulture, out at))
+                    config.FlattenAt = at;
+                else
+                    FenrirLog.Alert("flatten_at must be \"HH:MM\" (New York time); using 16:40");
+            }
             if (raw.TryGetValue("flatten_on_disconnect_seconds", out v) && v != null)
             {
                 if (v is int && (int)v > 0) config.FlattenOnDisconnectSeconds = (int)v;
@@ -79,6 +90,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private FenrirConfig config;
         private FenrirBroker broker;
         private FenrirServer server;
+        private Timer flattenTimer;
 
         protected override void OnStateChange()
         {
@@ -104,10 +116,30 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 config = FenrirConfig.Load();
-                if (config.ManagedAccounts.Count == 0)
-                    FenrirLog.Alert("managed_accounts is empty in fenrir-addon.json: Fenrir will not see or touch any account");
+            }
+            catch (Exception e)
+            {
+                config = new FenrirConfig();
+                FenrirLog.Alert("could not read fenrir-addon.json (" + e.Message + "): no account is managed");
+            }
+            if (config.ManagedAccounts.Count == 0)
+                FenrirLog.Alert("managed_accounts is empty in fenrir-addon.json: Fenrir will not see or touch any account");
+
+            // first and on its own: the 16:40 flatten runs even when the server cannot start
+            try
+            {
                 broker = new FenrirBroker(config);
                 broker.Start();
+                flattenTimer = new Timer(_ => CheckFlatten(), null, 0, 15000);
+                FenrirLog.Info(string.Format("flattening managed accounts daily at {0:hh\\:mm} New York time", config.FlattenAt));
+            }
+            catch (Exception e)
+            {
+                FenrirLog.Alert("the daily New York flatten failed to start: " + e);
+            }
+
+            try
+            {
                 if (config.Token.Length < 16)
                 {
                     FenrirLog.Alert("set a token of at least 16 characters in fenrir-addon.json; server not started");
@@ -123,11 +155,29 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
+        // Every 15 s from flatten_at to 20 minutes later, New York time whatever the PC's zone (DST
+        // included): flatten and cancel everything on the managed accounts, Python connected or not.
+        // Repeating through the window also closes anything opened late, by anyone.
+        private void CheckFlatten()
+        {
+            try
+            {
+                DateTime ny = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTime.UtcNow, "Eastern Standard Time");
+                if (ny.TimeOfDay >= config.FlattenAt && ny.TimeOfDay < config.FlattenAt + TimeSpan.FromMinutes(20))
+                    broker.FlattenManaged(string.Format("{0:hh\\:mm} New York flatten", config.FlattenAt));
+            }
+            catch (Exception e)
+            {
+                FenrirLog.Alert("New York flatten check failed, retrying in 15 s: " + e.Message);
+            }
+        }
+
         private void Shutdown()
         {
             if (!started) return; // instances made only to list add-ons never started
             try
             {
+                if (flattenTimer != null) flattenTimer.Dispose();
                 if (server != null) server.Stop();
                 if (broker != null) broker.Stop();
             }

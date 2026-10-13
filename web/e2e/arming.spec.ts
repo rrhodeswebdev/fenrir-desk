@@ -199,10 +199,74 @@ for (const mode of ['sim', 'live'] as const) {
     await expect(dialog).toContainText("NinjaTrader flattens this account first: its open position is closed at market and the working orders on each instrument it flattens cancelled, Fenrir's among them; an order on any other instrument stays.")
     await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click() // never just 'Disarm'
     await expect(dialog.getByRole('alert')).toHaveText(`Sim101: ${error}.`)
+    // #230: only an unmanaged_account refusal offers a disarm without flatten
+    await expect(dialog.getByRole('button', { name: 'Disarm without flatten' })).toHaveCount(0)
+    await expect(dialog.getByRole('checkbox')).toHaveCount(0)
     await dialog.getByRole('button', { name: 'Cancel' }).click()
     await expect(region).toContainText('Sim101') // still armed, halted
   })
 }
+
+test('an account the add-on no longer manages can be disarmed without flatten, only after a ticked second confirmation (#230)', async ({ page }) => {
+  await mockApi(page)
+  const disarms: unknown[] = []
+  let armed = [{ account: 'Sim101', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode: 'live', phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: 50000, peak_balance: 50500 }]
+  const error = 'disarm failed: flatten failed: unmanaged_account; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
+  await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
+  await page.route('**/api/arming/disarm', (route) => {
+    const body = route.request().postDataJSON()
+    disarms.push(body)
+    if (body.flatten !== false) return route.fulfill({ json: { ok: false, error, unmanaged: true } })
+    armed = []
+    return route.fulfill({ json: { ok: true, error: null } })
+  })
+  await page.goto('/strategies')
+  const region = page.getByRole('region', { name: 'Armed accounts' })
+  await region.getByRole('button', { name: 'Disarm Sim101' }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
+  await expect(dialog.getByRole('button', { name: 'Disarm without flatten' })).toHaveCount(0) // not before the refusal
+  await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText(`Sim101: ${error}.`)
+  await expect(dialog).toContainText("NinjaTrader's Fenrir add-on no longer manages Sim101, so Fenrir can neither see nor flatten it there.")
+  await expect(dialog).toContainText('any open position or working order on Sim101 is yours to close in NinjaTrader.')
+  const without = dialog.getByRole('button', { name: 'Disarm without flatten' })
+  await expect(without).toBeDisabled()
+  const tick = dialog.getByRole('checkbox', { name: 'NinjaTrader no longer manages Sim101, and I will close any position or working order there in NinjaTrader myself.' })
+  await tick.click()
+  await expect(without).toBeEnabled()
+  await tick.click() // unticked again: disabled again
+  await expect(without).toBeDisabled()
+  expect(disarms).toEqual([{ account: 'Sim101' }])
+  await tick.click()
+  await without.click()
+  await expect(dialog).toBeHidden()
+  expect(disarms).toEqual([{ account: 'Sim101' }, { account: 'Sim101', flatten: false }])
+  await expect(region).toContainText('Nothing armed.')
+})
+
+test('cancelling the second confirmation sends nothing more, and reopening asks from the start (#230)', async ({ page }) => {
+  await mockApi(page)
+  const disarms: unknown[] = []
+  const armed = [{ account: 'Sim101', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode: 'sim', phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: 50000, peak_balance: 50500 }]
+  const error = 'disarm failed: flatten failed: unmanaged_account; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
+  await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
+  await page.route('**/api/arming/disarm', (route) => {
+    disarms.push(route.request().postDataJSON())
+    return route.fulfill({ json: { ok: false, error, unmanaged: true } })
+  })
+  await page.goto('/strategies')
+  const region = page.getByRole('region', { name: 'Armed accounts' })
+  await region.getByRole('button', { name: 'Disarm Sim101' }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
+  await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click()
+  await dialog.getByRole('checkbox').click()
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toBeHidden()
+  await region.getByRole('button', { name: 'Disarm Sim101' }).click()
+  await expect(dialog.getByRole('button', { name: 'Disarm without flatten' })).toHaveCount(0)
+  await expect(dialog.getByRole('checkbox')).toHaveCount(0)
+  expect(disarms).toEqual([{ account: 'Sim101' }])
+})
 
 test('a disarm the server reports as not armed says so, and closing refreshes the table', async ({ page }) => {
   await mockApi(page)

@@ -404,3 +404,30 @@ def test_each_reconcile_flatten_has_its_own_id():
         for sec in (5, 5, 20)
     ]
     assert ids[0] == ids[1] and ids[0].client_id != ids[2].client_id  # a flap in one minute
+
+
+def test_fills_up_to_the_reconcile_read_are_already_in_ninjatraders_book():
+    """Fills buffered on the stream while the book was read arrive after it: never twice."""
+    s = ready(sim(), at("09:30"))
+    read = at("09:31").ts
+    book = [order("stop", "sell", 1, 19990.0), order("target", "sell", 1, 20020.0, oid="o2")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, [held(1)], book, read)
+    for ts in (read - timedelta(seconds=1), read):  # the entry fill, already adopted
+        s, effects = core.on_fill(s, fill(1, 20000.0, ts))
+        assert kinds(effects) == ["fill"] and s.position.qty == 1  # journalled, not booked
+    s, _ = core.on_fill(s, fill(-1, 20005.0, read + timedelta(seconds=1)))  # after the read
+    assert s.position.qty == 0
+
+
+def test_a_stop_fill_before_the_read_never_opens_a_phantom_position():
+    s = entered(sim(), at("09:30"))
+    read = at("09:35").ts
+    s, _ = core.on_reconcile(s, INSTRUMENT, [], [], read)  # NinjaTrader's stop already filled
+    s, effects = core.on_fill(s, fill(-1, 19990.0, read - timedelta(seconds=2)))
+    assert s.position == core.FLAT and sends(effects) == [] and s.exiting is None
+
+
+def test_replay_books_every_journalled_fill_whatever_the_last_read():
+    s = replace(ready(sim(), at("09:30")), read_at=at("09:40").ts)
+    r = core.replay(s, [("fill", fill(1, 20000.0, at("09:31").ts))])
+    assert r.position.qty == 1 and r.read_at == s.read_at

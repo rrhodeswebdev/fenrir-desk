@@ -54,6 +54,8 @@ STRATEGY_MAX = 1024 * 1024
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
+RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
+DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
 Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
 
@@ -180,7 +182,9 @@ class LiveHub:
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        for r in await asyncio.gather(*self._tasks, return_exceptions=True):
+            if isinstance(r, Exception):  # the type only: an add-on error could hold the token
+                log.error("live task had failed: %s", type(r).__name__)
         self._tasks.clear()
         for account in list(self.children):
             await self._kill(account)
@@ -242,35 +246,51 @@ class LiveHub:
             return await self._reconcile(account, _now(), core.resolve)
 
     async def kill(self) -> dict[str, Any]:
-        """The kill switch: disarm every account (its runner and child stopped), then flatten and
-        cancel everything on NinjaTrader's managed accounts (`/flatten-all`), journalled as one
-        "alert" per disarmed account. `ok` is false, with the error, when `/flatten-all` did not
-        land, or when NinjaTrader is not configured while a sim or live account was armed."""
-        async with self._lock:  # after any bar or fill in flight: nothing is sent after this
-            conn = self._db()
-            armed = list_armed(conn) if conn else ()
-            for a in armed:
-                delete_armed(conn, a.account)
-            await self._sync(_now())
-            error = None
-            if self.addon is None:
-                if any(a.mode != "dry" for a in armed):
-                    error = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
-            else:
+        """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
+        (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
+        stopped), journalled per account as the disarm route does plus an "alert" with the
+        outcome. Under the hub lock, so no bar or fill runs between the two. A disarm that fails
+        (e.g. sqlite locked) halts every running account in memory instead. `ok` is false, with
+        the errors, when `/flatten-all` did not land, when NinjaTrader is not configured while a
+        sim or live account was armed, or when the disarm failed."""
+        async with self._lock:
+            live = any(s.setup.armed.mode != "dry" for s in self.states.values())
+            flat = None
+            if self.addon is not None:
                 try:  # a fresh id per press: a retry inside the client is still deduped
                     ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
                     if not (ack.accepted or ack.duplicate):
-                        error = ack.error or "refused"
+                        flat = ack.error or "refused"
                 except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
-                    error = f"{type(e).__name__}: {e}"
-            done = f"flatten all failed: {error}" if error else "flattened and cancelled all"
-            alert = {"message": f"kill switch: disarmed; {done}"}
+                    flat = f"{type(e).__name__}: {e}"
+            armed: Sequence[Armed] = ()
+            disarm = None
             try:
+                conn = self._db()
+                armed = list_armed(conn) if conn else ()
                 for a in armed:
-                    journal.write(conn, _now(), a.account, "alert", alert)
-            except Exception:  # disarmed and flattened all the same: report that, not this
-                log.exception("kill switch not journalled")
-            return {"ok": error is None, "error": error}
+                    delete_armed(conn, a.account)
+                await self._sync(_now())
+            except Exception as e:
+                log.exception("kill switch: disarm failed")
+                disarm = f"disarm failed: {type(e).__name__}: {e}"
+                for account in list(self.states):  # still armed: no new entries until disarmed
+                    s = self.states[account]
+                    with contextlib.suppress(Exception):  # its halt row is queued and retried
+                        await self._apply(account, *core.halt(s, f"kill switch: {disarm}"))
+            if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
+                flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
+            if disarm is None:
+                done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
+                try:
+                    for a in armed:
+                        journal.write(conn, _now(), a.account, "halt", DISARMED)
+                        alert = {"message": f"kill switch: disarmed; {done}"}
+                        journal.write(conn, _now(), a.account, "alert", alert)
+                except Exception:  # disarmed and flattened all the same: report that, not this
+                    log.exception("kill switch not journalled")
+            errors = [e for e in (flat, disarm) if e]
+            return {"ok": not errors, "error": "; ".join(errors) or None}
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:
@@ -600,12 +620,25 @@ async def run_ticks(hub: LiveHub, every: float = TICK_EVERY) -> None:
 
 
 async def run_stream(hub: LiveHub) -> None:
-    """Feed the add-on's event stream to the hub; never ends (the client reconnects)."""
-    async for msg in hub.addon.stream():
+    """Feed the add-on's event stream to the hub; never ends (the client reconnects). Should
+    following it fail, the link counts as lost (every account paused) and it starts again."""
+    while True:
         try:
-            await hub.handle_stream(msg)
-        except Exception:  # e.g. a refused journal row: the next message still gets through
-            log.exception("live: add-on %s message failed", msg["type"])
+            async for msg in hub.addon.stream():
+                try:
+                    await hub.handle_stream(msg)
+                except Exception:  # e.g. a refused journal row: the next message still gets through
+                    log.exception("live: add-on %s message failed", msg["type"])
+        except (
+            Exception
+        ) as e:  # the type only: an unexpected error could hold the stream URL's token
+            error = f"stream follower failed: {type(e).__name__}"
+            log.error("live: add-on %s; following it again", error)
+            try:
+                await hub.handle_stream({"type": "disconnected", "error": error})
+            except Exception:
+                log.exception("live: the lost link was not applied")
+        await asyncio.sleep(RESTREAM_AFTER)
 
 
 async def run_bars(hub: LiveHub, stream: Stream) -> None:

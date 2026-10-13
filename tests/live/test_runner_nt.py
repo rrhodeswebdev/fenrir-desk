@@ -305,8 +305,19 @@ def test_a_lost_link_leaves_no_figures_for_the_roll():
     "setup",
     [
         sim(trailing="intraday"),  # the peak follows each account message, not the close
-        make_setup(make_rules()),  # dry runs have no NinjaTrader figures
+        make_setup(make_rules(), start=START),  # dry runs have no NinjaTrader figures
     ],
 )
 def test_only_end_of_day_sim_or_live_rolls_need_ninjatraders_figures(setup):
     assert core.on_bar(running(setup), at("09:30", D2))[0].halted is None
+
+
+def test_a_second_outage_drops_the_figures_too():
+    """Reconnected, the reconcile read failed (still LINK_LOST), figures flowed, link lost again."""
+    s = running(sim(), account(balance=50_400.0))
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s, _ = core.on_account(s, account(balance=50_400.0), T.ts)
+    s, effects = core.on_disconnect(s, "no heartbeat for 6 s")
+    assert effects == () and s.nt is None  # one alert per outage, but never stale figures
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith("confirm balances: ") and peaks(effects) == []

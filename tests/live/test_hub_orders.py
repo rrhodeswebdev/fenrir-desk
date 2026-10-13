@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from live_helpers import ARMED_AT, fill, reconciled
 
-from fenrir.bridge.client import AddonClient
+from fenrir.bridge.client import Ack, AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
 from fenrir.core.actions import Bracket, Flatten
 from fenrir.core.bars import Bar
@@ -732,3 +732,89 @@ async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
     monkeypatch.setattr(client, "flatten_all", down)
     result = await hub.kill()
     assert result["ok"] is False and "unreachable" in result["error"]
+
+
+async def test_kill_flattens_all_even_when_the_disarm_fails(hub, conn, armed, fake, monkeypatch):
+    await hub.tick(T0)
+
+    def locked_delete(conn, account):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "delete_armed", locked_delete)
+    result = await hub.kill()
+    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+    assert result["ok"] is False and "database is locked" in result["error"]
+    # still armed, so halted in memory: nothing new goes out until it is disarmed
+    assert hub.states["Sim101"].halted.startswith("kill switch: ")
+    await hub.handle_bar(bar(T0))
+    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+
+
+async def test_kill_journals_the_disarm_routes_halt_row(hub, conn, armed, fake):
+    await hub.tick(T0)
+    await hub.kill()
+    [row] = rows(conn, "halt")
+    assert row.payload == {"reason": "disarmed", "kind": None, "until": None}
+
+
+async def test_kill_counts_a_duplicate_flatten_all_as_done(hub, armed, client, monkeypatch):
+    async def duplicate(client_id):
+        return Ack(False, True, None)
+
+    monkeypatch.setattr(client, "flatten_all", duplicate)
+    assert await hub.kill() == {"ok": True, "error": None}
+
+
+STOP = {**ENTRY, "order_id": "2", "role": "stop", "action": "sell", "price": 19990.0}
+TARGET = {**STOP, "order_id": "3", "role": "target", "price": 20020.0}
+
+
+@pytest.mark.parametrize(
+    ("before", "positions", "orders", "buffered"),
+    [
+        ([], [HELD], [STOP, TARGET], 1),  # an entry fill NinjaTrader's book already holds
+        ([FOREIGN], [], [], -1),  # a closing fill NinjaTrader's book already holds
+    ],
+)
+async def test_fills_buffered_during_the_reconnect_reconcile_are_not_booked_twice(
+    hub, conn, armed, fake, before, positions, orders, buffered
+):
+    await hub.tick(T0 - timedelta(minutes=1))
+    for f in before:
+        await hub.handle_fill({**f, "ts": mnq_fill(1, 0.0, T0 - timedelta(seconds=50))["ts"]})
+    await hub.handle_stream(LOST)
+    fake.positions, fake.orders, sent = positions, orders, len(fake.requests)
+    await hub.handle_stream({"type": "connected"})  # reads the book at T0
+    await hub.handle_fill(mnq_fill(buffered, 20000.0, T0 - timedelta(seconds=1)))
+    assert hub.states["Sim101"].position.qty == sum(p["qty"] for p in positions)
+    assert len(fake.requests) == sent  # no Flatten for a phantom position
+    assert rows(conn, "fill")[-1].payload["qty"] == buffered  # journalled all the same
+
+
+async def test_start_follows_the_addon_stream(hub, armed):
+    hub.start()
+    await until(lambda: hub.nt_connected)
+
+
+async def test_a_crashed_stream_follower_marks_the_link_down_and_restarts(
+    hub, conn, armed, client, monkeypatch
+):
+    calls = []
+
+    async def crashing():
+        calls.append(1)
+        yield {"type": "connected"}
+        raise RuntimeError("bug in the stream")
+
+    monkeypatch.setattr(client, "stream", crashing)
+    monkeypatch.setattr(service, "RESTREAM_AFTER", 0.01)
+    await hub.tick(T0)
+    task = asyncio.create_task(service.run_stream(hub))
+    try:
+        await until(lambda: len(calls) >= 2)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    [alert, *_] = rows(conn, "alert")  # paused as a lost link, with the error
+    assert alert.payload["message"].startswith(core.LINK_LOST)
+    assert "stream follower failed: RuntimeError" in alert.payload["message"]

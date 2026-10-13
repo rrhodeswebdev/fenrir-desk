@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { renderToString } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api'
 import { routeTree } from '@/router'
-import { type Latest, closeLine, inputFrame, latestPollMs, resizeFrame } from './workbench'
+import { type Latest, closeLine, inputFrame, latestPollMs, latestQuery, resizeFrame } from './workbench'
 
 describe('terminal frames', () => {
   it('encodes input and resize as the server parses them', () => {
@@ -43,7 +43,7 @@ const latest = (over: Partial<Latest> = {}): Latest => ({
 
 async function workbench(results: Latest[]): Promise<string> {
   const client = new QueryClient()
-  client.setQueryData(['backtests', 'results'], results)
+  client.setQueryData(latestQuery.queryKey, results)
   const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/'] }) })
   await router.load()
   return renderToString(
@@ -71,6 +71,18 @@ describe('latest backtest pane', () => {
     const html = await workbench([latest({ periods: { tuning: period({ microscalp_flags: 3 }), holdout: period() }, holdout_gap: true })])
     expect(html).toContain('text-ember">3<')
     expect(html).toContain('likely overfit')
+  })
+})
+
+describe('latestQuery', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
+  it('asks the server for the newest report only and never retries', async () => {
+    const fetch = vi.fn(async (_path: string) => new Response('[]'))
+    vi.stubGlobal('fetch', fetch)
+    await new QueryClient().fetchQuery(latestQuery)
+    expect(fetch.mock.calls[0]![0]).toBe('/api/backtests/results?limit=1')
+    expect(latestQuery.retry).toBe(false)
   })
 })
 

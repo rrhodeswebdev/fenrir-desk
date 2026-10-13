@@ -90,7 +90,11 @@ def read_report(settings: Settings, key: str) -> Report:
     return _read(_results(settings) / f"{key}.json")
 
 
-def list_reports(settings: Settings) -> tuple[Report, ...]:
-    reports = [_read(p) for p in _results(settings).glob("*.json")]
+def list_reports(settings: Settings, limit: int | None = None) -> tuple[Report, ...]:
+    """Every cached report, or only the `limit` most recently written files (mtime, then name)."""
+    paths = list(_results(settings).glob("*.json"))
+    if limit is not None:  # only these are read: an older corrupt file never fails the call
+        paths = sorted(paths, key=lambda p: (p.lstat().st_mtime_ns, p.name), reverse=True)[:limit]
+    reports = [_read(p) for p in paths]
     # key breaks created_at ties (one-second resolution) so the order is the same everywhere
     return tuple(sorted(reports, key=lambda r: (r["created_at"], r["key"]), reverse=True))

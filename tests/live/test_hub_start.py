@@ -238,11 +238,19 @@ async def test_a_morning_loss_before_the_first_start_counts_once(hub, conn, arme
     assert acc["halted"] is False and [path for path, _ in fake.requests] == ["/bracket"]
 
 
-async def test_a_balance_at_or_below_zero_is_not_a_figure_yet(hub, conn, armed):
+async def test_a_balance_at_or_below_zero_is_not_a_figure_yet(hub, conn, armed, monkeypatch):
     await hub.tick(T0)
+    synced, sync = [], hub._sync
+
+    async def counted(now):
+        synced.append(now)
+        await sync(now)
+
+    monkeypatch.setattr(hub, "_sync", counted)
     await hub.handle_stream(account(0.0))  # e.g. NinjaTrader before its account data loads
     await hub.handle_stream(account(-5.0))
     assert hub.states == {} and "Sim101" in hub.waiting and kinds(conn) == []
+    assert synced == []  # no armed read every 2 s while it waits
     await hub.handle_stream(account(50_300.0))
     assert hub.states["Sim101"].halted is None
 
@@ -254,6 +262,10 @@ async def test_a_first_balance_at_the_liquidation_level_cannot_start(hub, conn, 
     assert s.halted.startswith("confirm balances: NinjaTrader's balance 45000.00 is at or below")
     assert not s.started and s.halt_kind is None and hub.children == {}
     assert kinds(conn) == ["halt"]
+    assert (s.setup.start, s.setup.day_start) == (None, None)  # no figures left to roll with
+    await hub.handle_stream(account(45_000.0))
+    await hub.handle_bar(bar(D2))  # a roll: no peak or open journalled for a runner never started
+    assert kinds(conn) == ["halt", "bar"]
 
 
 async def test_a_message_after_a_rearm_starts_the_new_arming_not_the_old(
@@ -294,3 +306,95 @@ async def test_a_waiting_row_the_kill_could_not_disarm_never_loads_its_strategy(
     await hub.tick(T0 + timedelta(seconds=5))
     await hub.handle_bar(bar(T0))
     assert [path for path, _ in fake.requests] == ["/flatten-all", "/flatten-all"]
+
+
+# review of #217 at 33bd517: a realized gain before the first start stays in the app's balance
+# (the open is NinjaTrader's balance less a realized loss only), through replay, rolls and restarts
+
+D2 = T0 + timedelta(days=1, hours=-0.5)  # Tuesday 09:30 ET, trading day 2026-10-13
+
+
+async def start_with_a_gain(hub, conn, armed, gain):
+    """Sim101 armed at phase start and peak $50,000 (floor 48,000; the floor locks at +100),
+    started by NinjaTrader's first message: up `gain` realized today."""
+    arming.insert_armed(conn, replace(armed, peak_balance=50_000.0))
+    await hub.handle_stream({"type": "connected"})
+    await hub.tick(T0)
+    await hub.handle_stream(account(50_000.0 + gain, realized=gain))
+    await hub.tick(T0 + timedelta(seconds=5))
+
+
+@pytest.mark.parametrize(("gain", "room"), [(1500.0, 2000.0), (2200.0, 2100.0)])
+async def test_a_morning_gain_stays_in_the_balance_across_the_end_of_day_roll(
+    hub, conn, armed, gain, room
+):
+    """A gain gives no extra daily room (the day opens at the balance), but it is never cut from
+    the balance: after the roll raises the floor to NinjaTrader's close, the room is the real
+    one (not 500) and +2,200 is no false `breach max_drawdown` (floor +100, balance 2,200)."""
+    await start_with_a_gain(hub, conn, armed, gain)
+    s = hub.states["Sim101"]
+    assert s.setup.day_start == DayStart(50_000.0 + gain, 50_000.0)
+    [acc] = hub.status()["accounts"]
+    assert (acc["balance"], acc["today_pnl"]) == (gain, 0.0)
+    assert acc["limits"]["drawdown_remaining"] == 2000.0 + gain
+    await hub.handle_bar(bar(D2))  # rolls the day: NinjaTrader still at the same balance
+    await hub.handle_stream(account(50_000.0 + gain))  # its realized P&L reset for the new day
+    [acc] = hub.status()["accounts"]
+    assert (acc["halted"], acc["halt_kind"], acc["balance"]) == (False, None, gain)
+    assert acc["limits"]["drawdown_remaining"] == room
+    assert [r.payload["balance"] for r in journal.rows(conn, kind="day_start")] == [
+        50_000.0 + gain,
+        50_000.0 + gain,
+    ]
+
+
+async def test_a_restart_the_same_day_after_a_morning_gain_keeps_it_in_the_balance(
+    settings, client, conn, armed, clock
+):
+    first = LiveHub(settings, addon=client)
+    try:
+        await start_with_a_gain(first, conn, armed, 1500.0)
+        assert first.states["Sim101"].acct.balance == 1500.0
+    finally:
+        await first.stop()
+    clock["t"] = T0 + timedelta(hours=2)
+    second = LiveHub(settings, addon=client)
+    try:
+        await second.tick(clock["t"])
+        await second.handle_stream(account(51_500.0, realized=1500.0))
+        s = second.states["Sim101"]
+        assert (s.acct.balance, s.acct.day_start_balance) == (1500.0, 1500.0)  # not cut again
+        assert second.status()["accounts"][0]["limits"]["drawdown_remaining"] == 3500.0
+        assert kinds(conn).count("day_start") == 1
+    finally:
+        await second.stop()
+
+
+async def test_a_running_account_ignores_a_balance_at_or_below_zero(hub, conn, armed, fake):
+    """NinjaTrader before its account data loads again (e.g. after it restarts) reports 0: not a
+    figure, so no false safety-margin halt; the last figures stand (review of #217, NB2)."""
+    await hub.handle_stream({"type": "connected"})
+    await hub.tick(T0)
+    await hub.handle_stream(account(50_300.0))
+    await hub.tick(T0 + timedelta(seconds=5))
+    await hub.handle_stream(account(0.0))
+    await hub.handle_stream(account(-5.0))
+    await hub.handle_bar(bar(T0))
+    s = hub.states["Sim101"]
+    assert s.halted is None and s.nt == core.NtAccount(50_300.0, 0.0, 0.0)
+    assert [path for path, _ in fake.requests] == ["/bracket"]
+
+
+async def test_the_liquidation_level_comes_from_the_journalled_peak_not_the_pin(hub, conn, armed):
+    """Pins 50,000/50,500 (floor 48,500); a journalled peak of 51,000 lifts the floor to 49,000:
+    a first balance between the two cannot start (review of #217, NB3)."""
+    peak = {"peak": 51_000.0, "ts": (ARMED_AT + timedelta(minutes=1)).isoformat()}
+    journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "peak", peak)
+    await hub.tick(T0)
+    await hub.handle_stream(account(48_800.0))
+    s = hub.states["Sim101"]
+    assert s.halted.startswith(
+        "confirm balances: NinjaTrader's balance 48800.00 is at or below the liquidation level"
+        " 49000.00"
+    )
+    assert not s.started and hub.children == {}

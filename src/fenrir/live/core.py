@@ -69,7 +69,7 @@ class Start:
     peak: float  # highest end-of-day balance (end_of_day) or intraday equity (intraday) so far
     balance: float  # balance now
     # NinjaTrader's realized P&L today, from the same account message as `balance`: with no open
-    # journalled for today, `start` opens the day at `balance - realized_today` (#211)
+    # journalled for today, `start` opens the day at `balance - min(realized_today, 0)` (#211)
     realized_today: float | None = None
 
 
@@ -209,8 +209,10 @@ def start(
     journalled since then; the highest of them and `start.peak` is the peak (DEC-4a). `opens`: the
     "day_start" payloads journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
-    none, NinjaTrader's balance less its realized P&L today (`start.realized_today`), journalled
-    as a "day_start" row with an "alert"; without those figures, none (no brackets)."""
+    none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
+    0; a gain stays in the open, so it gives no extra daily room and `replay` never cuts it from
+    the balance), journalled as a "day_start" row with an "alert"; without those figures, none
+    (no brackets)."""
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
     opened: tuple[Log, ...] = ()
@@ -221,13 +223,12 @@ def start(
             rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
             if rows:
                 setup = replace(setup, day_start=rows[-1])  # the latest: one per arming and day
-            elif begin.realized_today is not None:  # NinjaTrader's own open, before today's fills
-                setup = replace(
-                    setup, day_start=DayStart(begin.balance - begin.realized_today, begin.peak)
-                )
+            elif begin.realized_today is not None:  # before today's losses, never above the balance
+                loss = min(begin.realized_today, 0.0)
+                setup = replace(setup, day_start=DayStart(begin.balance - loss, begin.peak))
                 message = (
                     f"no open journalled for {today}: today's opening balance is NinjaTrader's"
-                    f" balance less its realized P&L today, {setup.day_start.balance:.2f}"
+                    f" balance less its realized loss today, {setup.day_start.balance:.2f}"
                 )
                 opened = (Log("alert", {"message": message}),)
     day = setup.day_start if begin else None
@@ -424,7 +425,8 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
 def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Step:
     """One add-on `account` message for this account (validated by fenrir.bridge.client); dry
     runs ignore them. A sim/live mismatch halts until disarmed; otherwise the figures feed the
-    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a)."""
+    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a). A
+    balance at or below 0 is not a figure yet: the last figures stand."""
     mode = s.setup.armed.mode
     if mode == "dry":
         return s, ()
@@ -432,6 +434,8 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
         theirs = "sim" if account["is_sim"] else "live"
         return halt(s, f"mode mismatch: armed {mode}, NinjaTrader reports a {theirs} account")
     if s.setup.start is None:  # could not start: no phase start to set its figures against
+        return s, ()
+    if account["balance"] <= 0:  # not a figure yet (NinjaTrader before its account data loads)
         return s, ()
     nt = NtAccount(account["balance"], account["realized_pnl_today"], account["unrealized_pnl"])
     was, s = s, replace(s, nt=nt)

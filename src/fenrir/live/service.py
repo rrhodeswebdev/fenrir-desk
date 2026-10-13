@@ -303,9 +303,9 @@ class LiveHub:
                     )
             case "account":
                 async with self._lock:
-                    if msg["id"] in self.waiting:  # never an arming changed since the last sync
-                        await self._sync(_now())
                     # its balance now: the account can start; none yet (<= 0) is not a figure
+                    if msg["id"] in self.waiting and msg["balance"] > 0:
+                        await self._sync(_now())  # never an arming changed since the last sync
                     if msg["id"] in self.waiting and msg["balance"] > 0:
                         a, setup = self.waiting.pop(msg["id"])
                         figures = msg["balance"], msg["realized_pnl_today"]
@@ -331,7 +331,8 @@ class LiveHub:
         delete), plus an "alert" with the outcome; no bar or fill runs between that flatten and
         the disarm. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every
         running account is halted in memory instead and `killed` halts a row armed by then when
-        the next tick starts it (the kill does not sync, so loads no strategy); when only
+        it starts (the next tick, or for a sim or live row waiting for NinjaTrader, its first
+        account message; the kill does not sync, so loads no strategy); when only
         stopping the runners fails, the running accounts are halted. A halt row that cannot be
         written does not stop the deletes. `ok` is false, with the errors, when either
         `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
@@ -364,7 +365,7 @@ class LiveHub:
                 log.exception("kill switch: disarm failed")
                 left = ", ".join(a.account for a in armed[len(deleted) :])
                 disarm = f"disarm failed for {left}: {_error(e)}"
-            if disarm:  # a row armed by the kill may still be: the next tick starts it halted
+            if disarm:  # a row armed by the kill may still be: it starts halted (tick or stream)
                 self.killed = (at, f"kill switch: {disarm}")
             else:  # not after a failed disarm: its sync would load pending rows' strategies
                 try:

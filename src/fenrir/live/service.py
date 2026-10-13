@@ -154,6 +154,21 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
+def _flattened(first: str | None, again: str | None) -> str | None:
+    """The kill's two `/flatten-all` errors (before the hub lock, then under it) as one, naming
+    which failed; None when both landed."""
+    if first and again:
+        if first == again:
+            return f"both flatten-alls failed: {first}"
+        return (
+            f"first flatten-all (before the lock) failed: {first}; "
+            f"second flatten-all (under the lock) failed: {again}"
+        )
+    if first:
+        return f"first flatten-all (before the lock) failed: {first}; the second landed"
+    return again and f"second flatten-all (under the lock) failed: {again}"
+
+
 class LiveHub:
     """Runs every armed account on live bars. Opens nothing until something is armed:
     `<private_dir>/fenrir.db` is opened once it exists, never created here."""
@@ -273,25 +288,23 @@ class LiveHub:
 
     async def kill(self) -> dict[str, Any]:
         """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
-        (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
-        stopped), each journalled as the disarm route does (its "halt" row before the delete),
-        plus an "alert" with the outcome. Under the hub lock, so no bar or fill runs between the
-        two. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every running
-        account is halted in memory instead and `killed` halts a row armed by then when a tick
-        starts it; when only stopping the runners fails, the running accounts are halted. A halt
-        row that cannot be written does not stop the deletes. `ok` is false, with the errors,
-        when `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
+        (`/flatten-all`) at once, before the hub lock, so a tick or bar holding it (a strategy
+        load, a step, a post) never delays it. Then, under the lock: `/flatten-all` again, which
+        closes whatever a bar opened while the kill waited, and disarm every account (runner and
+        child stopped), each journalled as the disarm route does (its "halt" row before the
+        delete), plus an "alert" with the outcome; no bar or fill runs between that flatten and
+        the disarm. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every
+        running account is halted in memory instead and `killed` halts a row armed by then when
+        the next tick starts it (the kill does not sync, so loads no strategy); when only
+        stopping the runners fails, the running accounts are halted. A halt row that cannot be
+        written does not stop the deletes. `ok` is false, with the errors, when either
+        `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
         account was armed, or when any of those failed."""
+        first = await self._flatten_all()
         async with self._lock:
             live = any(s.setup.armed.mode != "dry" for s in self.states.values())
-            flat = None
-            if self.addon is not None:
-                try:  # a fresh id per press: a retry inside the client is still deduped
-                    ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
-                    if not (ack.accepted or ack.duplicate):
-                        flat = ack.error or "refused"
-                except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
-                    flat = f"{type(e).__name__}: {e}"
+            again = await self._flatten_all()
+            flat = _flattened(first, again)
             conn, armed, deleted = None, (), []
             disarm = unjournalled = unstopped = None
             try:
@@ -315,13 +328,14 @@ class LiveHub:
                 log.exception("kill switch: disarm failed")
                 left = ", ".join(a.account for a in armed[len(deleted) :])
                 disarm = f"disarm failed for {left}: {_error(e)}"
-            if disarm:  # a row armed by the kill may still be: it starts halted
+            if disarm:  # a row armed by the kill may still be: the next tick starts it halted
                 self.killed = (at, f"kill switch: {disarm}")
-            try:
-                await self._sync(_now())
-            except Exception as e:
-                log.exception("kill switch: runners not stopped")
-                unstopped = f"disarmed, but stopping the runners failed: {_error(e)}"
+            else:  # not after a failed disarm: its sync would load pending rows' strategies
+                try:
+                    await self._sync(_now())
+                except Exception as e:
+                    log.exception("kill switch: runners not stopped")
+                    unstopped = f"disarmed, but stopping the runners failed: {_error(e)}"
             if why := disarm or unstopped:  # no new entries until disarmed and stopped
                 for account in list(self.states):
                     s = self.states[account]
@@ -329,16 +343,31 @@ class LiveHub:
                         await self._apply(account, *core.halt(s, f"kill switch: {why}"))
             if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
                 flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
-            done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
+            if not flat:
+                done = "flattened and cancelled all"
+            elif self.addon is None:
+                done = f"flatten all failed: {flat}"
+            else:
+                done = flat  # names which flatten-all failed
             try:
                 for a in deleted:
                     alert = {"message": f"kill switch: disarmed; {done}"}
                     journal.write(conn, _now(), a.account, "alert", alert)
             except Exception:  # disarmed and flattened all the same: report that, not this
                 log.exception("kill switch not journalled")
-            unstopped = None if disarm else unstopped  # "disarmed, but" is untrue after one
             errors = [e for e in (flat, disarm, unjournalled, unstopped) if e]
             return {"ok": not errors, "error": "; ".join(errors) or None}
+
+    async def _flatten_all(self) -> str | None:
+        """Post `/flatten-all` under a fresh id (each post its own request; a retry inside the
+        client is still deduped); its error, None when it landed or no add-on is configured."""
+        if self.addon is None:
+            return None
+        try:
+            ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
+        except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
+            return f"{type(e).__name__}: {e}"
+        return None if ack.accepted or ack.duplicate else ack.error or "refused"
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:

@@ -151,6 +151,19 @@ def test_resolve_a_running_account(client):
     assert client.post("/api/live/resolve", json={"account": "Sim101"}).json() == {"ok": False}
 
 
+def test_resolve_reports_any_other_hub_error_as_a_500_not_a_404(settings, monkeypatch):
+    app = create_app(settings, KEY, "c" * 22, None, port=8000)
+    c = TestClient(app, base_url=BASE, headers={"origin": BASE}, raise_server_exceptions=False)
+    c.cookies.set(SESSION_COOKIE, KEY)
+    app.state.live.states["Sim101"] = core.start(make_setup(make_rules()), T0)[0]
+
+    async def outside_the_calendar(*args):
+        raise ValueError("no front month for 2031-01-02")
+
+    monkeypatch.setattr(app.state.live, "_reconcile", outside_the_calendar)
+    assert c.post("/api/live/resolve", json={"account": "Sim101"}).status_code == 500
+
+
 def test_resolve_needs_exactly_an_account(client):
     assert client.post("/api/live/resolve", json={}).status_code == 422
     extra = {"account": "Sim101", "force": True}

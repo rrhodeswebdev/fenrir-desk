@@ -12,6 +12,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from fenrir.bridge.client import Ack
 from fenrir.live import journal
 from fenrir.live.service import LiveHub
 from fenrir.server.app import create_app
@@ -51,6 +52,7 @@ class FakeAddon:
     def __init__(self, down: bool = False, malformed: bool = False):
         self.down = down
         self.malformed = malformed
+        self.flattened: list[str] = []
 
     async def accounts(self):
         if self.down:
@@ -58,6 +60,12 @@ class FakeAddon:
         if self.malformed:  # what AddonClient raises for a reply that fails validation
             raise ValueError("accounts[0].is_sim: wrong type")
         return NT_ACCOUNTS
+
+    async def flatten(self, client_id, account):
+        if self.down:
+            raise httpx.ConnectError("NinjaTrader is down")
+        self.flattened.append(account)
+        return Ack(True, False, None)
 
 
 @pytest.fixture
@@ -83,7 +91,7 @@ def path(settings) -> Path:
 @pytest.fixture
 def client(settings) -> TestClient:
     app = create_app(settings, KEY, "c" * 22, None, port=8000)
-    app.state.addon = FakeAddon()
+    app.state.addon = app.state.live.addon = FakeAddon()
     c = TestClient(app, base_url=BASE, headers={"origin": BASE})
     c.cookies.set(SESSION_COOKIE, KEY)
     return c
@@ -344,33 +352,64 @@ def test_a_decide_value_error_is_422(client, settings, path, monkeypatch):
     assert client.post("/api/arming/arm", json=body(path)).status_code == 422
 
 
-def test_disarm_removes_the_row_and_journals_a_halt(client, settings, path):
+def test_disarm_flattens_removes_the_row_and_journals_a_halt(client, settings, path):
     report(settings, path)
     client.post("/api/arming/arm", json=body(path))
-    assert client.post("/api/arming/disarm", json={"account": "SIM1"}).json() == {"ok": True}
+    res = client.post("/api/arming/disarm", json={"account": "SIM1"})
+    assert res.json() == {"ok": True, "error": None}
+    # #223: flattened before the hub lock and again under it
+    assert client.app.state.live.addon.flattened == ["SIM1", "SIM1"]
     assert armed(client) == []
     conn = journal.open_ro(settings.private_dir / "fenrir.db")
-    [row] = journal.rows(conn, "SIM1")
+    [halt, alert] = journal.rows(conn, "SIM1")
     conn.close()
-    assert (row.kind, row.payload) == ("halt", {"reason": "disarmed", "kind": None, "until": None})
+    assert (halt.kind, halt.payload) == (
+        "halt",
+        {"reason": "disarmed", "kind": None, "until": None},
+    )
+    assert alert.payload == {"message": "disarmed; flattened, working orders cancelled"}
     # nothing armed: nothing journalled
-    assert client.post("/api/arming/disarm", json={"account": "SIM1"}).json() == {"ok": False}
+    res = client.post("/api/arming/disarm", json={"account": "SIM1"})
+    assert res.json() == {"ok": False, "error": None}
 
 
-def test_a_failed_disarm_journals_no_halt_and_keeps_the_row(client, settings, path):
-    """The halt row and the delete are one transaction: both or neither."""
+def test_disarm_before_anything_was_armed_creates_no_database(client, settings):
+    assert client.post("/api/arming/disarm", json={"account": "SIM1"}).json() == {
+        "ok": False,
+        "error": None,
+    }
+    assert not (settings.private_dir / "fenrir.db").exists()
+
+
+def test_a_disarm_whose_flatten_fails_keeps_the_row_and_says_the_position_may_be_open(
+    client, settings, path
+):
+    """#223, fail closed: NinjaTrader cannot flatten, so the account stays armed and halted."""
     report(settings, path)
     client.post("/api/arming/arm", json=body(path))
+    client.app.state.live.addon.down = True
+    res = client.post("/api/arming/disarm", json={"account": "SIM1"})
+    assert res.status_code == 200 and res.json()["ok"] is False
+    assert "the position may still be open" in res.json()["error"]
+    assert [a["account"] for a in armed(client)] == ["SIM1"]
+
+
+def test_a_failed_disarm_journals_no_disarmed_row_and_keeps_the_row(client, settings, path):
+    """The halt row and the delete are one transaction: both or neither."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path, account="paper", mode="dry"))
     db = settings.private_dir / "fenrir.db"
     with closing(sqlite3.connect(db)) as c:
         c.execute(
             "CREATE TRIGGER no_delete BEFORE DELETE ON armed BEGIN SELECT RAISE(ABORT, 'x'); END"
         )
-    with pytest.raises(sqlite3.IntegrityError):
-        client.post("/api/arming/disarm", json={"account": "SIM1"})
-    assert [a["account"] for a in armed(client)] == ["SIM1"]
+    res = client.post("/api/arming/disarm", json={"account": "paper"}).json()
+    assert res["ok"] is False and "IntegrityError" in res["error"]
+    assert [a["account"] for a in armed(client)] == ["paper"]
     with closing(journal.open_ro(db)) as conn:
-        assert journal.rows(conn) == ()
+        assert {"reason": "disarmed", "kind": None, "until": None} not in [
+            r.payload for r in journal.rows(conn)
+        ]
 
 
 def test_rearming_stamps_a_fresh_armed_at(client, settings, path, monkeypatch):

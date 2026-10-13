@@ -42,7 +42,7 @@ from fenrir.core.sessions import trading_day
 from fenrir.data.live import FeedStopped
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
-from fenrir.live import core, journal
+from fenrir.live import arming, core, journal
 from fenrir.live.arming import Armed, delete_armed, list_armed
 from fenrir.live.core import Log, RunnerState, Send, Setup, Start
 from fenrir.live.step_child import ctx_json
@@ -405,6 +405,83 @@ class LiveHub:
         except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
             return f"{type(e).__name__}: {e}"
         return None if ack.accepted or ack.duplicate else ack.error or "refused"
+
+    async def disarm(self, account: str) -> dict[str, Any]:
+        """The Disarm button (#223): a sim or live account's `/flatten` (its position closed, its
+        working orders cancelled) at once, before the hub lock, as the kill does; then, under the
+        lock, `/flatten` again (closing what a bar opened meanwhile), the `"halt"` row and the
+        delete (`arming.disarm`) and a sync, so nothing opens after that flatten. The flatten
+        under the lock decides: when it does not land, or the disarm cannot be written, the row
+        stays and the account is halted (`_keep`). Dry runs never flatten. `{ok: false, error:
+        null}` when the account is not armed."""
+        with contextlib.suppress(Exception):  # unreadable: the read under the lock reports it
+            if (a := self._armed(account)) is not None and a.mode != "dry":
+                if first := await self._flatten(account):  # the one under the lock decides
+                    log.warning("disarm %s: flatten before the lock failed: %s", account, first)
+        async with self._lock:
+            try:
+                if (a := self._armed(account)) is None:
+                    return {"ok": False, "error": None}
+                if a.mode != "dry" and (error := await self._flatten(account)):
+                    return await self._keep(
+                        account,
+                        f"flatten failed: {error}; the position may still be open: "
+                        "check NinjaTrader",
+                    )
+                now = _now()
+                if not arming.disarm(self.conn, account, now):
+                    return {"ok": False, "error": None}
+            except Exception as e:
+                log.exception("disarm %s failed", account)
+                return await self._keep(account, _error(e))
+            if a.mode != "dry":
+                try:
+                    alert = {"message": "disarmed; flattened, working orders cancelled"}
+                    journal.write(self.conn, _now(), account, "alert", alert)
+                except Exception:  # disarmed and flattened all the same
+                    log.exception("disarm %s not journalled", account)
+            try:
+                await self._sync(now)
+            except Exception as e:  # the row is gone: halted until the next sync stops it
+                log.exception("disarm %s: runner not stopped", account)
+                why = f"disarmed, but stopping the runner failed: {_error(e)}"
+                if (s := self.states.get(account)) is not None:
+                    with contextlib.suppress(Exception):  # its halt row is queued and retried
+                        await self._apply(account, *core.halt(s, why))
+                return {"ok": False, "error": why}
+            return {"ok": True, "error": None}
+
+    def _armed(self, account: str) -> Armed | None:
+        conn = self._db()
+        return next((a for a in list_armed(conn) if a.account == account), None) if conn else None
+
+    async def _flatten(self, account: str) -> str | None:
+        """Post `account`'s `/flatten` under a fresh id; its error, None when it landed."""
+        if self.addon is None:
+            return "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
+        try:
+            ack = await self.addon.flatten(f"disarm-{secrets.token_hex(8)}", account)
+        except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
+            return _error(e)
+        return None if ack.accepted or ack.duplicate else ack.error or "refused"
+
+    async def _keep(self, account: str, cause: str) -> dict[str, Any]:
+        """A disarm that could not finish (call under the lock): the row stays armed and the
+        account is halted, with an alert; journalled, so a row not running yet starts halted
+        and a restart keeps it so."""
+        why = f"disarm failed: {cause}; still armed, halted until disarmed"
+        alert = Log("alert", {"message": why})
+        try:
+            if (s := self.states.get(account)) is not None:
+                s, out = core.halt(s, why)
+                await self._apply(account, s, (*out, alert))  # halted in memory even if refused
+            else:  # waiting for NinjaTrader, broken, or armed since the last sync
+                halt = {"reason": why, "kind": None, "until": None}  # as core.halt journals
+                journal.write(self.conn, _now(), account, "halt", halt)
+                journal.write(self.conn, _now(), account, alert.kind, alert.payload)
+        except Exception:
+            log.exception("disarm %s failed; its halt not journalled", account)
+        return {"ok": False, "error": why}
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:

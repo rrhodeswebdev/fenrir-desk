@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import timedelta
+from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, NQ, bar, make_rules, scripted
@@ -100,6 +100,18 @@ def test_one_flatten_at_a_time():
     assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
     s, effects = decide_now(s, [Flatten()])
     assert sends(effects) == [] and effects[1].payload["sent"] is False
+
+
+def test_roll_window_bars_still_mark_and_flatten_a_position():
+    # 2025-12-16 is in NQ Z25 -> H26's roll window: step never runs, risk management still does
+    day = date(2025, 12, 16)
+    s = started(sim(), at("09:30", day))
+    s = replace(s, position=core.Position(1, 20000.0, 19990.0, 20020.0))  # e.g. adopted
+    late = at("16:39", day, c=20010.0)
+    s, effects = core.on_bar(s, late)
+    assert s.equity[-1] == (late.ts, 200.0) and s.bars == ()
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
+    assert kinds(effects)[-1] == "bar"
 
 
 def test_rejected_and_replaced_brackets_are_not_sent():

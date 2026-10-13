@@ -116,6 +116,14 @@ async def test_strategy_state_carries_across_bars(hub, conn, armed, tmp_path):
     assert kinds(conn) == ["bar", "bar", "bar", "action"]
 
 
+async def test_roll_window_bars_never_reach_step(hub, conn, armed, clock):
+    roll = datetime(2026, 12, 15, 14, 0, tzinfo=UTC)  # in NQ Z26 -> H27's roll window
+    clock["t"] = roll
+    arming.insert_armed(conn, armed)
+    await hub.handle_bar(bar(roll, contract="NQH27"))
+    assert kinds(conn) == ["bar"]  # ALWAYS's Bracket is never asked for
+
+
 async def test_ignores_bars_of_other_series(hub, conn, armed):
     arming.insert_armed(conn, armed)
     await hub.handle_bar(bar(T0, contract="ESZ26"))

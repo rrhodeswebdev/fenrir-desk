@@ -2,7 +2,8 @@
 
 UI-only: no CLI counterpart, and the terminal never has the session. Every rule is in
 `fenrir.live.arming.decide`; this gathers its inputs and writes its answer. The strategy file is
-hashed, never executed (DEC-1). The hub picks up a change to `armed` on its next tick.
+hashed, never executed (DEC-1). The hub picks up an arm on its next tick; a disarm goes through
+the hub (`LiveHub.disarm`), which flattens a sim or live account first (#223).
 """
 
 import hashlib
@@ -32,7 +33,6 @@ from fenrir.live.arming import (
     insert_armed,
     list_armed,
 )
-from fenrir.live.arming import disarm as disarm_armed
 from fenrir.rules.loader import read_account
 from fenrir.rules.state import Phase
 from fenrir.server.jobs_runner import STRATEGY_MAX
@@ -186,10 +186,7 @@ def _arm(
 
 
 @router.post("/disarm")
-def disarm(body: DisarmBody, request: Request) -> dict[str, bool]:
-    path = _db(request.app.state.settings)
-    if not path.exists():
-        return {"ok": False}
-    with closing(journal.open_db(path)) as conn:
-        # the "halt" row and the delete in one transaction (the hub restores halts, #169)
-        return {"ok": disarm_armed(conn, body.account, _now())}
+async def disarm(body: DisarmBody, request: Request) -> dict[str, Any]:
+    # async, on the hub's loop: a sim or live account is flattened first, then disarmed under
+    # the hub's lock (#223); the hub opens no fenrir.db that does not exist
+    return await request.app.state.live.disarm(body.account)

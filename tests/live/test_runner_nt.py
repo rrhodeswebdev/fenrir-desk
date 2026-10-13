@@ -602,6 +602,18 @@ def test_a_later_day_restart_at_ninjatraders_floor_cannot_start():
     assert restart(50_200.01, halts, kept)[0].started
 
 
+def test_a_later_day_restart_takes_the_highest_nt_peak_not_the_latest_row():
+    """M13: the D2 close takes NinjaTrader's raise at 51,000 (no gap: the floor -1,000 is below
+    the app's 0), a peak lower than the D1 gap's 52,200. NinjaTrader's peak is still 52,200, so
+    a restart on D4 takes it, not the latest row's 51,000."""
+    s, halts, kept = gap_rolled()
+    s = core.on_account(s, account(balance=51_000.0, today=-1200.0), at("09:30", D2).ts)[0]
+    s, effects = core.on_bar(s, at("09:30", D3))
+    assert peaks(effects) == [{"peak": 51_000.0, "ts": iso(at("09:30", D3).ts)}]
+    s, _ = restart(51_000.0, halts, kept + peaks(effects), day=D3 + timedelta(days=1))
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (1000.0, 2200.0, 200.0)
+
+
 def test_a_restart_with_peak_rows_journalled_before_225_still_starts():
     """A "peak" row from before #225 has no "nt_peak": it counts as the app's peak, as before."""
     kept = [{"peak": 50_700.0, "ts": iso(T.ts)}]
@@ -622,6 +634,21 @@ def test_an_intraday_gap_halt_journals_ninjatraders_peak_each_time_it_rises():
         assert effects == () and s.acct.floor == -2000.0
     s, effects = core.on_account(s, account(balance=52_300.0, today=2300.0), ts[3])
     assert peaks(effects) == [{"peak": 50_000.0, "ts": iso(ts[3]), "nt_peak": 52_300.0}]
+
+
+def test_an_intraday_gap_message_still_journals_the_apps_own_raise_when_theirs_did_not_rise():
+    """M14: after the halt's row (NinjaTrader at 54,000), the app books +1,000 with no bar since;
+    the next message, NinjaTrader's peak where it was, raises the app's peak to its own balance
+    and journals that alone."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=54_000.0, today=4000.0), T.ts)
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    exit_ = {**fill_at(T.ts + timedelta(minutes=1, seconds=10), qty=-1), "price": 20050.0}
+    s, _ = core.on_fill(s, exit_)
+    ts = T.ts + timedelta(minutes=1, seconds=12)
+    s, effects = core.on_account(s, account(balance=54_000.0, today=4000.0), ts)
+    assert s.halted.startswith(GAP_INTRADAY) and (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+    assert peaks(effects) == [{"peak": 51_000.0, "ts": iso(ts)}]
 
 
 def test_a_later_day_intraday_restart_under_the_gap_halt_takes_ninjatraders_highest_peak():

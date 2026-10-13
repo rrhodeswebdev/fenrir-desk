@@ -16,7 +16,9 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { errorText, pageError } from '@/errorText'
@@ -443,8 +445,20 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
   )
 }
 
-/** `POST /api/arming/disarm`: `ok: false` with no error when the account was not armed. */
-export type DisarmResult = { ok: boolean; error: string | null }
+/** `POST /api/arming/disarm`: `ok: false` with no error when the account was not armed; `unmanaged` when the
+ * add-on refused the flatten as `unmanaged_account`, the only case a disarm without flatten is taken (#230). */
+export type DisarmResult = { ok: boolean; error: string | null; unmanaged?: boolean }
+
+/** The disarm's body: `flatten: false` only for the confirmed disarm without flatten (#230). */
+export const disarmBody = (account: string, flatten: boolean) => (flatten ? { account } : { account, flatten: false })
+
+/** The second confirmation, offered only after the add-on refused the flatten as unmanaged (#230). */
+export const unmanagedText = (account: string): string =>
+  `NinjaTrader's Fenrir add-on no longer manages ${account}, so Fenrir can neither see nor flatten it there. Disarm without flatten stops the runner without closing anything: any open position or working order on ${account} is yours to close in NinjaTrader. If the add-on manages it again by then, it is flattened first as usual.`
+
+/** What the user ticks before Disarm without flatten is enabled (#230). */
+export const unmanagedConfirm = (account: string): string =>
+  `NinjaTrader no longer manages ${account}, and I will close any position or working order there in NinjaTrader myself.`
 
 /** The disarm confirmation: a sim or live disarm flattens the account in NinjaTrader first (#223). */
 export const disarmText = (mode: Mode): string =>
@@ -456,14 +470,19 @@ export const disarmText = (mode: Mode): string =>
 export const disarmResultText = (account: string, r: DisarmResult): string | null =>
   r.ok ? null : r.error == null ? `${account} was not armed: nothing was disarmed.` : `${account}: ${r.error.replace(/[.\s]+$/, '')}.`
 
-/** Disarm one account, after a confirmation. */
+/** Disarm one account, after a confirmation; an account the add-on refused as unmanaged gets a second, ticked
+ * confirmation for Disarm without flatten (#230). */
 function Disarm({ account, mode }: { account: string; mode: Mode }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
+  const [confirmed, setConfirmed] = useState(false)
+  const confirmId = useId()
   const send = useSingleFlight()
   const refresh = () => void qc.invalidateQueries({ queryKey: ['arming'], exact: true })
   const disarm = useMutation({
-    mutationFn: () => apiFetch<DisarmResult>('/api/arming/disarm', { method: 'POST', body: JSON.stringify({ account }) }),
+    mutationFn: (flatten: boolean) =>
+      apiFetch<DisarmResult>('/api/arming/disarm', { method: 'POST', body: JSON.stringify(disarmBody(account, flatten)) }),
+    onMutate: () => setConfirmed(false),
     // ok: false (not armed: the kill switch or another tab disarmed it first; or the flatten failed and it stays
     // armed and halted) stays open to say so; closing refreshes
     onSuccess: (r) => {
@@ -473,6 +492,7 @@ function Disarm({ account, mode }: { account: string; mode: Mode }) {
     },
   })
   const failed = disarm.data && disarmResultText(account, disarm.data)
+  const unmanaged = disarm.data?.ok === false && disarm.data.unmanaged === true
   return (
     <AlertDialog
       open={open}
@@ -480,6 +500,7 @@ function Disarm({ account, mode }: { account: string; mode: Mode }) {
         if (disarm.isPending) return
         if (!o && disarm.data?.ok === false) refresh()
         setOpen(o)
+        setConfirmed(false)
         disarm.reset()
       }}
     >
@@ -498,8 +519,22 @@ function Disarm({ account, mode }: { account: string; mode: Mode }) {
             {disarm.error != null ? errorText(disarm.error) : failed}
           </p>
         )}
+        {unmanaged && (
+          <div className="grid gap-3">
+            <p>{unmanagedText(account)}</p>
+            <div className="flex items-start gap-3">
+              <Checkbox id={confirmId} checked={confirmed} disabled={disarm.isPending} onCheckedChange={(c) => setConfirmed(c === true)} />
+              <Label htmlFor={confirmId}>{unmanagedConfirm(account)}</Label>
+            </div>
+          </div>
+        )}
         <AlertDialogFooter>
-          <Button variant="destructive" disabled={disarm.isPending} onClick={() => send(disarm, undefined)}>
+          {unmanaged && (
+            <Button variant="destructive" disabled={!confirmed || disarm.isPending} onClick={() => send(disarm, false)}>
+              Disarm without flatten
+            </Button>
+          )}
+          <Button variant="destructive" disabled={disarm.isPending} onClick={() => send(disarm, true)}>
             {mode === 'dry' ? 'Disarm' : 'Flatten and disarm'}
           </Button>
           <AlertDialogCancel disabled={disarm.isPending}>Cancel</AlertDialogCancel>

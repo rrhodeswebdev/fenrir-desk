@@ -18,11 +18,14 @@ import {
   armErrorText,
   armedAt,
   confirmBody,
+  disarmBody,
   disarmResultText,
   disarmText,
   needsConfirmation,
   refusal,
   targets,
+  unmanagedConfirm,
+  unmanagedText,
 } from './strategies'
 
 const summary: Summary = {
@@ -148,6 +151,20 @@ describe('arming helpers', () => {
     expect(disarmResultText('LFE0507', { ok: false, error: null })).toBe('LFE0507 was not armed: nothing was disarmed.')
     const failed = 'disarm failed: flatten failed: refused; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
     expect(disarmResultText('LFE0507', { ok: false, error: failed })).toBe(`LFE0507: ${failed}.`)
+  })
+
+  it('sends flatten: false only for the confirmed disarm without flatten (#230)', () => {
+    expect(disarmBody('LFE0507', true)).toEqual({ account: 'LFE0507' })
+    expect(disarmBody('LFE0507', false)).toEqual({ account: 'LFE0507', flatten: false })
+  })
+
+  it('says a disarm without flatten leaves the position and orders to the user in NinjaTrader (#230)', () => {
+    expect(unmanagedText('LFE0507')).toBe(
+      "NinjaTrader's Fenrir add-on no longer manages LFE0507, so Fenrir can neither see nor flatten it there. Disarm without flatten stops the runner without closing anything: any open position or working order on LFE0507 is yours to close in NinjaTrader. If the add-on manages it again by then, it is flattened first as usual.",
+    )
+    expect(unmanagedConfirm('LFE0507')).toBe(
+      'NinjaTrader no longer manages LFE0507, and I will close any position or working order there in NinjaTrader myself.',
+    )
   })
 })
 

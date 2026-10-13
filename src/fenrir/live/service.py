@@ -80,6 +80,13 @@ FEED_ALERT_EVERY = timedelta(minutes=15)
 RESTORED = frozenset({"halt", "peak", "day_start"})  # the kinds core.start reads back
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
+# the add-on's refusal for an account not in its managed_accounts (DEC-5): the only reason a
+# disarm without flatten may skip the flatten (#230)
+UNMANAGED = "unmanaged_account"
+SKIPPED = (
+    "disarmed without its flatten: the NinjaTrader add-on no longer manages this account"
+    f" ({UNMANAGED}); any position or working order there must be closed in NinjaTrader"
+)
 # warm-up (#79): the store's last days; all of it when these hold fewer than a window of bars
 HISTORY = timedelta(days=14)
 WARMING = "warming up: replaying today's bars through the strategy; no new entries until done"
@@ -254,7 +261,7 @@ class LiveHub:
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
         self.killed: tuple[datetime, str] | None = None
-        # per account, (time, reason) of a failed disarm whose halt row sqlite refused (#227)
+        # per account, (time, reason) of a kept disarm of a row not running yet (#227)
         self.held: dict[str, tuple[datetime, str]] = {}
         self._secret = secret
         self._timeout = step_timeout
@@ -442,14 +449,17 @@ class LiveHub:
             return f"{type(e).__name__}: {e}"
         return None if ack.accepted or ack.duplicate else ack.error or "refused"
 
-    async def disarm(self, account: str) -> dict[str, Any]:
+    async def disarm(self, account: str, flatten: bool = True) -> dict[str, Any]:
         """The Disarm button (#223): a sim or live account's `/flatten` (its position closed, its
         working orders cancelled) at once, before the hub lock, as the kill does; then, under the
         lock, `/flatten` again (closing what a bar opened meanwhile), the `"halt"` row and the
         delete (`arming.disarm`) and a sync, so nothing opens after that flatten. The flatten
         under the lock decides: when it does not land, or the disarm cannot be written, the row
-        stays and the account is halted (`_keep`). Dry runs never flatten. `{ok: false, error:
-        null}` when the account is not armed."""
+        stays and the account is halted (`_keep`); when the add-on refused it as `unmanaged_account`
+        the answer adds `unmanaged: true`. Only then does `flatten=False` (the user's confirmed
+        disarm without flatten, #230) disarm the account anyway, with an alert naming the skipped
+        flatten: both flattens are still posted, so it never skips one that lands. Dry runs never
+        flatten. `{ok: false, error: null}` when the account is not armed."""
         with contextlib.suppress(Exception):  # unreadable: the read under the lock reports it
             if (a := self._armed(account)) is not None and a.mode != "dry":
                 if first := await self._flatten(account):  # the one under the lock decides
@@ -466,13 +476,18 @@ class LiveHub:
                 )
             if a is None:
                 return {"ok": False, "error": None}
+            skipped = False  # the flatten, refused as unmanaged, on the user's confirmation
             try:
                 if a.mode != "dry" and (error := await self._flatten(account)):
-                    return await self._keep(
-                        account,
-                        f"flatten failed: {error}; the position may still be open: "
-                        "check NinjaTrader",
-                    )
+                    if flatten or error != UNMANAGED:
+                        kept = await self._keep(
+                            account,
+                            f"flatten failed: {error}; the position may still be open: "
+                            "check NinjaTrader",
+                        )
+                        return (kept | {"unmanaged": True}) if error == UNMANAGED else kept
+                    log.warning("disarm %s: %s; disarmed without its flatten", account, error)
+                    skipped = True
                 now = _now()
                 if not arming.disarm(self.conn, account, now):
                     return {"ok": False, "error": None}
@@ -482,7 +497,8 @@ class LiveHub:
                 return await self._keep(account, _error(e))
             if a.mode != "dry":
                 try:
-                    alert = {"message": "disarmed; flattened, working orders cancelled"}
+                    done = SKIPPED if skipped else "disarmed; flattened, working orders cancelled"
+                    alert = {"message": done}
                     journal.write(self.conn, _now(), account, "alert", alert)
                 except Exception:  # disarmed and flattened all the same
                     log.exception("disarm %s not journalled", account)
@@ -502,7 +518,9 @@ class LiveHub:
         return next((a for a in list_armed(conn) if a.account == account), None) if conn else None
 
     async def _flatten(self, account: str) -> str | None:
-        """Post `account`'s `/flatten` under a fresh id; its error, None when it landed."""
+        """Post `account`'s `/flatten` under a fresh id; its error, None when it landed. A refusal
+        is the add-on's own error text (`UNMANAGED` only from the add-on), anything else
+        `<ExceptionType>: <message>` or the not-configured text."""
         if self.addon is None:
             return "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
         try:
@@ -527,7 +545,8 @@ class LiveHub:
                 try:
                     await self._apply(account, s, (*out, alert))  # halted in memory if refused
                 finally:
-                    written = Log("halt", halt) not in self.unwritten.get(account, ())
+                    # any halt row still queued (an earlier kept disarm's, when already halted)
+                    written = not any(r.kind == "halt" for r in self.unwritten.get(account, ()))
             else:  # waiting for NinjaTrader, broken, or armed since the last sync
                 self.held[account] = (_now(), why)
                 journal.write(self.conn, _now(), account, "halt", halt)
@@ -1030,8 +1049,8 @@ class LiveHub:
         return bars[-core.WINDOW :], last
 
     def _killed(self, a: Armed) -> str | None:
-        """The halt reason of a kill whose disarm failed, or of a failed disarm of `a`'s account
-        whose halt was not journalled (`held`), when `a` was armed by then."""
+        """The halt reason of a kill whose disarm failed, or of a kept disarm of `a`'s account
+        while its row was not running yet (`held`), when `a` was armed by then."""
         for mark in (self.killed, self.held.get(a.account)):
             if mark and a.armed_at <= mark[0]:
                 return mark[1]

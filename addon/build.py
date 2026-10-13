@@ -17,7 +17,7 @@ OUT = ADDON / "dist" / "FenrirAddOn.zip"
 # the NinjaTrader.Core.dll version the add-on is compile-checked against
 NT_VERSION = "8.1.8.2"
 INFO_XML = (
-    '﻿<?xml version="1.0" encoding="utf-8"?>\r\n'
+    '\ufeff<?xml version="1.0" encoding="utf-8"?>\r\n'
     "<NinjaTrader>\r\n"
     "  <Export>\r\n"
     f"    <Version>{NT_VERSION}</Version>\r\n"

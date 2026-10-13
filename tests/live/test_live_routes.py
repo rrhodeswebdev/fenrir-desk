@@ -110,6 +110,7 @@ def test_journal_without_an_account_has_every_account_and_skips_kinds(client, se
     journal.write(conn, T0, "Sim101", "bar", {"n": 1})
     journal.write(conn, T0, "Sim102", "halt", {"n": 2})
     journal.write(conn, T0, "Gone", "peak", {"n": 3})  # e.g. disarmed since: still today's
+    journal.write(conn, T0, "Sim102", "day_start", {"n": 5})  # #211: the open, as a peak
     journal.write(conn, datetime(2026, 10, 12, 22, 0, tzinfo=UTC), "Sim101", "fill", {"n": 4})
     conn.close()
     every = client.get("/api/live/journal?day=2026-10-12").json()
@@ -117,8 +118,9 @@ def test_journal_without_an_account_has_every_account_and_skips_kinds(client, se
         ("Sim101", 1),
         ("Sim102", 2),
         ("Gone", 3),
+        ("Sim102", 5),
     ]
-    tape = client.get("/api/live/journal?day=2026-10-12&skip=bar&skip=peak").json()
+    tape = client.get("/api/live/journal?day=2026-10-12&skip=bar&skip=peak&skip=day_start").json()
     assert [r["payload"]["n"] for r in tape] == [2]
     one = client.get("/api/live/journal?account=Sim101&day=2026-10-12&skip=halt").json()
     assert [r["payload"]["n"] for r in one] == [1]

@@ -45,8 +45,7 @@ def journal_rows(
         # ts as status writes it ("+00:00"), not pydantic's "Z"
         return [
             asdict(r) | {"ts": r.ts.isoformat()}
-            for r in journal.rows(conn, account, day)
-            if r.kind not in (skip or ())
+            for r in journal.rows(conn, account, day, skip=skip or ())
         ]
 
 

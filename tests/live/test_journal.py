@@ -66,6 +66,39 @@ def test_rows_filter_by_account_and_trading_day(conn):
     assert [r.payload["n"] for r in journal.rows(conn, day=date(2026, 10, 12))] == [1, 2, 3, 5]
 
 
+def test_rows_skip_kinds_in_sql(conn):
+    t = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)
+    for n, kind in enumerate(("bar", "fill", "peak", "halt")):
+        journal.write(conn, t, "Sim101", kind, {"n": n})
+    day = date(2026, 10, 12)
+    assert [r.kind for r in journal.rows(conn, day=day, skip=("bar", "peak"))] == ["fill", "halt"]
+    sql, args = journal.select(day=day, skip=("bar", "peak"))
+    assert "kind NOT IN (?, ?)" in sql and args[-2:] == ["bar", "peak"]  # parameterised
+
+
+@pytest.mark.parametrize(
+    ("account", "index"), [(None, "journal_ts"), ("Sim101", "journal_account_ts")]
+)
+def test_a_day_read_searches_an_index_never_the_whole_history(conn, account, index):
+    # the tape reads every account's day every 5 s and the table only grows: never a SCAN of it
+    sql, args = journal.select(account=account, day=date(2026, 10, 12), skip=("bar",))
+    plan = [r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + sql, args)]
+    assert plan[0].startswith(f"SEARCH journal USING INDEX {index} "), plan
+
+
+def test_an_existing_db_gets_the_ts_index_when_a_writer_opens_it(tmp_path):
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as old:  # a db from before the index
+        old.executescript(
+            "CREATE TABLE journal (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL,"
+            " account TEXT NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL);"
+        )
+    with closing(journal.open_ro(path)) as ro:  # the route's reader never writes the schema
+        assert not ro.execute("SELECT 1 FROM sqlite_master WHERE name = 'journal_ts'").fetchall()
+    with closing(journal.open_db(path)) as rw:  # the hub opens it at the server's start
+        assert rw.execute("SELECT 1 FROM sqlite_master WHERE name = 'journal_ts'").fetchall()
+
+
 def test_rows_filter_by_kind_and_since(conn):
     journal.write(conn, ARMED_AT, "Sim101", "halt", {"n": 0})
     journal.write(conn, ARMED_AT, "Sim101", "bar", {"n": 1})

@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, RedirectResponse,
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from fenrir.bridge.client import AddonClient
 from fenrir.live.service import LiveHub
 from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
 from fenrir.server.jobs_runner import JobRunner
@@ -87,6 +88,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await app.state.live.stop()
         finally:
             app.state.jobs.stop()
+            if app.state.addon is not None:
+                await app.state.addon.aclose()
 
 
 def create_app(
@@ -106,7 +109,10 @@ def create_app(
     app.state.allowed_origins = allowed_origins(port, dev)
     app.state.pull = PullRunner(pull_command(), pull_env(os.environ, settings), settings=settings)
     app.state.jobs = JobRunner(settings, secret=session_key)  # started by _lifespan
-    app.state.live = LiveHub(settings, secret=session_key)  # opens nothing; started by _lifespan
+    # None: NinjaTrader not configured (the add-on refuses every request without its token)
+    app.state.addon = AddonClient(settings.nt_url, settings.nt_token) if settings.nt_token else None
+    # opens nothing; started by _lifespan
+    app.state.live = LiveHub(settings, secret=session_key, addon=app.state.addon)
     app.add_middleware(HostGuard)
     unspent = [launch_code]
 

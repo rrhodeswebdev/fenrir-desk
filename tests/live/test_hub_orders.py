@@ -727,14 +727,16 @@ async def test_kill_disarms_all_and_flattens_all(hub, conn, armed, fake):
     arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
     await hub.tick(T0)
     assert await hub.kill() == {"ok": True, "error": None}
-    [(path, body)] = fake.requests
-    assert path == "/flatten-all" and len(body["client_id"]) <= 24
+    # once before the hub lock, once under it: each its own request
+    [(path, body), (again, second)] = fake.requests
+    assert path == again == "/flatten-all" and len(body["client_id"]) <= 24
+    assert second["client_id"] != body["client_id"] and len(second["client_id"]) <= 24
     assert arming.list_armed(conn) == () and hub.states == {} and hub.children == {}
     for account in ("Sim101", "Dry1"):
         [row] = journal.rows(conn, account=account, kind="alert")
         assert row.payload["message"].startswith("kill switch: disarmed")
     await hub.kill()  # a second press is its own request
-    assert fake.requests[1][1]["client_id"] != body["client_id"]
+    assert len({b["client_id"] for _, b in fake.requests}) == 4
 
 
 async def test_kill_without_ninjatrader_is_not_ok_while_sim_or_live_is_armed(settings, conn, armed):
@@ -760,11 +762,31 @@ async def test_kill_with_only_dry_runs_needs_no_ninjatrader(settings, conn, arme
     assert arming.list_armed(conn) == ()
 
 
+BROKER = "no connection to the broker"
+
+
+@pytest.mark.parametrize(
+    ("rejects", "error"),
+    [
+        ([BROKER], f"first flatten-all (before the lock) failed: {BROKER}; the second landed"),
+        ([None, BROKER], f"second flatten-all (under the lock) failed: {BROKER}"),
+        ([BROKER, BROKER], f"both flatten-alls failed: {BROKER}"),  # the same error named once
+        (
+            ["x", "y"],
+            "first flatten-all (before the lock) failed: x; "
+            "second flatten-all (under the lock) failed: y",
+        ),
+    ],
+)
 async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
-    hub, conn, armed, fake, client, monkeypatch
+    hub, conn, armed, fake, client, monkeypatch, rejects, error
 ):
-    fake.rejects = ["no connection to the broker"]
-    assert await hub.kill() == {"ok": False, "error": "no connection to the broker"}
+    """Either flatten-all refused (the one before the lock, or the one under it) is reported,
+    naming which, so a failed first post whose second landed never reads as nothing flattened."""
+    fake.rejects = rejects
+    assert await hub.kill() == {"ok": False, "error": error}
+    [row] = rows(conn, "alert")
+    assert row.payload["message"] == f"kill switch: disarmed; {error}"
     arming.insert_armed(conn, armed)
 
     async def down(client_id):
@@ -772,7 +794,7 @@ async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
 
     monkeypatch.setattr(client, "flatten_all", down)
     result = await hub.kill()
-    assert result["ok"] is False and "unreachable" in result["error"]
+    assert result["error"] == "both flatten-alls failed: ConnectError: add-on unreachable"
 
 
 async def test_kill_flattens_all_even_when_the_disarm_fails(hub, conn, armed, fake, monkeypatch):
@@ -783,12 +805,12 @@ async def test_kill_flattens_all_even_when_the_disarm_fails(hub, conn, armed, fa
 
     monkeypatch.setattr(service, "delete_armed", locked_delete)
     result = await hub.kill()
-    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+    assert [path for path, _ in fake.requests] == ["/flatten-all"] * 2
     assert result["ok"] is False and "database is locked" in result["error"]
     # still armed, so halted in memory: nothing new goes out until it is disarmed
     assert hub.states["Sim101"].halted.startswith("kill switch: ")
     await hub.handle_bar(bar(T0))
-    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+    assert [path for path, _ in fake.requests] == ["/flatten-all"] * 2
 
 
 async def test_kill_journals_the_disarm_routes_halt_row(hub, conn, armed, fake):
@@ -813,12 +835,13 @@ async def test_kill_journals_the_halt_rows_before_it_disarms(hub, conn, armed, f
     assert seen == [[service.DISARMED]]
 
 
-@pytest.mark.parametrize("failing", ["delete", "read"])
+@pytest.mark.parametrize("failing", ["delete", "halt row and delete", "read"])
 async def test_a_failed_kill_disarm_halts_an_account_armed_but_not_started_yet(
     hub, conn, armed, fake, monkeypatch, failing
 ):
     """Armed in the 5 s before the kill, so not running yet: the next tick starts it halted.
-    Armed at the very moment the kill read `armed` counts as armed before it."""
+    Armed at the very moment the kill read `armed` counts as armed before it. With no
+    `"disarmed"` row written either, only the kill's own `killed` halts it."""
     arming.insert_armed(conn, replace(armed, armed_at=T0))
     locked_db = {"on": True}
 
@@ -830,17 +853,22 @@ async def test_a_failed_kill_disarm_halts_an_account_armed_but_not_started_yet(
             raise sqlite3.OperationalError("database is locked")
         return arming.list_armed(conn)
 
-    if failing == "delete":
-        monkeypatch.setattr(service, "delete_armed", locked_delete)
-    else:
+    if failing == "read":
         monkeypatch.setattr(service, "list_armed", locked_read)
+    else:
+        monkeypatch.setattr(service, "delete_armed", locked_delete)
+    if failing == "halt row and delete":
+        locked_db = locked(monkeypatch, "halt")
     result = await hub.kill()
     assert result["ok"] is False and "disarm failed" in result["error"]
+    assert not rows(conn, "alert")  # not disarmed, so no "kill switch: disarmed" for it
     locked_db["on"] = False  # the lock passed; the row stayed armed
-    await hub.tick(T0)
+    await hub.tick(T0)  # the kill did not start it: this tick does, halted
     assert hub.states["Sim101"].halted is not None
+    if failing != "delete":  # else the "disarmed" row written before the delete halts it too
+        assert hub.states["Sim101"].halted.startswith("kill switch: disarm failed")
     await hub.handle_bar(bar(T0))
-    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+    assert [path for path, _ in fake.requests] == ["/flatten-all"] * 2
     assert rows(conn, "halt")  # so a restart keeps it halted
     arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(seconds=1)))  # re-armed
     await hub.tick(T0 + timedelta(seconds=5))
@@ -897,6 +925,115 @@ async def test_kill_counts_a_duplicate_flatten_all_as_done(hub, armed, client, m
 
     monkeypatch.setattr(client, "flatten_all", duplicate)
     assert await hub.kill() == {"ok": True, "error": None}
+
+
+async def test_a_failed_kill_disarm_halts_a_row_armed_while_the_kill_read_armed(
+    hub, conn, armed, fake, clock, monkeypatch
+):
+    """`killed`'s time is taken after reading `armed`: every row that read found was armed by
+    then, even one armed while the read ran."""
+    arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(seconds=1)))
+
+    def reading(conn):  # the read takes a second; the row was armed during it
+        clock["t"] = T0 + timedelta(seconds=1)
+        return arming.list_armed(conn)
+
+    def locked_delete(conn, account):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "list_armed", reading)
+    monkeypatch.setattr(service, "delete_armed", locked_delete)
+    halts = locked(monkeypatch, "halt")  # no "disarmed" row either: only `killed` halts it
+    assert "disarm failed" in (await hub.kill())["error"]
+    halts["on"] = False
+    await hub.tick(T0 + timedelta(seconds=1))
+    assert hub.states["Sim101"].halted.startswith("kill switch: disarm failed")
+
+
+async def test_a_failed_kill_disarm_loads_no_strategy_before_it_answers(
+    hub, conn, armed, fake, monkeypatch
+):
+    """After a failed disarm the kill does not sync: a row not running yet is left to the next
+    tick (which starts it halted), so no strategy load (up to 60 s each) delays the answer."""
+    loads = []
+
+    async def spawn(a):
+        loads.append(a.account)
+
+    def locked_delete(conn, account):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(hub, "_spawn", spawn)
+    monkeypatch.setattr(service, "delete_armed", locked_delete)
+    assert "disarm failed" in (await hub.kill())["error"]
+    assert loads == [] and hub.states == {}
+
+
+async def test_a_kill_flattens_all_while_a_slow_strategy_load_holds_the_hub_lock(
+    hub, conn, armed, fake, monkeypatch
+):
+    """A tick holds the hub lock while it loads a newly armed strategy (up to 60 s each, one
+    after another): the kill's first /flatten-all does not wait for it."""
+    loading, loaded, spawn = asyncio.Event(), asyncio.Event(), hub._spawn
+
+    async def slow(a):
+        loading.set()
+        await loaded.wait()
+        await spawn(a)
+
+    monkeypatch.setattr(hub, "_spawn", slow)
+    tick = asyncio.create_task(hub.tick(T0))
+    await asyncio.wait_for(loading.wait(), 5)
+    kill = asyncio.create_task(hub.kill())
+    try:
+        await until(lambda: fake.requests, timeout=2.0)  # bounded: the add-on post only
+        assert [path for path, _ in fake.requests] == ["/flatten-all"]
+        assert not tick.done() and not kill.done()  # the load still holds the lock
+    finally:
+        loaded.set()
+    await tick
+    assert await kill == {"ok": True, "error": None}
+    assert [path for path, _ in fake.requests] == ["/flatten-all"] * 2
+    assert arming.list_armed(conn) == () and hub.states == {} and hub.children == {}
+
+
+async def test_a_position_opened_after_the_kills_first_flatten_does_not_survive_the_kill(
+    hub, conn, armed, fake, client, monkeypatch
+):
+    """A bar holds the hub lock while its Bracket is out; the kill flattens at once, then the
+    Bracket lands and opens a position. The kill's flatten under the lock, once it has it, closes
+    that position, and nothing opens one after it."""
+    book, posting, go = [], asyncio.Event(), asyncio.Event()
+    bracket, flatten_all = client.bracket, client.flatten_all
+
+    async def slow_bracket(cid, account, *rest):
+        posting.set()
+        await go.wait()
+        ack = await bracket(cid, account, *rest)
+        book.append(account)  # its entry filled: a position NinjaTrader holds
+        return ack
+
+    async def flattening(client_id):
+        ack = await flatten_all(client_id)
+        book.clear()
+        return ack
+
+    monkeypatch.setattr(client, "bracket", slow_bracket)
+    monkeypatch.setattr(client, "flatten_all", flattening)
+    await hub.tick(T0)
+    on_bar = asyncio.create_task(hub.handle_bar(bar(T0)))
+    await asyncio.wait_for(posting.wait(), 10)
+    kill = asyncio.create_task(hub.kill())
+    try:
+        await until(lambda: fake.requests, timeout=2.0)  # flattened while the bar holds the lock
+    finally:
+        go.set()
+    await on_bar
+    assert await kill == {"ok": True, "error": None}
+    assert book == []  # the position the late Bracket opened did not survive the kill
+    assert [p for p, _ in fake.requests] == ["/flatten-all", "/bracket", "/flatten-all"]
+    await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
+    assert [p for p, _ in fake.requests][-1] == "/flatten-all" and book == []
 
 
 STOP = {**ENTRY, "order_id": "2", "role": "stop", "action": "sell", "price": 19990.0}

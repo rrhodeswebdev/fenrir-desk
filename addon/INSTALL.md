@@ -28,13 +28,15 @@ Copy `addon\fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.
   "port": 8123,
   "token": "<the token>",
   "managed_accounts": ["Sim101"],
+  "flatten_at": "16:40",
   "flatten_on_disconnect_seconds": null
 }
 ```
 
 - `token`: at least 16 characters, the same value as Fenrir's NinjaTrader token (Settings page, or `FENRIR_NT_TOKEN` natively). With a shorter token the add-on logs why and serves nothing.
 - `managed_accounts`: the NinjaTrader account names Fenrir may see and trade. Every other account is invisible to Fenrir and refused. An empty list is logged as an alert at start. A managed account is Fenrir's: while the add-on flattens an instrument there, a manual market order on it is cancelled if still working, or its position flattened.
-- `flatten_on_disconnect_seconds`: `null` (default) keeps the broker-side stop and target when Fenrir's link drops. A number of seconds flattens every managed account holding a position once no Fenrir stream has been connected for that long, counted from NinjaTrader's start too. It runs with the add-on's HTTP server, so not while the token is too short or the port cannot be opened.
+- `flatten_at`: New York time (`"HH:MM"`, whatever the PC's time zone) at which the add-on, on its own, closes every position and cancels every working order on the managed accounts, then again every 15 s for 20 minutes. Keep `16:40`; change it only to test the flatten. A bad value falls back to 16:40 with an alert. The flatten runs even when the token is too short or the port cannot be opened.
+- `flatten_on_disconnect_seconds`: `null` (default) keeps the broker-side stop and target when Fenrir's link drops. A number of seconds flattens every managed account holding a position once no Fenrir stream has been connected for that long, counted from NinjaTrader's start too. It runs with the add-on's HTTP server, so not while the token is too short or the port cannot be opened (the 16:40 flatten still does).
 
 Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the last 7 days, so a request Fenrir retries after a NinjaTrader restart is still answered `duplicate` instead of placed twice. Leave it alone.
 

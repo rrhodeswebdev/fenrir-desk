@@ -34,6 +34,13 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly string seenPath;
         private readonly BlockingCollection<Action> work = new BlockingCollection<Action>();
         private Timer sweep;
+        private long lastSweepTicks = DateTime.UtcNow.Ticks;
+
+        // seconds since the broker thread last completed its 500 ms sweep: large means it is stuck
+        public double SecondsSinceSweep
+        {
+            get { return (DateTime.UtcNow - new DateTime(Interlocked.Read(ref lastSweepTicks), DateTimeKind.Utc)).TotalSeconds; }
+        }
 
         // the stream's sink; called on NinjaTrader's threads, so it must never block
         public volatile Action<Dictionary<string, object>> Publish = delegate { };
@@ -524,6 +531,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     FenrirLog.Alert("flattening " + kv.Key + ": " + e.Message + "; retrying");
                 }
             }
+            Interlocked.Exchange(ref lastSweepTicks, DateTime.UtcNow.Ticks); // the watchdog: a whole sweep ran
         }
 
         // A resize NinjaTrader refused leaves the stop smaller than the position it guards: close the
@@ -638,6 +646,29 @@ namespace NinjaTrader.NinjaScript.AddOns
                 utc = DateTime.UtcNow; // a time skipped by a DST change
             }
             return utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        }
+
+        // every managed account: close every position and cancel every working order (16:40 flatten),
+        // each account in its own try so one account's failure never skips the rest
+        public void FlattenManaged(string why)
+        {
+            DateTime posted = DateTime.UtcNow;
+            Post(() =>
+            {
+                double late = (DateTime.UtcNow - posted).TotalSeconds;
+                if (late > 15) FenrirLog.Alert(why + " started " + late.ToString("0") + " s late: the broker thread is slow");
+                foreach (Account a in Managed())
+                {
+                    try
+                    {
+                        if (FlattenAccount(a, true) > 0) FenrirLog.Alert(why + ": flattening and cancelling on " + a.Name);
+                    }
+                    catch (Exception e)
+                    {
+                        FenrirLog.Alert(why + ": flatten failed on " + a.Name + " (" + e.Message + "); retrying");
+                    }
+                }
+            });
         }
 
         // managed accounts holding a position: flatten them (flatten_on_disconnect_seconds), each in

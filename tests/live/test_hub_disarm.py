@@ -328,6 +328,9 @@ async def test_a_failed_flatten_halts_a_row_that_is_not_running_yet(
     try:
         why = flatten_failed("ConnectError: add-on unreachable")
         assert await hub.disarm("Sim101") == {"ok": False, "error": why}
+        assert [r.payload for r in rows(conn, "halt")] == [
+            {"reason": why, "kind": None, "until": None}  # until disarmed, not a day halt
+        ]
         assert [r.payload for r in rows(conn, "alert")] == [{"message": why}]
         await hub.tick(T0)
         assert hub.states["Sim101"].halted == why

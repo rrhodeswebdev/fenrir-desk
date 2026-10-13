@@ -808,7 +808,7 @@ def test_an_intraday_gap_halt_raises_the_apps_peak_to_its_own_balance():
     s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
     exit_ = {**fill_at(T.ts + timedelta(minutes=1, seconds=10), qty=-1), "price": 20050.0}
     s, _ = core.on_fill(s, exit_)
-    assert (s.acct.balance, s.acct.peak) == (1000.0, 0.0)
+    assert s.acct.peak == 0.0
     s, effects = core.on_account(s, account(balance=54_000.0), T.ts)
     assert s.halted.startswith(GAP_INTRADAY + "54000.00 puts the drawdown floor at 52000.00, ")
     assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
@@ -883,3 +883,44 @@ def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next
     assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [])
     s, effects = core.on_bar(s, at("09:32"))
     assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+
+
+def test_a_same_day_intraday_restart_starts_the_peak_at_least_at_the_replayed_balance():
+    """Review of #231, non-blocking 1: a gain the app booked raises an intraday peak only at the
+    next Mark or account message, so a restart in between finds no "peak" row for it. Today's
+    open 50,000 is journalled; the replay books +1,000 (exit at 20,050) and a re-entry at 20,050
+    with no Mark since; NinjaTrader is at 51,000 with -800 open. The replayed balance holds no
+    P&L the app never saw, so the peak starts there (floor -1,000), and a -2,100 open loss
+    (equity -1,100) breaches it, as on main."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=51_000.0, realized_today=1000.0)
+    )
+    s, effects = core.start(replace(setup, day_start=None), T.ts, opens=[opened(D1, 50_000.0)])
+    assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0) and "peak" not in kinds(effects)
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    again = {**fill_at(T.ts + timedelta(seconds=15), qty=1), "price": 20050.0}
+    rows = [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_), ("fill", again)]
+    s = core.replay(s, rows)
+    assert (s.acct.balance, s.position.qty, s.acct.peak, s.acct.floor) == (
+        1000.0,
+        1,
+        1000.0,
+        -1000.0,
+    )
+    now = T.ts + timedelta(seconds=30)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20050.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    s, _ = core.on_account(s, account(51_000.0, today=1000.0, unrealized=-800.0), now)
+    assert (s.halted, s.acct.peak, s.acct.floor) == (None, 1000.0, -1000.0)
+    worse = 20050.0 - 2100 / 20
+    s, _ = core.on_bar(s, bar("09:31", worse, worse, worse, worse))
+    assert s.halted == "breach max_drawdown: equity -1100.00 at or below drawdown floor -1000.00"
+
+
+def test_a_dry_replay_raises_no_peak():
+    """Dry runs have no NinjaTrader start (no phase start to raise from): the replay runs."""
+    s, _ = core.start(sim(mode="dry", trailing="intraday"), T.ts)
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    s = core.replay(s, [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_)])
+    assert s.acct.peak == 0.0

@@ -245,8 +245,9 @@ def start(
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
     if replays and phase_rules(setup.rules, a.phase).max_drawdown.trailing == "intraday":
-        # the journalled peaks hold every raise made while running; NinjaTrader's balance above
-        # them is P&L the app never saw, which the account message after `replay` checks (#222)
+        # not NinjaTrader's balance, which may hold P&L the app never saw: the account message
+        # after `replay` checks that (#222); `replay` raises the peak to the app's own balance
+        # there, as a gain booked since the last journalled raise may be in no "peak" row
         peak = begin.peak - begin.phase_start
         acct = replace(acct, peak=peak, floor=_floor(setup.rules, a.phase, peak))
     # an intraday peak starts at least at the balance: journal that raise too
@@ -572,7 +573,8 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
     working entry and the Flatten in flight, and the "fill" rows rebuild the position through
     `on_fill`. The balance is the lower of today's opening balance plus the replayed fills (with
     `day_start`) and NinjaTrader's at the restart; without `day_start` it stays NinjaTrader's,
-    which already holds today's fills. No effects: every row was journalled when it happened.
+    which already holds today's fills; an intraday peak is raised to at least that balance.
+    No effects: every row was journalled when it happened.
     The drift pause stays as `start` restored it from the "halt" rows (a resolve may have lifted
     it), and sim and live stay `unreconciled` until `on_reconcile`."""
     r = replace(s, read_at=None)  # every journalled fill is booked, whatever was read since
@@ -598,6 +600,11 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
         traded = r.acct.traded_today or a.traded_today
         acct = replace(r.acct, balance=min(booked, a.balance), traded_today=traded)
     shift = acct.balance - booked  # the open trade's P&L counts from the balance kept
+    if s.setup.start and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "intraday":
+        # an intraday peak is never below the balance: a gain booked since the last raise (the
+        # next Mark or account message raises it, so no "peak" row may hold it) is P&L the app
+        # saw, and this balance is at most NinjaTrader's (review of #231)
+        acct = _raised(s.setup, acct, s.setup.start.phase_start + acct.balance)
     # an exit's `held` marks its own bar only, which is gone
     return replace(
         r,

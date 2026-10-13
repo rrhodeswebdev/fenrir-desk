@@ -249,6 +249,43 @@ def test_a_reconnect_while_one_series_replays_counts_its_open_minute_once():
     assert es == [(utc(14, 30), 1), (utc(14, 31), 1)]
 
 
+def test_replayed_trades_that_share_a_timestamp_all_count():
+    # in the gate recording ~8-14% of trades share their predecessor's timestamp: no restart
+    clock = [utc(14, 33)]
+
+    async def source():
+        for ts in (utc(14, 30, 5), utc(14, 30, 5), utc(14, 30, 5), utc(14, 31, 1), utc(14, 31, 1)):
+            yield replayed(ts, 100.0)
+        yield Tick(utc(14, 32, 1), 101.0, 1, "NQZ26")
+
+    assert [(b.ts, b.volume) for b in collect(source(), clock)][:2] == [
+        (utc(14, 30), 3),
+        (utc(14, 31), 2),
+    ]
+
+
+def test_a_restart_of_one_symbols_replay_keeps_the_others_open_minute():
+    # each symbol replays on its own subscription; the second pass may replay NQ before ES
+    clock = [utc(14, 31, 20)]
+    es = [(utc(14, 30, 50), 6000.0, "ESZ26"), (utc(14, 31, 5), 6000.0, "ESZ26")]
+    nq = [(utc(14, 30, 55), 20000.0, "NQZ26"), (utc(14, 31, 6), 20000.0, "NQZ26")]
+
+    async def source():
+        for ts, price, c in es + nq + nq + es:  # ES then NQ; the link drops; NQ then ES again
+            yield replayed(ts, price, c)
+        yield Tick(utc(14, 31, 20), 20000.0, 1, "NQZ26")
+        yield Tick(utc(14, 31, 20), 6000.0, 1, "ESZ26")
+        clock[0] = utc(14, 32) + LAG_GRACE
+
+    bars = collect(source(), clock)
+    assert sorted((b.contract, b.ts, b.volume) for b in bars) == [
+        ("ESZ26", utc(14, 30), 1),
+        ("ESZ26", utc(14, 31), 2),
+        ("NQZ26", utc(14, 30), 1),
+        ("NQZ26", utc(14, 31), 2),
+    ]
+
+
 # --- stream_ticks: the real SDK Tick through a fake client ---
 
 

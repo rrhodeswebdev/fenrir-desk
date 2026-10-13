@@ -70,6 +70,7 @@ LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 # past about a minute, and the socket's 30 s ping may drop the link: a full replay), and other
 # accounts' bars and fills wait. A strategy that needs longer halts instead (fail closed)
 WARM_TIMEOUT = 20.0
+SLOW = "the replay took over {seconds:g} s; a re-arm later today replays more bars and halts again"
 TICK_EVERY = 5.0
 FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
 FEED_RETRY_MAX = 900.0
@@ -527,7 +528,11 @@ class LiveHub:
             self.last_bar_ts = bar.ts
             catching_up = bar.contract[:-3] in self.replaying
             if not catching_up:  # first: an account it starts warms up, then takes it live
-                await self._sync(bar.ts)
+                try:
+                    await self._sync(bar.ts)
+                except Exception:  # never up to run_bars, which would resubscribe (a full
+                    # replay); the running accounts still take the bar, the next tick syncs again
+                    log.exception("live sync failed on a bar")
             day = trading_day(bar.ts)
             same_day = kept and trading_day(kept[-1].ts) == day
             self.today[bar.contract] = (*kept, bar) if same_day else (bar,)
@@ -560,6 +565,8 @@ class LiveHub:
         # from the state _apply kept, so a breach it could not journal is not replaced
         s = self.states[account]
         try:
+            # its child is gone: no warm-up left to wait for
+            s = replace(s, warming=None)
             await self._apply(account, *core.halt(s, f"live runner error: {error}"))
         except Exception:  # the journal itself failed: halted in memory, row retried
             log.exception("live account %s halted; halt not journalled", account)
@@ -898,6 +905,7 @@ class LiveHub:
             except Exception as e:  # isolation refusal, load error, timeout
                 s, more = core.halt(s, f"cannot load the strategy: {e}")
                 out += more  # never instead of the rows before it (an open, a mode mismatch)
+        # no strategy loaded: _warm drops it at once, so a halt shows alone
         await self._apply(a.account, replace(s, warming=WARMING), out)
         await self._warm(a.account, now)
 
@@ -917,8 +925,10 @@ class LiveHub:
         does not reach the last trading day before today (`STORE_SHORT`, alerted once; loaded
         again at most once per `STORE_RETRY`)."""
         s, proc = self.states[account], self.children.get(account)
-        if s.warming is None or proc is None:  # warm, or no strategy to warm (halted)
+        if s.warming is None:
             return
+        if proc is None:  # halted, its child gone: nothing left to wait for
+            return await self._apply(account, replace(s, warming=None), ())
         series, day = s.setup.spec.series, trading_day(now)
         if series in self.replaying:
             return await self._warming(account, WAITING.format(series=series))
@@ -944,9 +954,14 @@ class LiveHub:
                 for r in journal.rows(self.conn, account, day, since=since)
             ]
             ctxs, window = core.warm_up(s, history, bars, rows)
-        except Exception as e:
-            log.exception("live account %s: warm-up failed", account)
-            return await self._warming(account, WARM_ERROR.format(error=_error(e)), alert=True)
+        except Exception as e:  # tried again after STORE_RETRY; a traceback once per error
+            self._store_retry[account] = now + STORE_RETRY
+            error = _error(e)
+            if s.warming == WARM_ERROR.format(error=error):
+                log.warning("live account %s: warm-up failed again: %s", account, error)
+            else:
+                log.exception("live account %s: warm-up failed", account)
+            return await self._warming(account, WARM_ERROR.format(error=error), alert=True)
         replayed = []
         try:
             async with asyncio.timeout(WARM_TIMEOUT):
@@ -955,7 +970,8 @@ class LiveHub:
                     replayed.append((c.ts, reply["actions"]))
         except Exception as e:  # as a step error: the child is gone
             await self._kill(account)
-            why = f"the replay took over {WARM_TIMEOUT:g} s" if isinstance(e, TimeoutError) else e
+            why = SLOW.format(seconds=WARM_TIMEOUT) if isinstance(e, TimeoutError) else e
+            s = replace(s, warming=None)  # halted, child gone: no warm-up left to wait for
             return await self._apply(
                 account, *core.halt(s, f"strategy error while warming up: {why}")
             )

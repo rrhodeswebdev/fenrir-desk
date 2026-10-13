@@ -5,6 +5,8 @@ one halts the account ("warm-up diverged"). Live decisions start at the next clo
 
 import asyncio
 import json
+import logging
+import sqlite3
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -534,7 +536,7 @@ async def test_an_error_while_warming_up_never_reaches_the_feed(hub, conn, tmp_p
 
 @pytest.mark.anyio
 async def test_an_error_after_the_replay_halts_that_account_and_never_leaves_the_bar(
-    hub, conn, tmp_path, monkeypatch
+    hub, conn, tmp_path, clock, monkeypatch
 ):
     def broken(*args):
         raise RuntimeError("a bug")
@@ -546,6 +548,46 @@ async def test_an_error_after_the_replay_halts_that_account_and_never_leaves_the
     s = hub.states["Sim101"]
     assert s.halted == "live runner error: RuntimeError: a bug"  # stepped: never again
     assert hub.children == {}
+    monkeypatch.undo()
+    await only_the_halt(hub, conn, clock)
+
+
+@pytest.mark.anyio
+async def test_a_warm_up_failing_before_it_steps_is_retried_at_most_once_a_minute(
+    hub, conn, tmp_path, monkeypatch, caplog
+):
+    calls = []
+
+    def broken(*args):
+        calls.append(1)
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(core, "warm_up", broken)
+    arm(conn, tmp_path, ALWAYS)
+    with caplog.at_level(logging.WARNING, logger="fenrir.live.service"):
+        for seconds in range(0, 60, 5):  # a tick every 5 s
+            await hub.tick(T0 + timedelta(seconds=seconds))
+        assert len(calls) == 1
+        await hub.tick(T0 + timedelta(seconds=60))
+    assert len(calls) == 2
+    logged = [r for r in caplog.records if "warm-up failed" in r.getMessage()]
+    assert [r.exc_info is not None for r in logged] == [True, False]  # a traceback, then a line
+    assert len(payloads(conn, "alert")) == 1
+
+
+@pytest.mark.anyio
+async def test_a_failed_sync_on_a_bar_never_reaches_the_feed(hub, conn, tmp_path, monkeypatch):
+    # review of #224: from handle_bar it would reach run_bars, which resubscribes (a full replay)
+    arm(conn, tmp_path, ALWAYS)
+    await hub.tick(T0)
+
+    def locked(conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "list_armed", locked)
+    await hub.handle_bar(live_bar(0))  # no raise; the running account still takes its bar
+    assert journalled_kinds(conn) == ["bar", "action"]
+    assert hub.today["NQZ26"] == (live_bar(0),)
 
 
 @pytest.mark.anyio
@@ -583,6 +625,54 @@ async def test_a_strategy_error_while_warming_up_halts(hub, conn, tmp_path, cloc
     assert hub.children == {} and journalled_kinds(conn) == ["halt"]
 
 
+async def only_the_halt(hub, conn, clock):
+    """Review of #224: a halted account with no strategy left waits for no warm-up, so only its
+    halt shows (no false Feed caution, no "replaying" line), now and on the next bar."""
+    [acc] = hub.status()["accounts"]
+    assert [c["kind"] for c in acc["conditions"]] == [None], acc["conditions"]
+    clock["t"] += MINUTE
+    await hub.handle_bar(live_bar(int((clock["t"] - T0) / MINUTE) - 1))
+    assert "warming" not in payloads(conn, "bar")[-1]
+    [acc] = hub.status()["accounts"]
+    assert [c["kind"] for c in acc["conditions"]] == [None]
+
+
+@pytest.mark.anyio
+async def test_a_replay_over_its_budget_on_a_bars_start_shows_only_its_halt(
+    hub, conn, tmp_path, clock, monkeypatch
+):
+    monkeypatch.setattr(service, "WARM_TIMEOUT", 0.3)
+    spin = ALWAYS.replace("    if bar.close", "    while True:\n        pass\n    if bar.close")
+    arm(conn, tmp_path, spin)
+    await replay(hub, live_bar(0))
+    clock["t"] = T0 + MINUTE
+    await hub.handle_bar(live_bar(1))  # starts it, halts in the warm-up, then takes the bar
+    assert hub.states["Sim101"].halted.endswith("halts again")
+    [acc] = hub.status()["accounts"]
+    assert [c["kind"] for c in acc["conditions"]] == [None]
+    assert "warming" not in payloads(conn, "bar")[-1]
+
+
+@pytest.mark.anyio
+async def test_a_strategy_that_fails_to_load_shows_only_its_halt(hub, conn, tmp_path, clock):
+    arm(conn, tmp_path, "raise SystemExit('broken strategy')\n" + ALWAYS)
+    await replay(hub)
+    await hub.tick(T0)
+    assert hub.states["Sim101"].halted.startswith("cannot load the strategy:")
+    await only_the_halt(hub, conn, clock)
+
+
+@pytest.mark.anyio
+async def test_a_start_that_core_start_halts_shows_only_its_halt(hub, conn, tmp_path, clock):
+    a = arm(conn, tmp_path, ALWAYS)
+    Path(a.strategy_path).write_text(ALWAYS + "\n# edited after arming\n")
+    await replay(hub)
+    await hub.tick(T0)
+    assert hub.states["Sim101"].halted == "strategy file changed since arming; re-arm"
+    [acc] = hub.status()["accounts"]
+    assert [c["kind"] for c in acc["conditions"]] == [None]
+
+
 @pytest.mark.anyio
 async def test_a_replay_over_its_time_budget_halts(hub, conn, tmp_path, clock, monkeypatch):
     monkeypatch.setattr(service, "WARM_TIMEOUT", 0.3)  # the hub lock is held meanwhile
@@ -594,9 +684,11 @@ async def test_a_replay_over_its_time_budget_halts(hub, conn, tmp_path, clock, m
     clock["t"] = T0 + MINUTE
     await hub.tick(clock["t"])
     assert hub.states["Sim101"].halted == (
-        "strategy error while warming up: the replay took over 0.3 s"
+        "strategy error while warming up: the replay took over 0.3 s; a re-arm later today"
+        " replays more bars and halts again"
     )
     assert hub.children == {}
+    await only_the_halt(hub, conn, clock)
 
 
 @pytest.mark.anyio

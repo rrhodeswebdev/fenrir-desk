@@ -589,15 +589,19 @@ async def test_an_unmanaged_accounts_refused_flatten_keeps_it_and_says_it_is_unm
     assert hub.states["Sim101"].halted == why
 
 
+@pytest.mark.parametrize("mode", ["sim", "live"])
 @pytest.mark.parametrize("running", [True, False], ids=["running", "not running yet"])
 async def test_disarm_without_flatten_disarms_an_account_the_addon_no_longer_manages(
-    hub, conn, armed, fake, running
+    hub, conn, armed, fake, running, mode
 ):
     """Refused as unmanaged and kept, then confirmed without flatten: both flattens are still
     posted, and refused as unmanaged, so the row is disarmed (its halt row and delete) with an
-    alert naming the skipped flatten; the runner is stopped and any held halt dropped."""
+    alert naming the skipped flatten; the runner is stopped and any held halt dropped. Live too:
+    a funded or evaluation account taken out of managed_accounts is the realistic case."""
+    arming.insert_armed(conn, replace(armed, mode=mode))
     if running:
         await hub.tick(T0)
+        assert hub.states["Sim101"].setup.armed.mode == mode
     fake.rejects = [UNMANAGED, UNMANAGED]
     kept_why = flatten_failed(UNMANAGED)
     assert (await hub.disarm("Sim101"))["unmanaged"] is True

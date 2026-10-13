@@ -96,6 +96,8 @@ namespace NinjaTrader.NinjaScript.AddOns
         private object Route(string method, string path, HttpListenerRequest req)
         {
             if (method == "GET" && path == "/accounts") return broker.Accounts();
+            if (method == "GET" && path == "/positions") return broker.Positions(req.QueryString["account"]);
+            if (method == "GET" && path == "/orders") return broker.Orders(req.QueryString["account"]);
             return null;
         }
 

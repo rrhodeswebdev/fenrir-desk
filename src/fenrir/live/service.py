@@ -4,7 +4,9 @@ journal and the NinjaTrader add-on.
 Strategy code never runs here (DEC-1): each running account has one `fenrir.live.step_child`
 process, as `FENRIR_PTY_USER` when set, holding the strategy's state; its replies are untrusted
 (`parse_reply`). The `armed` table is the source of truth for which accounts run: it is re-read
-on every tick and every bar.
+on every tick and every bar. The hub keeps today's bars from the feed, which replays the day
+from its open on every (re)subscription, and warms each account up on them before it takes an
+entry (#79).
 """
 
 import asyncio
@@ -20,7 +22,7 @@ import sqlite3
 import sys
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -34,18 +36,19 @@ from fenrir.core.instruments import (
     INSTRUMENTS_MAX,
     Instruments,
     front_month,
+    in_roll_window,
     load_instruments,
     read_instruments,
     spec,
 )
-from fenrir.core.sessions import trading_day
-from fenrir.data.live import FeedStopped
-from fenrir.data.store import SERIES
+from fenrir.core.sessions import NY, trading_day
+from fenrir.data.live import FeedStopped, stream_bars
+from fenrir.data.store import SERIES, expected_days, load_bars
 from fenrir.files import read_regular
 from fenrir.live import arming, core, journal
 from fenrir.live.arming import Armed, delete_armed, list_armed
 from fenrir.live.core import Log, RunnerState, Send, Setup, Start
-from fenrir.live.step_child import ctx_json
+from fenrir.live.step_child import ctx_json, ctx_lines
 from fenrir.rules.account import with_dll
 from fenrir.rules.loader import RULES_MAX, read_account, rules_path
 from fenrir.server import terminal
@@ -62,6 +65,12 @@ ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024
 INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
+# a warm-up replays a day (up to ~1,380 steps, ~3 s for a trivial strategy) under the hub lock;
+# meanwhile the bar feed's consumer waits (ticks buffer in the builder, which drops them as late
+# past about a minute, and the socket's 30 s ping may drop the link: a full replay), and other
+# accounts' bars and fills wait. A strategy that needs longer halts instead (fail closed)
+WARM_TIMEOUT = 20.0
+SLOW = "the replay took over {seconds:g} s; a re-arm later today replays more bars and halts again"
 TICK_EVERY = 5.0
 FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
 FEED_RETRY_MAX = 900.0
@@ -71,8 +80,22 @@ FEED_ALERT_EVERY = timedelta(minutes=15)
 RESTORED = frozenset({"halt", "peak", "day_start"})  # the kinds core.start reads back
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
+# warm-up (#79): the store's last days; all of it when these hold fewer than a window of bars
+HISTORY = timedelta(days=14)
+WARMING = "warming up: replaying today's bars through the strategy; no new entries until done"
+WAITING = (
+    "warming up: today's {series} bars from LSE are not complete yet; no new entries until they are"
+)
+STORE_SHORT = (
+    "warming up: the bar store has no {series} bars up to {day}, the last trading day before"
+    " today; run `fenrir data pull`. No new entries until then"
+)
+STORE_ERROR = "warming up: cannot load the bars before today ({error}); no new entries until then"
+WARM_ERROR = "warming up: failed ({error}); no new entries until it succeeds"
+STORE_RETRY = timedelta(minutes=1)  # a short or unreadable store is loaded again no sooner
 
-# stream_bars: (settings, contracts, *, on_auth) where on_auth is called on each authentication
+# stream_bars: (settings, contracts, *, on_auth, start, on_live): on_auth on each authentication,
+# a replay of the ticks since `start` first, on_live(contract) on each live tick (#79)
 Stream = Callable[..., AsyncGenerator[Bar, None]]
 
 
@@ -220,6 +243,10 @@ class LiveHub:
         # why the feed is down (FeedStopped), until a bar or an authenticated resubscribe
         self.lse_error: str | None = None
         self.lse_retry_at: datetime | None = None  # next resubscribe; None = only a restart
+        self.today: dict[str, tuple[Bar, ...]] = {}  # per contract, its latest trading day's bars
+        # series whose bars of today are still replaying since the feed (re)subscribed: no
+        # account warms up on them yet, and their bars reach no account (#79)
+        self.replaying: set[str] = set()
         self._lse_outage = 0  # counts outages, for the alerts
         # per run, (account, armed_at): the outage it was last told of, and when
         self._lse_alerted: dict[tuple[str, datetime], tuple[int, datetime]] = {}
@@ -233,11 +260,15 @@ class LiveHub:
         self._timeout = step_timeout
         self._lock = asyncio.Lock()  # a tick and a bar never interleave
         self._tasks: list[asyncio.Task] = []
+        self._follow_bars = False  # start() was called: the first armed row starts the bar feed
+        self._store_retry: dict[str, datetime] = {}  # per account: no store load before then
+        self._feed: asyncio.Task | None = None  # run_bars, from then until stop()
 
     def start(self) -> None:
         """Start the clock ticks and, when configured, follow the add-on's event stream; call on
-        the event loop. Bars come from `run_bars` (04.2)."""
-        # shortcut: no bar stream yet; when 21.8 wires stream_bars, add run_bars to _tasks here
+        the event loop. The LSE bar feed (`run_bars`) starts with the first armed row a sync
+        finds: nothing reads it before, and LSE allows one socket per key."""
+        self._follow_bars = True
         self._tasks.append(asyncio.create_task(run_ticks(self)))
         if self.addon is not None:
             self._tasks.append(asyncio.create_task(run_stream(self)))
@@ -249,6 +280,8 @@ class LiveHub:
             if isinstance(r, Exception):  # the type only: an add-on error could hold the token
                 log.error("live task had failed: %s", type(r).__name__)
         self._tasks.clear()
+        self._feed = None
+        self._follow_bars = False  # a sync after stop() starts no feed that nothing cancels
         for account in list(self.children):
             await self._kill(account)
         if self.conn is not None:
@@ -279,6 +312,7 @@ class LiveHub:
                 if self._feed_alert_due(account, now):
                     effects = (*effects, Log("alert", {"message": self._feed_alert()}))
                 await self._apply(account, s, effects)
+                await self._warm(account, now)  # once today's bars and the store are there
 
             # e.g. its rows still refused: the others' retries still go out
             await self._each("a tick", one)
@@ -514,10 +548,26 @@ class LiveHub:
         return {"ok": False, "error": why}
 
     async def handle_bar(self, bar: Bar) -> None:
+        """One closed bar from the feed, kept as one of today's for warm-ups (#79). A bar at or
+        before the last one kept for its contract is a repeat (a reconnect replays the day from
+        the open) and is dropped; while its series replays, a bar reaches no account."""
         async with self._lock:
+            kept = self.today.get(bar.contract, ())
+            if kept and bar.ts <= kept[-1].ts:
+                return
             self.last_bar_ts = bar.ts
-            await self._sync(bar.ts)
+            catching_up = bar.contract[:-3] in self.replaying
+            if not catching_up:  # first: an account it starts warms up, then takes it live
+                try:
+                    await self._sync(bar.ts)
+                except Exception:  # never up to run_bars, which would resubscribe (a full
+                    # replay); the running accounts still take the bar, the next tick syncs again
+                    log.exception("live sync failed on a bar")
             day = trading_day(bar.ts)
+            same_day = kept and trading_day(kept[-1].ts) == day
+            self.today[bar.contract] = (*kept, bar) if same_day else (bar,)
+            if catching_up:
+                return
 
             async def one(account: str) -> None:
                 s = self.states[account]
@@ -545,6 +595,8 @@ class LiveHub:
         # from the state _apply kept, so a breach it could not journal is not replaced
         s = self.states[account]
         try:
+            # its child is gone: no warm-up left to wait for
+            s = replace(s, warming=None)
             await self._apply(account, *core.halt(s, f"live runner error: {error}"))
         except Exception:  # the journal itself failed: halted in memory, row retried
             log.exception("live account %s halted; halt not journalled", account)
@@ -605,7 +657,7 @@ class LiveHub:
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
         s, out = self._pinned(s)
         s, more = core.on_bar(s, bar)
-        if not core.runs_step(bar):  # roll window: on_bar journalled the bar
+        if not core.runs_step(bar) or s.warming:  # roll window, warming up: on_bar journalled it
             return s, out + more
         s, last = await self._step(account, s)
         return s, out + more + last
@@ -630,6 +682,16 @@ class LiveHub:
         """The feed is up again: a bar arrived, or a resubscribe authenticated."""
         self.lse_connected = True
         self.lse_error = self.lse_retry_at = None
+
+    def resubscribed(self) -> None:
+        """The bar feed authenticated (`on_auth`): it is up, and it replays today from the open
+        first, so no account warms up until each series' first live tick (`feed_live`)."""
+        self.feed_up()
+        self.replaying = set(SERIES)
+
+    def feed_live(self, contract: str) -> None:
+        """A live tick of `contract` (`on_live`): its series' replay of today is over."""
+        self.replaying.discard(contract[:-3])
 
     def _feed_alert_due(self, account: str, now: datetime) -> bool:
         """Whether this run (a re-arm is a new one) is told of the feed's outage now: once per
@@ -792,6 +854,10 @@ class LiveHub:
         if self._db() is None:
             return  # nothing was ever armed
         rows = {a.account: a for a in list_armed(self.conn)}
+        if rows and self._follow_bars and self._feed is None:  # before any account warms up
+            self.replaying = set(SERIES)  # until the feed's replay of today is over
+            self._feed = asyncio.create_task(run_bars(self, stream_bars))
+            self._tasks.append(self._feed)
         for account in [x for x, s in self.states.items() if rows.get(x) != s.setup.armed]:
             del self.states[account]
             self.unwritten.pop(account, None)  # disarmed: its halts must not reach a new arming
@@ -799,6 +865,7 @@ class LiveHub:
             self.drift_ticks.pop(account, None)
             self.instruments.pop(account, None)
             self.failed.pop(account, None)
+            self._store_retry.pop(account, None)
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]
@@ -868,7 +935,99 @@ class LiveHub:
             except Exception as e:  # isolation refusal, load error, timeout
                 s, more = core.halt(s, f"cannot load the strategy: {e}")
                 out += more  # never instead of the rows before it (an open, a mode mismatch)
-        await self._apply(a.account, s, out)
+        # no strategy loaded: _warm drops it at once, so a halt shows alone
+        await self._apply(a.account, replace(s, warming=WARMING), out)
+        await self._warm(a.account, now)
+
+    async def _warm(self, account: str, now: datetime) -> None:
+        """`_warm_up`, its errors contained: never out of a sync (from a bar, up to `run_bars`,
+        which would resubscribe: a full replay). One after the strategy stepped halts the account
+        (`_failed`): stepped twice, its state would not be the day's."""
+        try:
+            await self._warm_up(account, now)
+        except Exception as e:
+            await self._failed(account, "a warm-up", e)
+
+    async def _warm_up(self, account: str, now: datetime) -> None:
+        """DEC-4e: replay today's bars (`today`) through the account's strategy child, actions
+        suppressed, then step sees the backtest's window (`core.warm_up`, `core.warmed`). No
+        new entries until then: while its series replays (`WAITING`), or while the bar store
+        does not reach the last trading day before today (`STORE_SHORT`, alerted once; loaded
+        again at most once per `STORE_RETRY`)."""
+        s, proc = self.states[account], self.children.get(account)
+        if s.warming is None:
+            return
+        if proc is None:  # halted, its child gone: nothing left to wait for
+            return await self._apply(account, replace(s, warming=None), ())
+        series, day = s.setup.spec.series, trading_day(now)
+        if series in self.replaying:
+            return await self._warming(account, WAITING.format(series=series))
+        if now < self._store_retry.get(account, now):
+            return
+        instruments = self.instruments[account]
+        try:
+            history, last = await asyncio.to_thread(self._history, instruments, series, day)
+            contract = front_month(instruments, series, day)
+        except Exception as e:  # a broken or planted parquet file, a calendar that has ended
+            self._store_retry[account] = now + STORE_RETRY
+            return await self._warming(account, STORE_ERROR.format(error=_error(e)), alert=True)
+        if not history or trading_day(history[-1].ts) < last:
+            self._store_retry[account] = now + STORE_RETRY
+            why = STORE_SHORT.format(series=series, day=last.isoformat())
+            return await self._warming(account, why, alert=True)
+        self._store_retry.pop(account, None)
+        try:  # nothing stepped yet: kept warming, tried again after STORE_RETRY
+            bars = [b for b in self.today.get(contract, ()) if trading_day(b.ts) == day]
+            since = s.setup.armed.armed_at
+            rows = [
+                (r.ts, r.kind, r.payload)
+                for r in journal.rows(self.conn, account, day, since=since)
+            ]
+            ctxs, window = core.warm_up(s, history, bars, rows)
+        except Exception as e:  # tried again after STORE_RETRY; a traceback once per error
+            self._store_retry[account] = now + STORE_RETRY
+            error = _error(e)
+            if s.warming == WARM_ERROR.format(error=error):
+                log.warning("live account %s: warm-up failed again: %s", account, error)
+            else:
+                log.exception("live account %s: warm-up failed", account)
+            return await self._warming(account, WARM_ERROR.format(error=error), alert=True)
+        replayed = []
+        try:
+            async with asyncio.timeout(WARM_TIMEOUT):
+                for c, line in zip(ctxs, ctx_lines(ctxs), strict=True):
+                    reply = await self._ask(proc, line, self._timeout)
+                    replayed.append((c.ts, reply["actions"]))
+        except Exception as e:  # as a step error: the child is gone
+            await self._kill(account)
+            why = SLOW.format(seconds=WARM_TIMEOUT) if isinstance(e, TimeoutError) else e
+            s = replace(s, warming=None)  # halted, child gone: no warm-up left to wait for
+            return await self._apply(
+                account, *core.halt(s, f"strategy error while warming up: {why}")
+            )
+        await self._apply(account, *core.warmed(s, window, replayed, rows))
+
+    async def _warming(self, account: str, reason: str, alert: bool = False) -> None:
+        """Still warming up for `reason`; a new one is journalled as an "alert" when `alert`."""
+        s = self.states[account]
+        if s.warming != reason:
+            out = (Log("alert", {"message": reason}),) if alert else ()
+            await self._apply(account, replace(s, warming=reason), out)
+
+    def _history(
+        self, instruments: Instruments, series: str, day: date
+    ) -> tuple[tuple[Bar, ...], date]:
+        """The store's last window of bars before trading day `day`, from its last `HISTORY`
+        days (all of it when those reach the last trading day but hold fewer: a store begun
+        lately; a stale one is never read whole), and the last trading day before `day` with a
+        session outside the roll window, which the store must reach."""
+        data, end = self.settings.data_dir, day - timedelta(days=1)
+        sessions = [d for d in expected_days(day - HISTORY, end) if not in_roll_window(d)]
+        last = sessions[-1] if sessions else end
+        bars = load_bars(data, instruments, series, day - HISTORY, end)
+        if bars and trading_day(bars[-1].ts) >= last and len(bars) < core.WINDOW:
+            bars = load_bars(data, instruments, series, end=end)
+        return bars[-core.WINDOW :], last
 
     def _killed(self, a: Armed) -> str | None:
         """The halt reason of a kill whose disarm failed, or of a failed disarm of `a`'s account
@@ -915,9 +1074,16 @@ class LiveHub:
     async def _ask(
         self, proc: asyncio.subprocess.Process, request: Any, timeout: float
     ) -> dict[str, Any]:
+        """One request (None: none, the child's first line; bytes: an encoded line) and its
+        reply; ValueError for a timeout, a dead child or a reply `parse_reply` refuses."""
+
+        line = request
+        if request is not None and not isinstance(request, bytes):
+            line = json.dumps(request).encode() + b"\n"
+
         async def exchange() -> bytes:
-            if request is not None:
-                proc.stdin.write(json.dumps(request).encode() + b"\n")
+            if line is not None:
+                proc.stdin.write(line)
                 await proc.stdin.drain()
             return await proc.stdout.readline()
 
@@ -985,8 +1151,15 @@ async def run_bars(hub: LiveHub, stream: Stream) -> None:
         try:
             instruments = load_instruments()
             contracts = [front_month(instruments, series, day) for series in SERIES]
-            # an authenticated (re)subscribe ends an outage before the next bar (e.g. a weekend)
-            subscribed = stream(hub.settings, contracts, on_auth=hub.feed_up)
+            # an authenticated (re)subscribe ends an outage before the next bar (e.g. a weekend),
+            # and each replays today from the open: the hub keeps today's bars for warm-ups (#79)
+            subscribed = stream(
+                hub.settings,
+                contracts,
+                on_auth=hub.resubscribed,
+                start=datetime.combine(day - timedelta(days=1), time(18), NY),
+                on_live=hub.feed_live,
+            )
             async with contextlib.aclosing(subscribed) as bars:
                 async for bar in bars:
                     hub.feed_up()

@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from live_helpers import ARMED_AT, pinned
+from live_helpers import ARMED_AT, pinned, stored
 
 from fenrir.bridge.client import AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, running
@@ -54,7 +54,9 @@ def account(
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    s = Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    stored(s.data_dir)  # warm-up (#79) needs the store up to the last trading day
+    return s
 
 
 @pytest.fixture

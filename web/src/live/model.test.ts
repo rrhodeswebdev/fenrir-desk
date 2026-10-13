@@ -441,6 +441,26 @@ describe('each condition counts, whatever the halt (#212)', () => {
   })
 })
 
+describe('warming up (#79): a condition, not a halt', () => {
+  const warming = { kind: 'warming', reason: "warming up: today's NQ bars from LSE are not complete yet" } as const
+  const stale = { kind: 'stale', reason: 'no NQ bar for 191s; new entries paused' } as const
+  const a = account({ halt_reason: warming.reason, conditions: [warming] }) // halted stays false
+
+  it('lights Feed caution, under a stale pause or a halt too', () => {
+    expect(states(status({ accounts: [a] }))[0]).toBe('caution')
+    const safety = { kind: 'safety', reason: 'safety margin' } as const
+    expect(states(status({ accounts: [account({ ...held(safety, stale, warming) })] }))[0]).toBe('caution')
+    expect(states(status({ lse: lseDown, accounts: [a] }))[0]).toBe('alarm')
+  })
+
+  it('shows its reason in caution, after a stale pause, needs no cell, and outlines the account in caution', () => {
+    expect(reasons(a)).toEqual([{ tone: 'caution', text: warming.reason }])
+    expect(reasons(account(held(stale, warming))).map((r) => r.text)).toEqual([stale.reason, warming.reason])
+    expect(need(a)).toBeNull()
+    expect(alertTone(a)).toBe('caution')
+  })
+})
+
 describe('feed outage', () => {
   const now = Date.parse('2026-10-13T18:31:00Z')
   const lse = (error: string | null, retry_at: string | null) => ({ connected: error === null, last_bar_ts: null, error, retry_at })

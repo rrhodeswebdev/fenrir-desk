@@ -30,6 +30,9 @@ class FakeAddon:
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)  # every POST, in order
     seen: set[str] = field(default_factory=set)  # client_ids already handled
     delays: list[float] = field(default_factory=list)  # per-POST delay after handling, popped
+    rejects: list[str] = field(
+        default_factory=list
+    )  # per-POST refusal error, popped (not duplicates)
     heartbeats: bool = True
     heartbeat_every: float = 2.0
     outbox: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
@@ -68,12 +71,13 @@ def make_app(fake: FakeAddon) -> FastAPI:
         body = await request.json()
         fake.requests.append((request.url.path, body))
         duplicate = body["client_id"] in fake.seen
-        fake.seen.add(body["client_id"])
+        fake.seen.add(body["client_id"])  # as the add-on, a refused id is seen too
+        error = fake.rejects.pop(0) if fake.rejects and not duplicate else None
         if fake.delays:
             await asyncio.sleep(
                 fake.delays.pop(0)
             )  # handled already; the client may time out first
-        return {"accepted": not duplicate, "duplicate": duplicate, "error": None}
+        return {"accepted": not duplicate and error is None, "duplicate": duplicate, "error": error}
 
     for path in ("/bracket", "/flatten", "/cancel", "/flatten-all"):
         app.add_api_route(path, post, methods=["POST"], dependencies=deps)

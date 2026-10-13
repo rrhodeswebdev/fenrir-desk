@@ -1,4 +1,5 @@
-"""Live runner shell: armed rows -> runner states, bars and clock ticks -> core, effects -> journal.
+"""Live runner shell: armed rows -> runner states; bars, fills and clock ticks -> core; effects ->
+journal and the NinjaTrader add-on.
 
 Strategy code never runs here (DEC-1): each running account has one `fenrir.live.step_child`
 process, as `FENRIR_PTY_USER` when set, holding the strategy's state; its replies are untrusted
@@ -16,12 +17,14 @@ import os
 import signal
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
+from fenrir.bridge.client import AddonClient
+from fenrir.bridge.names import nt_instrument
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import Instruments, front_month, load_instruments, spec
@@ -30,7 +33,7 @@ from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
 from fenrir.live.arming import Armed, list_armed
-from fenrir.live.core import Log, RunnerState, Setup
+from fenrir.live.core import Log, RunnerState, Send, Setup
 from fenrir.live.step_child import ctx_json
 from fenrir.rules.account import with_dll
 from fenrir.rules.loader import load_account
@@ -135,14 +138,25 @@ class LiveHub:
     """Runs every armed account on live bars. Opens nothing until something is armed:
     `<private_dir>/fenrir.db` is opened once it exists, never created here."""
 
-    def __init__(self, settings: Settings, *, secret: str = "", step_timeout: float = 10.0):
-        """`secret` (the session key): no env var holding it reaches a step child."""
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        secret: str = "",
+        step_timeout: float = 10.0,
+        addon: AddonClient | None = None,
+    ):
+        """`secret` (the session key): no env var holding it reaches a step child. `addon`: the
+        NinjaTrader add-on client the Sends go to; None when not configured (they fail)."""
         self.settings = settings
+        self.addon = addon
         self.conn: sqlite3.Connection | None = None
         self.instruments: Instruments | None = None
         self.states: dict[str, RunnerState] = {}
         self.broken: dict[str, tuple[Armed, str]] = {}  # alerted once; retried when the row changes
         self.unwritten: dict[str, tuple[Log, ...]] = {}  # RESTORED rows sqlite refused; retried
+        self.retry: dict[str, Send] = {}  # a Flatten whose post timed out; resent while exiting
+        self.drift_ticks: dict[str, float] = {}  # last entry fill's distance from its LSE close
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
@@ -164,6 +178,12 @@ class LiveHub:
         for account in list(self.children):
             await self._kill(account)
         if self.conn is not None:
+            for account, rows in self.unwritten.items():  # one last try: they are lost after this
+                try:
+                    for r in rows:
+                        journal.write(self.conn, _now(), account, r.kind, r.payload)
+                except Exception:
+                    log.exception("live account %s: queued rows not journalled", account)
             self.conn.close()
             self.conn = None
 
@@ -171,7 +191,10 @@ class LiveHub:
         async with self._lock:
             await self._sync(now)
             for account, s in list(self.states.items()):
-                self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                try:
+                    await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                except Exception:  # e.g. its rows still refused: the others' retries still go out
+                    log.exception("live account %s failed on a tick", account)
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:
@@ -183,7 +206,7 @@ class LiveHub:
                 if bar.contract != front_month(self.instruments, s.setup.spec.series, day):
                     continue
                 try:
-                    self._apply(account, *await self._bar(account, s, bar))
+                    await self._apply(account, *await self._bar(account, s, bar))
                 except Exception as e:  # one account's failure must not stop the others' bar
                     log.exception("live account %s failed on a bar", account)
                     await self._kill(account)
@@ -191,9 +214,31 @@ class LiveHub:
                     # from the state _apply kept, so a breach it could not journal is not replaced
                     s = self.states[account]
                     try:
-                        self._apply(account, *core.halt(s, f"live runner error: {error}"))
+                        await self._apply(account, *core.halt(s, f"live runner error: {error}"))
                     except Exception:  # the journal itself failed: halted in memory, row retried
                         log.exception("live account %s halted; halt not journalled", account)
+
+    async def handle_fill(self, fill: Mapping[str, Any]) -> None:
+        """One validated add-on `fill` message (22.5 routes the stream here): booked only by the
+        sim or live account it names, and only on that account's armed instrument. Raises the
+        journal's error, as `_apply` does."""
+        async with self._lock:
+            account = fill["account"]
+            s = self.states.get(account)
+            ts = datetime.fromisoformat(fill["ts"])
+            if s is None or s.setup.armed.mode == "dry" or fill["instrument"] != self._nt(s, ts):
+                return
+            w = s.working
+            if w and s.position.qty == 0 and fill["client_id"] == w.client_id:  # its entry fill
+                self.drift_ticks[account] = abs(fill["price"] - w.close) / s.setup.spec.tick
+            await self._apply(account, *core.on_fill(s, fill))
+
+    def _nt(self, s: RunnerState, ts: datetime) -> str:
+        """NinjaTrader's name for the account's front month on `ts`'s trading day."""
+        spec = s.setup.spec  # a running account means _start loaded the instruments
+        return nt_instrument(
+            spec.symbol, front_month(self.instruments, spec.series, trading_day(ts))
+        )
 
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
         out: tuple[Log, ...] = ()
@@ -206,30 +251,100 @@ class LiveHub:
         return s, out + more + last
 
     def status(self) -> dict[str, Any]:
-        """The `GET /api/live/status` body (plan 22 fills `nt` and `drift`)."""
+        """The `GET /api/live/status` body (22.5 fills `nt`)."""
         last = self.last_bar_ts
         return {
             "lse": {"connected": self.lse_connected, "last_bar_ts": last and last.isoformat()},
             "nt": {"connected": False, "last_heartbeat": None},
-            "drift": {"ok": True, "ticks": None},
+            "drift": {
+                "ok": not any(s.drift for s in self.states.values()),
+                "ticks": max(self.drift_ticks.values(), default=None),
+            },
             "accounts": [core.account_status(s) for s in self.states.values()]
             + [_cannot_start(a, error) for a, error in self.broken.values()],
         }
 
-    def _apply(self, account: str, s: RunnerState, effects: tuple[Log | core.Send, ...]) -> None:
+    async def _apply(self, account: str, s: RunnerState, effects: Sequence[Log | Send]) -> None:
+        """Journal each Log and post each Send, in order, after the rows queued earlier and a
+        timed-out Flatten still out. The state is kept first, so a fill that arrives while a post
+        is out finds its working entry. Once sqlite refuses a row, no later row is tried: the
+        RESTORED ones are queued for the next call (a tick) and the error is raised at the end;
+        Flattens still go out, Brackets (whose "action" row was not written) do not."""
         self.states[account] = s
-        effects = self.unwritten.pop(account, ()) + tuple(effects)
-        for i, e in enumerate(effects):
-            if isinstance(e, core.Send):
-                # unreachable until 22.2/22.4 supply sim/live start figures; fail loud, never drop
-                raise RuntimeError(f"order sending lands in 22.4 (#86): {e.client_id} not sent")
+        todo: list[Log | Send] = [*self.unwritten.pop(account, ())]
+        retry = self.retry.pop(account, None)
+        if retry is not None and s.exiting == retry.client_id:  # still the Flatten out
+            todo.append(retry)
+        todo += effects
+        refused: Exception | None = None
+        kept: list[Log] = []
+        while todo:
+            e = todo.pop(0)
+            if isinstance(e, Send):
+                todo[:0] = await self._post(account, e, refused is not None, again=e is retry)
+                continue
+            if refused is None:
+                try:
+                    journal.write(self.conn, _now(), account, e.kind, e.payload)
+                    continue
+                except Exception as x:  # keep what a restart restores; the next _apply retries
+                    refused = x
+            if e.kind in RESTORED:
+                kept.append(e)
+        if refused is not None:
+            self.unwritten[account] = tuple(kept)
+            raise refused
+
+    async def _post(self, account: str, send: Send, unjournalled: bool, again: bool) -> list[Log]:
+        """Post one Send; the rows it adds. Only a definitive refusal (`accepted` and `duplicate`
+        both false, or a post never made) goes through `core.send_failed`. After a timeout or any
+        other error it may have landed: a Bracket stays working until a fill, the day roll or
+        reconciliation, and a Flatten is resent under its client_id (`again`: no second alert)."""
+        s, cid, a = self.states[account], send.client_id, send.action
+        if self.addon is None:
+            error = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
+        elif unjournalled and isinstance(a, Bracket):
+            error = "not sent: the journal refused its row"
+        else:
             try:
-                journal.write(self.conn, _now(), account, e.kind, e.payload)
-            except Exception:  # keep what a restart restores; the next _apply (a tick) retries
-                self.unwritten[account] = tuple(
-                    x for x in effects[i:] if isinstance(x, Log) and x.kind in RESTORED
-                )
-                raise
+                if isinstance(a, Bracket):
+                    nt = self._nt(s, s.bars[-1].ts)
+                    ack = await self.addon.bracket(
+                        cid, account, nt, a.side, int(a.qty), a.stop, a.target
+                    )
+                    landed = ack.duplicate and await self._landed(account, cid, nt)
+                else:
+                    ack = await self.addon.flatten(cid, account)
+                    landed = ack.duplicate  # /flatten never over-closes: it did its job
+            except Exception as e:  # timeout, transport, HTTP status, malformed reply
+                log.warning("live account %s: send %s outcome unknown", account, cid)
+                if isinstance(a, Flatten):
+                    self.retry[account] = send
+                if again:
+                    return []
+                then = "resending it" if isinstance(a, Flatten) else "its entry stays working"
+                message = f"send {cid} outcome unknown: {type(e).__name__}: {e}; {then}"
+                return [Log("alert", {"message": message})]
+            if ack.accepted or landed:
+                return []
+            error = ack.error or "refused"
+            if ack.duplicate:
+                error = "duplicate, but NinjaTrader shows neither its entry order nor a position"
+        s, out = core.send_failed(s, cid, error)
+        self.states[account] = s
+        return list(out)
+
+    async def _landed(self, account: str, cid: str, nt: str) -> bool:
+        """After a `duplicate` Bracket: the earlier attempt may have been refused, its reply lost.
+        It landed when NinjaTrader works its entry or holds a position; unknown counts as landed."""
+        try:
+            orders = await self.addon.orders(account)
+            positions = await self.addon.positions(account)
+        except Exception:
+            log.warning("live account %s: cannot check duplicate %s", account, cid)
+            return True
+        entry = any(o["client_id"] == cid and o["role"] == "entry" for o in orders)
+        return entry or any(p["instrument"] == nt and p["qty"] for p in positions)
 
     async def _sync(self, now: datetime) -> None:
         if self.conn is None:
@@ -241,6 +356,8 @@ class LiveHub:
         for account in [x for x, s in self.states.items() if rows.get(x) != s.setup.armed]:
             del self.states[account]
             self.unwritten.pop(account, None)  # disarmed: its halts must not reach a new arming
+            self.retry.pop(account, None)
+            self.drift_ticks.pop(account, None)
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]
@@ -272,12 +389,14 @@ class LiveHub:
         halts = journal.rows(self.conn, a.account, kind="halt", since=a.armed_at)
         peaks = journal.rows(self.conn, a.account, kind="peak", since=a.armed_at)
         s, out = core.start(setup, now, [r.payload for r in halts], [r.payload for r in peaks])
+        today = journal.rows(self.conn, a.account, day=trading_day(now), since=a.armed_at)
+        s = core.replay(s, [(r.kind, r.payload) for r in today])
         if s.started:
             try:
                 await self._spawn(a)
             except Exception as e:  # isolation refusal, load error, timeout
                 s, out = core.halt(s, f"cannot load the strategy: {e}")
-        self._apply(a.account, s, out)
+        await self._apply(a.account, s, out)
 
     async def _spawn(self, a: Armed) -> None:
         overlay, drop = as_user(strategy_user(self.settings))

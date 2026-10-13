@@ -189,7 +189,7 @@ async def test_start_gets_the_peaks_since_arming(hub, conn, armed, monkeypatch):
     mine = {"peak": 50_200.0, "ts": "2026-10-12T13:01:00+00:00"}
     journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "peak", {"peak": 9e9})  # earlier
     journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "peak", mine)
-    journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "bar", {})
+    journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "alert", {})
     await hub.tick(T0)
     assert calls == [[mine]]
 

@@ -21,7 +21,6 @@ from fenrir.core.bars import Bar
 from fenrir.core.instruments import ContractSpec, in_roll_window
 from fenrir.core.sessions import NY, at_or_after, trading_day
 from fenrir.live.arming import Armed
-from fenrir.live.journal import iso
 from fenrir.rules.account import apply, build_rules, initial_state, phase_rules, view
 from fenrir.rules.contracts import max_minis
 from fenrir.rules.ledger import book
@@ -178,18 +177,19 @@ def start(
     now: datetime,
     halts: Sequence[Mapping[str, Any]] = (),
     peaks: Sequence[Mapping[str, Any]] = (),
-    last_row: datetime | None = None,
 ) -> Step:
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
-    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a).
-    `last_row`: when the account's latest journal row since then was written (None: none)."""
+    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a)."""
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
     if begin is not None:
         begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
+    # an intraday peak starts at least at the balance: journal that raise too
+    raised = begin is not None and acct.peak > begin.peak - begin.phase_start
+    out = (_peak_log(setup, acct, now),) if raised else ()
     # without day_start these are the restart's figures; brackets are blocked until it arrives
     if day is not None:  # the open's floor, from the open's figures as the start's
         at_open = Start(begin.phase_start, day.peak, day.balance)
@@ -202,15 +202,26 @@ def start(
         if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
             s, _ = _halt(s, h["reason"], h["kind"], until)
     if setup.strategy_hash != a.strategy_hash:
-        return halt(replace(s, started=False), "strategy file changed since arming; re-arm")
+        s, more = halt(replace(s, started=False), "strategy file changed since arming; re-arm")
+        return s, out + more
     if a.mode != "dry" and setup.start is None:
         reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
         return halt(replace(s, started=False), reason)
-    # an end_of_day peak rises at each day roll: a roll missed while down needs the user (DEC-4a)
     trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
-    if begin and trailing == "end_of_day" and trading_day(last_row or a.armed_at) < acct.day:
-        return halt(s, CONFIRM_BALANCES)
-    return s, ()
+    if begin and trailing == "end_of_day" and _missed_close(a.armed_at, peaks, acct.day):
+        s, more = halt(s, CONFIRM_BALANCES)
+        return s, out + more
+    return s, out
+
+
+def _missed_close(armed_at: datetime, peaks: Sequence[Mapping[str, Any]], today: date) -> bool:
+    """end_of_day: each day roll (and only a roll) journals a "peak" row stamped with its bar or
+    fill. A session that opened after the last roll (or the arming), up to `today`, means a close
+    the restarted runner never raises at: its balance may have moved since (DEC-4a)."""
+    rolled = trading_day(max([armed_at, *(datetime.fromisoformat(p["ts"]) for p in peaks)]))
+    # trading days with a session (Mon-Fri; holidays count) open at 18:00 ET the evening before
+    days = (rolled + timedelta(days=n) for n in range(1, (today - rolled).days + 1))
+    return any(d.weekday() < 5 for d in days)
 
 
 def halt(s: RunnerState, reason: str) -> Step:
@@ -219,8 +230,8 @@ def halt(s: RunnerState, reason: str) -> Step:
 
 
 def on_bar(s: RunnerState, bar: Bar) -> Step:
+    s, out = _roll_day(s, bar.ts)  # journals its own "peak" row
     was = s
-    s, out = _roll_day(s, bar.ts)
     # backtest calling order: the entry fill, then the Mark of the position held, then the exit
     if s.held:  # an exit filled in this bar: mark what was held, at the balance before the exit
         held, balance = s.held
@@ -251,12 +262,10 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
     instrument; the shell routes fills by account and instrument."""
     ts = datetime.fromisoformat(fill["ts"])
     qty, price = fill["qty"], fill["price"]
-    was = s
-    s, out = _roll_day(s, ts)
+    s, out = _roll_day(s, ts)  # journals its own "peak" row; a Fill never moves the peak
     out += (Log("fill", dict(fill)),)
     if qty == 0:
-        alert = Log("alert", {"message": "ignored a fill with qty 0"})
-        return s, (*out, alert, *_peaked(was, s, ts))
+        return s, (*out, Log("alert", {"message": "ignored a fill with qty 0"}))
     pos, w, spec = s.position, s.working, s.setup.spec
     rest = pos.qty + qty
     flipped = rest != 0 and pos.qty != 0 and (rest > 0) != (pos.qty > 0)
@@ -313,7 +322,7 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         # "f<n>": today's n-th fill, so each fill's Flatten has its own id, the same on a replay
         s, more = _stopless(s, ts, f"f{len(s.fills)}")
         out += more
-    return s, out + _peaked(was, s, ts)
+    return s, out
 
 
 def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Step:
@@ -605,6 +614,7 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         acct = s.acct  # failed until disarmed: its figures stay as they were
     elif s.nt and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day":
         acct = _raised(s.setup, acct, s.nt.balance)  # NinjaTrader's balance at the close (DEC-4a)
+        out = (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40
@@ -635,11 +645,16 @@ def _raised(setup: Setup, a: AccountState, top: float) -> AccountState:
 
 
 def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
-    """A "peak" row (absolute $) when sim or live raised the peak: a restart starts from it."""
-    begin = s.setup.start
-    if s.setup.armed.mode == "dry" or begin is None or s.acct.peak <= was.acct.peak:
+    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it."""
+    if s.setup.armed.mode == "dry" or s.setup.start is None or s.acct.peak <= was.acct.peak:
         return ()
-    return (Log("peak", {"peak": begin.phase_start + s.acct.peak, "ts": iso(ts)}),)
+    return (_peak_log(s.setup, s.acct, ts),)
+
+
+def _peak_log(setup: Setup, a: AccountState, ts: datetime) -> Log:
+    """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601)."""
+    stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
+    return Log("peak", {"peak": setup.start.phase_start + a.peak, "ts": stamp})
 
 
 def _strict(s: RunnerState) -> AccountState:

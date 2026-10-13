@@ -1,6 +1,6 @@
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 import pytest
 from live_helpers import ARMED_AT
@@ -106,13 +106,3 @@ def test_read_only_never_creates_the_file(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         journal.open_ro(tmp_path / "fenrir.db")
     assert not (tmp_path / "fenrir.db").exists()
-
-
-def test_last_ts_is_the_latest_row_since(conn):
-    assert journal.last_ts(conn, "Sim101", ARMED_AT) is None
-    journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "bar", {})  # earlier arming
-    assert journal.last_ts(conn, "Sim101", ARMED_AT) is None
-    journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "peak", {})
-    journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "bar", {})
-    journal.write(conn, ARMED_AT + timedelta(minutes=3), "Other", "bar", {})
-    assert journal.last_ts(conn, "Sim101", ARMED_AT) == ARMED_AT + timedelta(minutes=2)

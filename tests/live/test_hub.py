@@ -168,13 +168,13 @@ async def test_halts_survive_a_restart_until_rearmed(hub, conn, armed):
     assert acc["halted"] is False
 
 
-async def test_start_gets_the_peaks_and_last_row_since_arming(hub, conn, armed, monkeypatch):
+async def test_start_gets_the_peaks_since_arming(hub, conn, armed, monkeypatch):
     calls = []
     real = core.start
 
-    def spy(setup, now, halts=(), peaks=(), last_row=None):
-        calls.append((list(peaks), last_row))
-        return real(setup, now, halts, peaks, last_row)
+    def spy(setup, now, halts=(), peaks=()):
+        calls.append(list(peaks))
+        return real(setup, now, halts, peaks)
 
     monkeypatch.setattr(core, "start", spy)
     arming.insert_armed(conn, armed)
@@ -183,7 +183,28 @@ async def test_start_gets_the_peaks_and_last_row_since_arming(hub, conn, armed, 
     journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "peak", mine)
     journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "bar", {})
     await hub.tick(T0)
-    assert calls == [([mine], ARMED_AT + timedelta(minutes=2))]
+    assert calls == [[mine]]
+
+
+async def test_a_row_after_the_close_is_no_proof_of_a_roll(hub, conn, armed, monkeypatch, clock):
+    """The hub cannot start sim yet (23.3): run the real start on a sim setup with what it read."""
+    got = []
+    real = core.start
+
+    def sim_start(setup, now, *rest):
+        start = core.Start(50_000.0, 50_000.0, 50_000.0)
+        sim = replace(setup, armed=replace(setup.armed, mode="sim"), start=start)
+        got.append(real(sim, now, *rest)[0])
+        return real(setup, now, *rest)
+
+    monkeypatch.setattr(core, "start", sim_start)
+    arming.insert_armed(conn, armed)  # Monday 09:00 ET; Lucid Flex trails end_of_day
+    after = datetime(2026, 10, 12, 22, 5, tzinfo=UTC)  # 18:05 ET: Tuesday's trading day
+    stale = {"message": "no NQ bar for 240s; new entries paused"}  # on_tick: no bar, no roll
+    journal.write(conn, after, "Sim101", "alert", stale)
+    clock["t"] = after + timedelta(minutes=5)
+    await hub.tick(clock["t"])
+    assert got[0].halted.startswith("confirm balances: ")
 
 
 async def test_file_edited_while_armed_halts_on_next_bar(hub, conn, armed):

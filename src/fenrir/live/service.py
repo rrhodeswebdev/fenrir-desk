@@ -257,10 +257,7 @@ class LiveHub:
             return
         halts = journal.rows(self.conn, a.account, kind="halt", since=a.armed_at)
         peaks = journal.rows(self.conn, a.account, kind="peak", since=a.armed_at)
-        last = journal.last_ts(self.conn, a.account, a.armed_at)
-        s, out = core.start(
-            setup, now, [r.payload for r in halts], [r.payload for r in peaks], last
-        )
+        s, out = core.start(setup, now, [r.payload for r in halts], [r.payload for r in peaks])
         if s.started:
             try:
                 await self._spawn(a)

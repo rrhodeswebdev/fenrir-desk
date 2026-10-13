@@ -46,10 +46,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 
     public static class FenrirLog
     {
-        // NinjaScript Output window, tab 1
+        // NinjaScript Output window, tab 1. Logging never throws: it runs inside catch blocks.
         public static void Info(string message)
         {
-            NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            try
+            {
+                NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            }
+            catch
+            {
+            }
         }
 
         // also the Control Center Log tab, as an alert
@@ -101,6 +107,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (config.ManagedAccounts.Count == 0)
                     FenrirLog.Alert("managed_accounts is empty in fenrir-addon.json: Fenrir will not see or touch any account");
                 broker = new FenrirBroker(config);
+                broker.Start();
                 if (config.Token.Length < 16)
                 {
                     FenrirLog.Alert("set a token of at least 16 characters in fenrir-addon.json; server not started");
@@ -122,6 +129,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 if (server != null) server.Stop();
+                if (broker != null) broker.Stop();
             }
             catch (Exception e)
             {

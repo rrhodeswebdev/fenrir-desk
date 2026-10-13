@@ -1,6 +1,7 @@
 #region Using declarations
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -17,7 +18,6 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly FenrirConfig config;
         private readonly FenrirBroker broker;
         private readonly HttpListener listener = new HttpListener();
-        private readonly JavaScriptSerializer json = new JavaScriptSerializer();
 
         public FenrirServer(FenrirConfig config, FenrirBroker broker)
         {
@@ -65,30 +65,50 @@ namespace NinjaTrader.NinjaScript.AddOns
             return diff == 0;
         }
 
+        // A pool thread: nothing may escape it, since an unhandled exception there ends NinjaTrader.
         private void Handle(HttpListenerContext ctx)
         {
+            int status;
+            object body;
             try
             {
                 HttpListenerRequest req = ctx.Request;
                 if (!TokenOk(req.Headers["X-Fenrir-Token"]))
                 {
-                    Reply(ctx, 401, Error("unauthorized"));
-                    return;
+                    status = 401;
+                    body = Error("unauthorized");
                 }
-                object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
-                if (result == null) Reply(ctx, 404, Error("not found"));
-                else Reply(ctx, 200, result);
+                else
+                {
+                    object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
+                    status = result == null ? 404 : 200;
+                    body = result ?? Error("not found");
+                }
+            }
+            catch (BadRequest e)
+            {
+                status = 400;
+                body = Error(e.Message);
             }
             catch (Exception e)
             {
                 FenrirLog.Info("request failed: " + e);
+                status = 500;
+                body = Error(e.GetType().Name + ": " + e.Message);
+            }
+            try
+            {
+                Reply(ctx, status, body);
+            }
+            catch
+            {
+                // client gone
                 try
                 {
-                    Reply(ctx, 500, Error(e.GetType().Name + ": " + e.Message));
+                    ctx.Response.Abort();
                 }
                 catch
                 {
-                    // client gone
                 }
             }
         }
@@ -98,7 +118,30 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (method == "GET" && path == "/accounts") return broker.Accounts();
             if (method == "GET" && path == "/positions") return broker.Positions(req.QueryString["account"]);
             if (method == "GET" && path == "/orders") return broker.Orders(req.QueryString["account"]);
+            if (method == "POST" && path == "/bracket") return broker.Bracket(Body(req));
             return null;
+        }
+
+        private class BadRequest : Exception
+        {
+            public BadRequest(string message) : base(message) { }
+        }
+
+        private static Dictionary<string, object> Body(HttpListenerRequest req)
+        {
+            string text;
+            using (StreamReader r = new StreamReader(req.InputStream, Encoding.UTF8)) text = r.ReadToEnd();
+            Dictionary<string, object> body;
+            try
+            {
+                body = new JavaScriptSerializer().Deserialize<Dictionary<string, object>>(text);
+            }
+            catch (Exception)
+            {
+                body = null;
+            }
+            if (body == null) throw new BadRequest("body must be a JSON object");
+            return body;
         }
 
         private static Dictionary<string, object> Error(string message)
@@ -108,7 +151,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void Reply(HttpListenerContext ctx, int status, object body)
         {
-            byte[] bytes = Encoding.UTF8.GetBytes(json.Serialize(body));
+            byte[] bytes = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(body));
             ctx.Response.StatusCode = status;
             ctx.Response.ContentType = "application/json";
             ctx.Response.ContentLength64 = bytes.Length;

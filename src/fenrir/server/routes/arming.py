@@ -15,11 +15,12 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from fenrir.backtest.cache import list_reports
 from fenrir.backtest.run import load_account_choices
+from fenrir.core.instruments import read_instruments
 from fenrir.files import read_regular, refuse_symlink
 from fenrir.live import journal
 from fenrir.live.arming import (
@@ -28,11 +29,11 @@ from fenrir.live.arming import (
     Mode,
     Refusal,
     decide,
-    delete_armed,
     insert_armed,
     list_armed,
 )
-from fenrir.rules.loader import load_account
+from fenrir.live.arming import disarm as disarm_armed
+from fenrir.rules.loader import read_account
 from fenrir.rules.state import Phase
 from fenrir.server.jobs_runner import STRATEGY_MAX
 from fenrir.settings import Settings
@@ -48,10 +49,14 @@ class ArmBody(BaseModel):
     contract: str
     mode: Mode
     phase: Phase
-    confirm: bool = False
-    # NinjaTrader balances at phase start and the peak so far (DEC-4a); stored by 23.3 (#91)
+    confirm: StrictBool = False  # only true confirms a live arm: no "yes" or 1
+    # NinjaTrader balances at phase start and the peak so far (DEC-4a), pinned on `armed`
     start_balance: float | None = Field(None, gt=0)
     peak_balance: float | None = Field(None, gt=0)
+    # a live confirm echoes these from the needs_confirmation summary (what the user saw)
+    strategy_hash: str | None = None
+    rules_hash: str | None = None
+    dll_on: StrictBool | None = None
 
     @model_validator(mode="after")
     def _balances(self) -> "ArmBody":
@@ -132,12 +137,13 @@ def _arm(
     try:
         refuse_symlink(settings.strategies_dir)  # the terminal can swap it for a link (DEC-1)
         digest = hashlib.sha256(read_regular(path, STRATEGY_MAX)).hexdigest()
-        rules = load_account(body.rules_account, settings.rules_dir)
+        rules, rules_hash = read_account(body.rules_account, settings.rules_dir)
     except (OSError, ValueError) as e:
         raise HTTPException(400, str(e)) from e
     try:
         reports, choices = list_reports(settings), load_account_choices(settings.data_dir)
-    except ValueError as e:  # a broken cached report or accounts.yaml: names it
+        _, instruments = read_instruments()  # its hash is pinned (DEC-4d)
+    except (OSError, ValueError) as e:  # a broken cached report, accounts.yaml or instruments
         raise HTTPException(500, str(e)) from e
     req = ArmRequest(
         body.account,
@@ -147,6 +153,11 @@ def _arm(
         body.mode,
         body.phase,
         body.confirm,
+        body.start_balance,
+        body.peak_balance,
+        body.strategy_hash,
+        body.rules_hash,
+        body.dll_on,
     )
     with closing(journal.open_db(_db(settings))) as conn:
         # sqlite's write lock across list -> decide -> insert: two arms never both pass
@@ -158,9 +169,11 @@ def _arm(
                 list_armed(conn),
                 path.stem,
                 digest,
+                rules_hash,
+                instruments,
                 reports,
                 is_sim,
-                rules.evaluation is not None,
+                rules,
                 choices,
                 _now(),  # a fresh armed_at: halts and peaks are restored since it (#169)
             )
@@ -178,9 +191,5 @@ def disarm(body: DisarmBody, request: Request) -> dict[str, bool]:
     if not path.exists():
         return {"ok": False}
     with closing(journal.open_db(path)) as conn:
-        if body.account not in {a.account for a in list_armed(conn)}:
-            return {"ok": False}
-        halt = {"reason": "disarmed", "kind": None, "until": None}
-        journal.write(conn, _now(), body.account, "halt", halt)
-        delete_armed(conn, body.account)
-    return {"ok": True}
+        # the "halt" row and the delete in one transaction (the hub restores halts, #169)
+        return {"ok": disarm_armed(conn, body.account, _now())}

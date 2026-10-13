@@ -1,7 +1,9 @@
 import asyncio
 import json
+import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -41,13 +43,20 @@ T1 = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)
 T2 = datetime(2026, 10, 12, 15, 0, tzinfo=UTC)
 
 
+RULES_HASH = file_hash(RULES / "lucid" / "flex-50k.yaml")
+INSTRUMENTS_HASH = file_hash(Path("instruments.yaml"))
+
+
 class FakeAddon:
-    def __init__(self, down: bool = False):
+    def __init__(self, down: bool = False, malformed: bool = False):
         self.down = down
+        self.malformed = malformed
 
     async def accounts(self):
         if self.down:
             raise httpx.ConnectError("NinjaTrader is down")
+        if self.malformed:  # what AddonClient raises for a reply that fails validation
+            raise ValueError("accounts[0].is_sim: wrong type")
         return NT_ACCOUNTS
 
 
@@ -80,7 +89,7 @@ def client(settings) -> TestClient:
     return c
 
 
-def report(settings, path, *, contract="MNQ", dll_on=False, key="k1"):
+def report(settings, path, *, contract="MNQ", dll_on=False, key="k1", rules_hash=RULES_HASH):
     r = {
         "key": key,
         "created_at": "2026-10-10T14:00:00Z",
@@ -88,7 +97,7 @@ def report(settings, path, *, contract="MNQ", dll_on=False, key="k1"):
         "strategy_hash": file_hash(path),
         "params": {"n": 1},
         "account": "lucid-flex-50k",
-        "rules_hash": "r",
+        "rules_hash": rules_hash,
         "contract": contract,
         "data_version": "d",
         "holdout_months": 12,
@@ -98,6 +107,9 @@ def report(settings, path, *, contract="MNQ", dll_on=False, key="k1"):
         "note": "",
     }
     (settings.data_dir / "results" / f"{key}.json").write_text(json.dumps(r))
+
+
+PINS = ("dll_on", "rules_hash", "instruments_hash", "start_balance", "peak_balance")
 
 
 def body(path, **kw):
@@ -144,12 +156,27 @@ def test_sim_arm_with_a_current_backtest_is_listed(client, settings, path):
     assert [(a["account"], a["mode"]) for a in armed(client)] == [("SIM1", "sim")]
 
 
+def test_an_arm_pins_dll_on_the_hashes_and_the_balances(client, settings, path):
+    """DEC-4d: what the runner checks at every start is stored on the row."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    [row] = armed(client)
+    assert {k: row[k] for k in PINS} == {
+        "dll_on": False,
+        "rules_hash": RULES_HASH,
+        "instruments_hash": INSTRUMENTS_HASH,
+        "start_balance": 50000.0,
+        "peak_balance": 50500.0,
+    }
+
+
 @pytest.mark.parametrize(
     ("setup", "error"),
     [
         (lambda s, p: None, "no_backtest"),
         (lambda s, p: report(s, p, contract="NQ"), "no_backtest"),
         (lambda s, p: (report(s, p), p.write_text(STRATEGY + "# tweaked\n")), "hash_changed"),
+        (lambda s, p: report(s, p, rules_hash="r0"), "rules_changed"),
         (
             lambda s, p: (
                 report(s, p),
@@ -178,19 +205,52 @@ def test_a_second_arm_is_already_armed_and_keeps_the_row(client, settings, path)
 
 
 def test_live_needs_confirmation_then_arms(client, settings, path):
-    """SC4: a live arm shows the backtest summary first."""
+    """SC4: a live arm shows the backtest summary first; the confirm echoes what it showed."""
     report(settings, path)
     first = client.post("/api/arming/arm", json=body(path, account="LIVE1", mode="live"))
     assert first.status_code == 409
     assert first.json() == {
         "error": "needs_confirmation",
-        "summary": TUNING | {"expected_net_per_attempt": 187.5},
+        "summary": TUNING
+        | {
+            "expected_net_per_attempt": 187.5,
+            "holdout_gap": False,
+            "strategy_hash": file_hash(path),
+            "rules_hash": RULES_HASH,
+            "dll_on": False,
+            "liquidation_level": 48500.0,  # 50 000 + max(-2000, 500 - 2000)
+        },
     }
     assert armed(client) == []
-    second = client.post(
+    second = client.post("/api/arming/arm", json=confirm(path, first.json()["summary"]))
+    assert second.status_code == 200 and second.json()["mode"] == "live"
+
+
+def confirm(path, summary, **kw):
+    seen = {k: summary[k] for k in ("strategy_hash", "rules_hash", "dll_on")}
+    return body(path, account="LIVE1", mode="live", confirm=True) | seen | kw
+
+
+def test_a_confirm_after_the_strategy_was_swapped_arms_nothing(client, settings, path):
+    """The terminal swaps the file and writes a matching report between summary and confirm:
+    the confirm names what the user saw, so it is refused with the current summary."""
+    report(settings, path)
+    seen = client.post("/api/arming/arm", json=body(path, account="LIVE1", mode="live"))
+    path.write_text(STRATEGY + "# swapped\n")
+    report(settings, path, key="k2")
+    res = client.post("/api/arming/arm", json=confirm(path, seen.json()["summary"]))
+    assert (res.status_code, res.json()["error"]) == (409, "needs_confirmation")
+    assert res.json()["summary"]["strategy_hash"] == file_hash(path)
+    assert armed(client) == []
+
+
+def test_a_confirm_without_the_hashes_arms_nothing(client, settings, path):
+    report(settings, path)
+    res = client.post(
         "/api/arming/arm", json=body(path, account="LIVE1", mode="live", confirm=True)
     )
-    assert second.status_code == 200 and second.json()["mode"] == "live"
+    assert (res.status_code, res.json()["error"]) == (409, "needs_confirmation")
+    assert armed(client) == []
 
 
 @pytest.mark.parametrize("where", ["outside", "dotdot", "not_py", "missing", "symlink"], ids=str)
@@ -215,6 +275,20 @@ def test_a_path_that_is_not_a_strategy_file_is_400(client, settings, path, tmp_p
     assert armed(client) == []
 
 
+def test_a_symlinked_strategies_dir_is_400(client, settings, tmp_path):
+    """The terminal can swap strategies/ for a link to a dir it should not reach (DEC-1)."""
+    real = tmp_path / "elsewhere"
+    real.mkdir()
+    (real / "orb.py").write_text(STRATEGY)
+    settings.strategies_dir.rmdir()
+    settings.strategies_dir.symlink_to(real)
+    path = settings.strategies_dir / "orb.py"
+    report(settings, path)
+    res = client.post("/api/arming/arm", json=body(path))
+    assert res.status_code == 400 and "symlink" in res.json()["detail"]
+    assert armed(client) == []
+
+
 def test_unknown_rules_account_is_400(client, settings, path):
     report(settings, path)
     res = client.post("/api/arming/arm", json=body(path, rules_account="lucid-nope-1k"))
@@ -222,7 +296,11 @@ def test_unknown_rules_account_is_400(client, settings, path):
     assert armed(client) == []
 
 
-@pytest.mark.parametrize("addon", [FakeAddon(down=True), None], ids=["down", "unconfigured"])
+@pytest.mark.parametrize(
+    "addon",
+    [FakeAddon(down=True), FakeAddon(malformed=True), None],
+    ids=["down", "malformed", "unconfigured"],
+)
 def test_ninjatrader_down_is_502_for_sim_and_live_but_not_dry(client, settings, path, addon):
     report(settings, path)
     client.app.state.addon = addon
@@ -244,6 +322,8 @@ def test_ninjatrader_down_is_502_for_sim_and_live_but_not_dry(client, settings, 
         {"mode": "Live"},
         {"phase": "eval"},
         {"start_balance": "nan"},
+        {"confirm": "yes"},  # strict booleans: no odd spellings of a live confirmation
+        {"dll_on": 0},
     ],
     ids=str,
 )
@@ -275,6 +355,22 @@ def test_disarm_removes_the_row_and_journals_a_halt(client, settings, path):
     assert (row.kind, row.payload) == ("halt", {"reason": "disarmed", "kind": None, "until": None})
     # nothing armed: nothing journalled
     assert client.post("/api/arming/disarm", json={"account": "SIM1"}).json() == {"ok": False}
+
+
+def test_a_failed_disarm_journals_no_halt_and_keeps_the_row(client, settings, path):
+    """The halt row and the delete are one transaction: both or neither."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    db = settings.private_dir / "fenrir.db"
+    with closing(sqlite3.connect(db)) as c:
+        c.execute(
+            "CREATE TRIGGER no_delete BEFORE DELETE ON armed BEGIN SELECT RAISE(ABORT, 'x'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        client.post("/api/arming/disarm", json={"account": "SIM1"})
+    assert [a["account"] for a in armed(client)] == ["SIM1"]
+    with closing(journal.open_ro(db)) as conn:
+        assert journal.rows(conn) == ()
 
 
 def test_rearming_stamps_a_fresh_armed_at(client, settings, path, monkeypatch):
@@ -329,8 +425,9 @@ def test_the_hub_picks_up_arm_and_disarm(client, settings, path):
     assert (started, after) == (["paper"], [])
 
 
-def test_accounts_lists_ninjatrader_accounts_or_502(client):
+@pytest.mark.parametrize("addon", [FakeAddon(down=True), FakeAddon(malformed=True)], ids=str)
+def test_accounts_lists_ninjatrader_accounts_or_502(client, addon):
     assert client.get("/api/arming/accounts").json() == NT_ACCOUNTS
-    client.app.state.addon = FakeAddon(down=True)
+    client.app.state.addon = addon
     res = client.get("/api/arming/accounts")
     assert (res.status_code, res.json()) == (502, {"error": "nt_unavailable", "summary": None})

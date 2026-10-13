@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from live_helpers import ARMED_AT, fill, reconciled
+from live_helpers import ARMED_AT, fill, pinned, reconciled
 
 from fenrir.bridge.client import Ack, AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
@@ -78,8 +78,17 @@ def conn(settings):
 def armed(tmp_path, conn) -> Armed:
     path = tmp_path / "always.py"
     path.write_text(ALWAYS)
-    a = Armed(
-        "Sim101", str(path), file_hash(path), "lucid-flex-50k", "MNQ", "sim", "evaluation", ARMED_AT
+    a = pinned(
+        Armed(
+            "Sim101",
+            str(path),
+            file_hash(path),
+            "lucid-flex-50k",
+            "MNQ",
+            "sim",
+            "evaluation",
+            ARMED_AT,
+        )
     )
     arming.insert_armed(conn, a)
     return a

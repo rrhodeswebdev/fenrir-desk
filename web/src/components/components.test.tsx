@@ -22,6 +22,8 @@ describe('Page', () => {
       </Page>,
     )
     expect(html).toMatch(/^<header [^>]*><h1>Live<\/h1><button>Kill<\/button><\/header><div class="p-8 max-md:px-4"><p>body<\/p><\/div>$/)
+    // wraps at every width, so a strip wider than the column never pushes anything off-screen
+    expect(html).toMatch(/^<header class="[^"]*\bflex-wrap\b/)
   })
 
   it('lets className replace the body padding', () => {

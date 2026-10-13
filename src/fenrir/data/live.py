@@ -1,9 +1,19 @@
+import asyncio
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from fenrir.core.bars import Bar
+from fenrir.settings import Settings
 
 MINUTE = timedelta(minutes=1)
+# a minute closes this long after it ends on the wall clock, so ticks still in flight count
+# (gate item 3, 2026-10-13: lag median 0.25 s, p95 0.55 s)
+LAG_GRACE = timedelta(seconds=2)
+# a tick stamped further ahead of the wall clock is dropped: it would open a future bar and
+# every real tick before it would then be dropped as late
+MAX_AHEAD = timedelta(seconds=5)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,3 +70,54 @@ def close_due(state: BuilderState, now: datetime) -> tuple[BuilderState, tuple[B
     due = tuple(b for b in state.bars if b.ts + MINUTE <= now)
     kept = tuple(b for b in state.bars if b.ts + MINUTE > now)
     return BuilderState(kept, until), due
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def _next(ticks: AsyncIterator[Tick]) -> Tick | None:
+    try:
+        return await anext(ticks)
+    except StopAsyncIteration:
+        return None
+
+
+async def _bars_from(
+    ticks: AsyncGenerator[Tick, None], now: Callable[[], datetime], poll: float = 1.0
+) -> AsyncIterator[Bar]:
+    """Closed bars from `ticks`, closing quiet minutes on a `poll`-second timer. `now` is the
+    wall clock. When `ticks` ends, only bars already due are emitted, never a partial one."""
+    state = empty_builder()
+    pending = asyncio.ensure_future(_next(ticks))
+    try:
+        while True:
+            done, _ = await asyncio.wait({pending}, timeout=poll)
+            bars: tuple[Bar, ...] = ()
+            if done:
+                tick = pending.result()
+                if tick is None:
+                    for bar in close_due(state, now() - LAG_GRACE)[1]:
+                        yield bar
+                    return
+                if tick.ts <= now() + MAX_AHEAD:
+                    state, bars = feed(state, tick)
+                pending = asyncio.ensure_future(_next(ticks))
+            state, due = close_due(state, now() - LAG_GRACE)
+            for bar in bars + due:
+                yield bar
+    finally:
+        pending.cancel()
+        await asyncio.wait({pending})  # let the source see the cancel, then close it
+        await ticks.aclose()
+
+
+async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]:
+    """Closed 1-minute bars for `contracts` (front-month codes) from the LSE stream. The SDK
+    reconnects after a drop; the stream ends on a fatal error (bad key, quota, or the key's
+    one socket already in use), and closing it closes the socket."""
+    from fenrir.data.lse import stream_ticks  # lse imports Tick from here
+
+    async with aclosing(_bars_from(stream_ticks(settings, contracts), _now)) as bars:
+        async for bar in bars:
+            yield bar

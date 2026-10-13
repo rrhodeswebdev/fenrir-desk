@@ -145,8 +145,12 @@ class BuilderState: ...                     # current partial bar per contract
 def empty_builder() -> BuilderState
 def feed(state: BuilderState, tick: Tick) -> tuple[BuilderState, tuple[Bar, ...]]   # emits bars closed by this tick
 def close_due(state: BuilderState, now: datetime) -> tuple[BuilderState, tuple[Bar, ...]]  # emits bars whose minute has ended
-async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]   # shell, PROVISIONAL (gate)
+async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]   # shell
+# fenrir.data.lse
+async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]
 ```
+
+`contracts` are front-month codes (`ESZ26`); `stream_ticks` subscribes to `lse_symbol` of each (`ES.F`) with `LSE.stream_async(reconnect=True)` and maps ticks back to the code. It drops replayed ticks, ticks with no time and ticks with no volume (quotes), snaps the price to 0.25 and rounds `volume` (the per-trade quantity) to `size`. `stream_bars` closes a minute at wall clock minus `LAG_GRACE` (2 s), checked every second, so lagging ticks still count, and drops a tick stamped more than `MAX_AHEAD` (5 s) past the wall clock. It yields closed bars only, never a partial one when the stream ends. The SDK reconnects after a drop (every 3 s); the stream ends on a fatal error (bad key, quota, or the key's one socket already in use), logged as a warning. Closing the stream closes the socket: LSE allows one per key. During the roll window `ES.F` may still carry the expiring contract under the new code; live takes no entries then (21.3).
 
 ### Plan 05 — `fenrir.rules.schema` / `loader`
 

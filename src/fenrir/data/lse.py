@@ -1,16 +1,22 @@
 """The only module that knows about London Strategic Edge (docs/data-gate.md "Client API")."""
 
+import logging
+from collections.abc import AsyncGenerator, Sequence
+from contextlib import aclosing
 from datetime import UTC, datetime, time, timedelta
 
 import polars as pl
 
 from fenrir.core.sessions import NY
+from fenrir.data.live import Tick
 from fenrir.data.pull import Window
 from fenrir.data.store import SCHEMA
 from fenrir.settings import Settings
 
 PAGE = 5000  # max rows per candles() call
 TICK = 0.25  # ES and NQ price increment
+
+log = logging.getLogger(__name__)
 
 
 def lse_symbol(contract: str) -> str:
@@ -56,3 +62,25 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
         },
         schema=SCHEMA,
     )
+
+
+async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]:
+    """Live trades for our front-month `contracts`, from LSE's continuous `ES.F`/`NQ.F`
+    (docs/data-gate.md Item 3). Ends when the SDK stops: on a fatal error it logs and returns."""
+    from lse import LSE, LSEError
+
+    ours = {lse_symbol(c): c for c in contracts}
+    client = LSE(api_key=settings.lse_api_key)
+    client.on("error", lambda message: log.warning("LSE stream: %s", message))
+    try:
+        async with aclosing(client.stream_async(list(ours), reconnect=True)) as ticks:
+            async for t in ticks:
+                ts, contract = t.datetime, ours.get(t.symbol)
+                # replayed history, quotes (no volume) and untimed ticks are not trades
+                if t.replay or ts is None or not t.volume or contract is None:
+                    continue
+                yield Tick(
+                    ts.astimezone(UTC), round(t.price / TICK) * TICK, round(t.volume), contract
+                )
+    except LSEError as e:  # lse-data 0.14 only raises it from REST calls; kept for later versions
+        log.warning("LSE stream failed: %s", e)

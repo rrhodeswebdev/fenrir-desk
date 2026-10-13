@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import date, timedelta
 
 import pytest
-from backtest_helpers import D1, D2, bar, make_rules, rules_data
+from backtest_helpers import D1, D2, D3, bar, make_rules, rules_data
 from live_helpers import INSTRUMENT, decide_now, make_setup, reconciled
 
 from fenrir.bridge.reconcile import NtOrder, NtPosition
@@ -554,6 +554,31 @@ def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():
     s, effects = core.on_bar(s, at("09:30", D2))
     assert s.halted == core.NO_CLOSE and peaks(effects) == []
     assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0)
+    assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}  # still 0
+
+
+def test_a_zero_balance_is_listed_after_warming_up():
+    """#220 review (M8): `figures` is the last condition, after a `warming` one (#79) too."""
+    s = running(sim(), account(50_400.0))
+    s, _ = core.on_account(replace(s, warming="warming up: replaying"), account(0.0), T.ts)
+    assert [c["kind"] for c in core.conditions(s)] == ["warming", "figures"]
+
+
+def test_a_zero_balance_under_a_gap_halt_keeps_the_halt_and_its_flatten():
+    """#220 with #229: the app flat, NinjaTrader with open P&L, the gap halt's account-wide
+    Flatten out. A zero balance is no figure, so it never ends that Flatten (its 0 open P&L is
+    not NinjaTrader holding nothing) and nothing more is sent. The next roll during it takes no
+    close, and its "confirm balances" never replaces the open-ended gap halt."""
+    s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=-1900.0))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith(core.GAP) and sends(effects) == [Flatten]
+    gap = s.halted
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert kinds(effects) == ["alert"] and s.exiting is not None
+    assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}
+    assert sends(core.on_bar(s, at("09:31", D2))[1]) == []
+    s, effects = core.on_bar(s, at("09:30", D3))
+    assert s.halted == gap and peaks(effects) == [] and "halt" not in kinds(effects)
 
 
 # #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's

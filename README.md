@@ -21,17 +21,48 @@ The full v1 spec is [SPEC.md](SPEC.md).
 - **Market data:** London Strategic Edge (LSE) for history. LSE is also the intended live source, pending data gate item 3 (real-time futures access).
 - **Execution:** a C# NinjaScript add-on in NinjaTrader 8 (Windows), over local HTTP + WebSocket.
 
-## Development
+## Run
+
+Requires Docker (Docker Desktop on macOS or Windows).
+
+```
+git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
+docker compose up
+```
+
+Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo; a repo `.env` is ignored in Docker. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+
+- **This machine only.** The app includes a shell. Keep the `127.0.0.1:8000:8000` and `[::1]:8000:8000` port mappings in `compose.yaml`; never change them to `8000:8000`.
+- **Terminal.** It runs as an unprivileged `claude` user in `/app` (your clone), and cannot read the secrets, the session key or the server. Run CLI commands there, e.g. `uv run fenrir backtest strategies/orb.py --account lucid-flex-50k`. Each backtest worker holds a full price series (up to about 2 GB), and workers are capped to fit the container's memory, so a larger Docker Desktop memory limit runs more of them.
+- **Rebuilds.** The server runs code built into the image, so changes to `src/` or `web/` (including Claude's commits) take effect only after `docker compose up --build`. Review them first: `git log -p origin/main..` and `git diff`.
+- **Linux hosts.** Build with your uid so files the terminal writes are yours: `docker compose build --build-arg CLAUDE_UID=$(id -u)`.
+- **NinjaTrader address.** `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine; `http://<VM IP>:8123` for NinjaTrader in a Windows VM on a Mac (run `ipconfig` in the VM; use bridged or shared networking). Live trading needs NinjaTrader 8 with the Fenrir add-on imported: see [addon/INSTALL.md](addon/INSTALL.md).
+
+## Windows Firewall
+
+The add-on listens on port 8123 on the NinjaTrader machine. Allow it from your local network only, in PowerShell as Administrator:
+
+```powershell
+netsh http add urlacl url=http://+:8123/ user=Everyone
+netsh advfirewall firewall add rule name="Fenrir add-on 8123" dir=in action=allow protocol=TCP localport=8123 remoteip=localsubnet
+```
+
+With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
+
+## Develop
+
+Natively, the Workbench terminal runs as you and is not isolated; secrets come from `.env` (`cp .env.example .env`).
 
 ```
 uv sync
 uv run pytest -q
 uv run ruff check . && uv run ruff format --check .
-uv run fenrir data pull        # needs FENRIR_LSE_API_KEY in .env
+uv run fenrir data pull           # needs FENRIR_LSE_API_KEY in .env
 uv run fenrir data summary
+uv run fenrir serve --dev         # API on localhost:8000
+npm --prefix web ci
+npm --prefix web run dev          # UI with hot reload; open the :5173 launch link serve prints
 ```
-
-`docker compose up` is planned for running the whole app.
 
 ## Disclaimer
 

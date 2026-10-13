@@ -1,0 +1,26 @@
+services:
+  fenrir:
+    build: .
+    image: fenrir-desk
+    ports:
+      # Loopback only, never "8000:8000": the app includes a shell. Both loopbacks, since
+      # localhost is ::1 first on macOS and an unbound [::1]:8000 could catch the launch link.
+      - "127.0.0.1:8000:8000"
+      - "[::1]:8000:8000"
+    volumes:
+      - .:/app
+      # read-only: the terminal must not change what the host runs on the next build or git command
+      - ./compose.yaml:/app/compose.yaml:ro
+      - ./Dockerfile:/app/Dockerfile:ro
+      - ./.dockerignore:/app/.dockerignore:ro
+      - ./.git/config:/app/.git/config:ro
+      - ./.git/hooks:/app/.git/hooks:ro
+      - fenrir-private:/var/lib/fenrir
+      - claude-config:/home/claude/.claude-config
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  fenrir-private:
+  claude-config:

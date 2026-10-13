@@ -1,0 +1,12 @@
+# allowlist: nothing else (.env, .git, data/) reaches the build
+*
+!pyproject.toml
+!uv.lock
+!src
+!web
+!assets/brand
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+**/__pycache__

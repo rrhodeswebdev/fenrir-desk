@@ -337,6 +337,28 @@ async def test_a_flatten_is_not_retried_once_flat(hub, armed, fake):
     assert hub.states["Sim101"].exiting is None
 
 
+async def test_a_manual_add_while_the_flatten_is_out_is_flattened(hub, conn, armed, fake):
+    """#234: a foreign long 1 (no known stop) gets its /flatten, which the add-on accepts but
+    does not fill; a manual +1 fills first, then that flatten's -1. The add gets its own
+    /flatten at once, and nothing more goes out while it is out, over bars and ticks."""
+    await hub.tick(T0)
+    await hub.handle_fill(FOREIGN)
+    assert fake.requests == [("/flatten", FLATTEN)]
+    add = T0 + timedelta(seconds=31)
+    await hub.handle_fill(mnq_fill(1, 20000.0, add))
+    second = core.client_id("Sim101", add, "f2", Flatten())
+    assert fake.requests[1:] == [("/flatten", {"client_id": second, "account": "Sim101"})]
+    await hub.handle_fill(mnq_fill(-1, 20000.0, T0 + timedelta(seconds=32)))
+    s = hub.states["Sim101"]
+    assert (s.position.qty, s.position.stop, s.exiting) == (1, None, second)
+    reasons = [r.payload.get("reason") for r in rows(conn, "action") if r.payload["sent"]]
+    assert reasons == ["position 1 has no known stop", "position 2 has no known stop"]
+    for n in range(1, 5):
+        await hub.handle_bar(bar(T0 + timedelta(minutes=n)))
+        await hub.tick(T0 + timedelta(minutes=n, seconds=30))
+    assert [p for p, _ in fake.requests if p == "/flatten"] == ["/flatten"] * 2
+
+
 async def test_only_this_accounts_instrument_reaches_on_fill(hub, conn, armed):
     await hub.tick(T0)
     await hub.handle_fill({**FOREIGN, "instrument": "MES 12-26"})

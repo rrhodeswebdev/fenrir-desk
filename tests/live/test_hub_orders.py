@@ -772,23 +772,30 @@ async def test_kill_journals_the_halt_rows_before_it_disarms(hub, conn, armed, f
     assert seen == [[service.DISARMED]]
 
 
-@pytest.mark.parametrize("failing", ["delete", "halt row"])
+@pytest.mark.parametrize("failing", ["delete", "read"])
 async def test_a_failed_kill_disarm_halts_an_account_armed_but_not_started_yet(
     hub, conn, armed, fake, monkeypatch, failing
 ):
-    """Armed in the 5 s before the kill, so not running yet: the next tick starts it halted."""
+    """Armed in the 5 s before the kill, so not running yet: the next tick starts it halted.
+    Armed at the very moment the kill read `armed` counts as armed before it."""
+    arming.insert_armed(conn, replace(armed, armed_at=T0))
+    locked_db = {"on": True}
 
     def locked_delete(conn, account):
         raise sqlite3.OperationalError("database is locked")
 
+    def locked_read(conn):
+        if locked_db["on"]:
+            raise sqlite3.OperationalError("database is locked")
+        return arming.list_armed(conn)
+
     if failing == "delete":
         monkeypatch.setattr(service, "delete_armed", locked_delete)
     else:
-        lock = locked(monkeypatch, "halt")
+        monkeypatch.setattr(service, "list_armed", locked_read)
     result = await hub.kill()
-    assert result["ok"] is False and "database is locked" in result["error"]
-    if failing == "halt row":
-        lock["on"] = False  # the lock passed; the row stayed armed
+    assert result["ok"] is False and "disarm failed" in result["error"]
+    locked_db["on"] = False  # the lock passed; the row stayed armed
     await hub.tick(T0)
     assert hub.states["Sim101"].halted is not None
     await hub.handle_bar(bar(T0))
@@ -797,6 +804,33 @@ async def test_a_failed_kill_disarm_halts_an_account_armed_but_not_started_yet(
     arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(seconds=1)))  # re-armed
     await hub.tick(T0 + timedelta(seconds=5))
     assert hub.states["Sim101"].halted is None
+
+
+async def test_kill_still_disarms_when_its_halt_rows_cannot_be_written(
+    hub, conn, armed, fake, monkeypatch
+):
+    """A deleted row can neither run nor restart: the halt row's error is reported, no more."""
+    await hub.tick(T0)
+    locked(monkeypatch, "halt")
+    result = await hub.kill()
+    assert result["ok"] is False and "database is locked" in result["error"]
+    assert "disarm failed" not in result["error"]
+    assert arming.list_armed(conn) == () and hub.states == {}
+
+
+async def test_kill_names_a_failed_runner_stop_as_such(hub, conn, armed, fake, monkeypatch):
+    """Rows deleted, only stopping the runners failed: not a failed disarm, still halted."""
+    await hub.tick(T0)
+
+    async def broken(now):
+        raise RuntimeError("cannot stop")
+
+    monkeypatch.setattr(hub, "_sync", broken)
+    result = await hub.kill()
+    assert result["ok"] is False and "disarm failed" not in result["error"]
+    assert "disarmed, but stopping the runners failed: RuntimeError" in result["error"]
+    assert arming.list_armed(conn) == ()
+    assert hub.states["Sim101"].halted.startswith("kill switch: disarmed, but stopping")
 
 
 async def test_kill_without_ninjatrader_reads_running_accounts_when_the_disarm_fails(
@@ -848,6 +882,27 @@ async def test_fills_buffered_during_the_reconnect_reconcile_are_not_booked_twic
     assert hub.states["Sim101"].position.qty == sum(p["qty"] for p in positions)
     assert len(fake.requests) == sent  # no Flatten for a phantom position
     assert rows(conn, "fill")[-1].payload["qty"] == buffered  # journalled all the same
+
+
+async def test_a_tick_reconcile_takes_its_time_at_the_read(
+    hub, conn, armed, fake, clock, monkeypatch
+):
+    """Strategy loads (or the lock) can hold a tick up long before it reads NinjaTrader's book:
+    `read_at` is the read's time, so a fill already in that book is not booked twice."""
+    unreconciled(monkeypatch)
+    spawn = hub._spawn
+
+    async def slow(a):
+        await spawn(a)
+        clock["t"] += timedelta(seconds=45)
+
+    monkeypatch.setattr(hub, "_spawn", slow)
+    fake.positions, fake.orders = [HELD], [STOP, TARGET]
+    hub.nt_connected = True  # linked: the tick reconciles the account it starts
+    await hub.tick(T0)
+    assert hub.states["Sim101"].read_at == T0 + timedelta(seconds=45)
+    await hub.handle_fill(mnq_fill(1, 20000.0, T0 + timedelta(seconds=20)))  # in that book
+    assert hub.states["Sim101"].position.qty == 1
 
 
 async def test_start_follows_the_addon_stream(hub, armed):

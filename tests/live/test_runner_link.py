@@ -459,3 +459,11 @@ def test_a_fill_buffered_during_the_read_still_counts_toward_the_fill_flatten_id
     assert flatten.client_id == expected
     r = core.replay(core.start(sim(), at("09:30").ts)[0], [("fill", f) for f in rows])
     assert r.exiting == expected and len(r.fills) == len(s.fills) == 2
+
+
+def test_a_buffered_qty_0_fill_is_not_counted_as_a_replay_never_counts_it():
+    s = ready(sim(), at("09:30"))
+    read = at("09:31").ts
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), (), read)
+    s, effects = core.on_fill(s, fill(0, 20000.0, read - timedelta(seconds=1)))
+    assert s.fills == () and kinds(effects) == ["fill", "alert"]

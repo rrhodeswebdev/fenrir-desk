@@ -123,6 +123,10 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _error(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}"
+
+
 def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     """An AccountStatus for an armed row that could not even be set up."""
     return {
@@ -207,7 +211,7 @@ class LiveHub:
             async def one(account: str) -> None:
                 # armed or restarted while linked, or its last read failed: reconcile now
                 if self.states[account].unreconciled and self.nt_connected:
-                    await self._reconcile(account, now)
+                    await self._reconcile(account)
                 s = self.states[account]
                 await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
 
@@ -226,7 +230,7 @@ class LiveHub:
             case "connected":
                 async with self._lock:
                     self.nt_connected = True
-                    await self._each("reconcile", lambda a: self._reconcile(a, _now()))
+                    await self._each("reconcile", self._reconcile)
             case "disconnected":
                 async with self._lock:
                     self.nt_connected = False
@@ -245,17 +249,19 @@ class LiveHub:
         async with self._lock:
             if account not in self.states:
                 raise KeyError(account)
-            return await self._reconcile(account, _now(), core.resolve)
+            return await self._reconcile(account, core.resolve)
 
     async def kill(self) -> dict[str, Any]:
         """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
         (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
         stopped), each journalled as the disarm route does (its "halt" row before the delete),
         plus an "alert" with the outcome. Under the hub lock, so no bar or fill runs between the
-        two. A disarm that fails (e.g. sqlite locked) halts every running account in memory
-        instead, and `killed` halts a row armed by then when a tick starts it. `ok` is false, with
-        the errors, when `/flatten-all` did not land, when NinjaTrader is not configured while a
-        sim or live account was armed, or when the disarm failed."""
+        two. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every running
+        account is halted in memory instead and `killed` halts a row armed by then when a tick
+        starts it; when only stopping the runners fails, the running accounts are halted. A halt
+        row that cannot be written does not stop the deletes. `ok` is false, with the errors,
+        when `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
+        account was armed, or when any of those failed."""
         async with self._lock:
             live = any(s.setup.armed.mode != "dry" for s in self.states.values())
             flat = None
@@ -266,37 +272,52 @@ class LiveHub:
                         flat = ack.error or "refused"
                 except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
                     flat = f"{type(e).__name__}: {e}"
-            armed: Sequence[Armed] = ()
-            disarm = None
-            at = _now()
+            conn, armed, deleted = None, (), []
+            disarm = unjournalled = unstopped = None
             try:
                 conn = self._db()
                 armed = list_armed(conn) if conn else ()
-                for a in armed:  # first, as the disarm route: a failed delete leaves it halted
+            except Exception as e:
+                log.exception("kill switch: cannot read the armed accounts")
+                disarm = f"disarm failed: {_error(e)}"
+            at = _now()  # after the read: every row it found was armed by then
+            try:  # first, as the disarm route: a row whose delete fails stays halted
+                for a in armed:
                     journal.write(conn, _now(), a.account, "halt", DISARMED)
+            except Exception as e:  # still delete: a deleted row can neither run nor restart
+                log.exception("kill switch: halt rows not journalled")
+                unjournalled = f"halt rows not journalled: {_error(e)}"
+            try:
                 for a in armed:
                     delete_armed(conn, a.account)
-                await self._sync(_now())
+                    deleted.append(a)
             except Exception as e:
                 log.exception("kill switch: disarm failed")
-                disarm = f"disarm failed: {type(e).__name__}: {e}"
-                # still armed: no new entries until disarmed, also for a row not started yet
+                left = ", ".join(a.account for a in armed[len(deleted) :])
+                disarm = f"disarm failed for {left}: {_error(e)}"
+            if disarm:  # a row armed by the kill may still be: it starts halted
                 self.killed = (at, f"kill switch: {disarm}")
+            try:
+                await self._sync(_now())
+            except Exception as e:
+                log.exception("kill switch: runners not stopped")
+                unstopped = f"disarmed, but stopping the runners failed: {_error(e)}"
+            if why := disarm or unstopped:  # no new entries until disarmed and stopped
                 for account in list(self.states):
                     s = self.states[account]
                     with contextlib.suppress(Exception):  # its halt row is queued and retried
-                        await self._apply(account, *core.halt(s, self.killed[1]))
+                        await self._apply(account, *core.halt(s, f"kill switch: {why}"))
             if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
                 flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
-            if disarm is None:
-                done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
-                try:
-                    for a in armed:
-                        alert = {"message": f"kill switch: disarmed; {done}"}
-                        journal.write(conn, _now(), a.account, "alert", alert)
-                except Exception:  # disarmed and flattened all the same: report that, not this
-                    log.exception("kill switch not journalled")
-            errors = [e for e in (flat, disarm) if e]
+            done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
+            try:
+                for a in deleted:
+                    alert = {"message": f"kill switch: disarmed; {done}"}
+                    journal.write(conn, _now(), a.account, "alert", alert)
+            except Exception:  # disarmed and flattened all the same: report that, not this
+                log.exception("kill switch not journalled")
+            unstopped = None if disarm else unstopped  # "disarmed, but" is untrue after one
+            errors = [e for e in (flat, disarm, unjournalled, unstopped) if e]
             return {"ok": not errors, "error": "; ".join(errors) or None}
 
     async def handle_bar(self, bar: Bar) -> None:
@@ -338,15 +359,17 @@ class LiveHub:
         await asyncio.gather(*map(one, list(self.states)))
 
     async def _reconcile(
-        self, account: str, now: datetime, check: Callable[..., core.Step] = core.on_reconcile
+        self, account: str, check: Callable[..., core.Step] = core.on_reconcile
     ) -> bool:
         """`check` (`core.on_reconcile` or `core.resolve`) with NinjaTrader's `/positions` and
-        `/orders` for the account; False when they cannot be read. Dry runs read nothing."""
+        `/orders` for the account; False when they cannot be read. Dry runs read nothing. `now`
+        (its `read_at`) is taken just before the reads, never before a wait for the lock."""
         s = self.states[account]
         if s.setup.armed.mode == "dry":
             return True
         if self.addon is None:
             return False
+        now = _now()
         try:
             positions = [NtPosition(**p) for p in await self.addon.positions(account)]
             orders = [NtOrder(**o) for o in await self.addon.orders(account)]

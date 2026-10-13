@@ -503,3 +503,61 @@ async def test_a_kept_row_waiting_for_ninjatrader_shows_the_reason_and_loads_not
         assert hub.states["Sim102"].halted is None and set(hub.children) == {"Sim102"}
     finally:
         await hub.stop()
+
+
+async def test_a_second_double_fault_on_a_running_row_still_says_not_journalled_yet(
+    hub, conn, armed, client, monkeypatch
+):
+    """#230: a second double fault with another error. The account is already halted by the
+    first (so no new halt row), whose halt row is still queued: the answer still says the halt
+    is not journalled yet, and the next tick writes the first one."""
+    await hub.tick(T0)
+    write = journal.write
+    monkeypatch.setattr(journal, "write", _locked)
+    monkeypatch.setattr(client, "flatten", _unreachable)
+    first = flatten_failed("ConnectError: add-on unreachable")
+    assert (await hub.disarm("Sim101"))["error"] == f"{first}; {NOT_JOURNALLED_YET}: {LOCKED}"
+    monkeypatch.setattr(client, "flatten", lambda *a: _ack_refused())
+    second = flatten_failed("refused")
+    assert await hub.disarm("Sim101") == {
+        "ok": False,
+        "error": f"{second}; {NOT_JOURNALLED_YET}: {LOCKED}",
+    }
+    assert hub.states["Sim101"].halted == first
+    monkeypatch.setattr(journal, "write", write)
+    await hub.tick(T0 + timedelta(seconds=5))
+    assert [r.payload for r in rows(conn, "halt")] == [
+        {"reason": first, "kind": None, "until": None}
+    ]
+
+
+async def test_a_landed_disarm_clears_only_its_own_accounts_held_halt(
+    settings, conn, armed, client, monkeypatch
+):
+    """#230 (mutant Y9): Sim101 waits for NinjaTrader, double-faulted (its halt only `held`);
+    a disarm of Sim102 that lands leaves Sim101's held halt alone, so Sim101 still starts halted
+    on its account message, loading nothing."""
+    balances = {"start_balance": 50_000.0, "peak_balance": 50_500.0}
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(conn, replace(armed, **balances))
+    arming.insert_armed(conn, replace(armed, account="Sim102", **balances))
+    hub = LiveHub(settings, addon=client)
+    try:
+        await hub.tick(T0)
+        assert set(hub.waiting) == {"Sim101", "Sim102"}
+        flatten, write = client.flatten, journal.write
+        monkeypatch.setattr(client, "flatten", _unreachable)
+        monkeypatch.setattr(journal, "write", _locked)
+        why = flatten_failed("ConnectError: add-on unreachable")
+        assert await hub.disarm("Sim101") == {
+            "ok": False,
+            "error": f"{why}; {NOT_JOURNALLED}: {LOCKED}",
+        }
+        monkeypatch.setattr(client, "flatten", flatten)
+        monkeypatch.setattr(journal, "write", write)
+        assert await hub.disarm("Sim102") == {"ok": True, "error": None}
+        assert set(hub.held) == {"Sim101"}
+        await hub.handle_stream(account("Sim101"))
+        assert hub.states["Sim101"].halted == why and hub.children == {}
+    finally:
+        await hub.stop()

@@ -227,7 +227,7 @@ class LiveHub:
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
         self.killed: tuple[datetime, str] | None = None
-        # per account, (time, reason) of a failed disarm whose halt row sqlite refused (#227)
+        # per account, (time, reason) of a kept disarm of a row not running yet (#227)
         self.held: dict[str, tuple[datetime, str]] = {}
         self._secret = secret
         self._timeout = step_timeout
@@ -493,7 +493,8 @@ class LiveHub:
                 try:
                     await self._apply(account, s, (*out, alert))  # halted in memory if refused
                 finally:
-                    written = Log("halt", halt) not in self.unwritten.get(account, ())
+                    # any halt row still queued (an earlier kept disarm's, when already halted)
+                    written = not any(r.kind == "halt" for r in self.unwritten.get(account, ()))
             else:  # waiting for NinjaTrader, broken, or armed since the last sync
                 self.held[account] = (_now(), why)
                 journal.write(self.conn, _now(), account, "halt", halt)
@@ -871,8 +872,8 @@ class LiveHub:
         await self._apply(a.account, s, out)
 
     def _killed(self, a: Armed) -> str | None:
-        """The halt reason of a kill whose disarm failed, or of a failed disarm of `a`'s account
-        whose halt was not journalled (`held`), when `a` was armed by then."""
+        """The halt reason of a kill whose disarm failed, or of a kept disarm of `a`'s account
+        while its row was not running yet (`held`), when `a` was armed by then."""
         for mark in (self.killed, self.held.get(a.account)):
             if mark and a.armed_at <= mark[0]:
                 return mark[1]

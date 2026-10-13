@@ -921,9 +921,11 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
             raised = _raised(s.setup, acct, s.nt.balance)
             equity = raised.balance + raised.open_pnl
-            if at_or_below(equity, raised.floor):  # its floor alone breaches the app's figures
-                # a gap between the balances is no breach (#219): keep the app's own figures
-                base = s.setup.start.phase_start
+            base = s.setup.start.phase_start
+            theirs = s.nt.balance + s.nt.unrealized_pnl - base  # NinjaTrader's own equity
+            # its floor breaches the app's figures but not its own: a gap between the balances,
+            # P&L the app never saw, is no breach (#219); keep the app's own figures
+            if at_or_below(equity, raised.floor) and not at_or_below(theirs, raised.floor):
                 gap = CONFIRM_GAP.format(
                     nt=s.nt.balance, floor=base + raised.floor, equity=base + equity
                 )

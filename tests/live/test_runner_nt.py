@@ -5,9 +5,10 @@ from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, bar, make_rules, rules_data
-from live_helpers import decide_now, make_setup, reconciled
+from live_helpers import INSTRUMENT, decide_now, make_setup, reconciled
 
-from fenrir.core.actions import Bracket
+from fenrir.bridge.reconcile import NtOrder, NtPosition
+from fenrir.core.actions import Bracket, Flatten
 from fenrir.live import core
 from fenrir.live.core import DayStart, Log, Start
 from fenrir.live.journal import iso
@@ -150,6 +151,13 @@ def test_end_of_day_peak_rises_to_ninjatraders_balance_at_the_session_close():
     s, effects = core.on_bar(s, nxt)
     assert (s.acct.peak, s.acct.floor, s.session_floor) == (400.0, -1600.0, -1600.0)
     assert peaks(effects) == [{"peak": 50_400.0, "ts": iso(nxt.ts)}]
+
+
+def test_the_end_of_day_peak_rises_to_the_balance_not_the_equity():
+    """DEC-4a: NinjaTrader's balance at the close, never its open P&L (review of #221, X4)."""
+    s = running(sim(), account(balance=50_400.0, unrealized=300.0))
+    s, _ = core.on_bar(s, at("09:30", D2))
+    assert (s.acct.peak, s.acct.floor) == (400.0, -1600.0)
 
 
 def test_the_runners_own_peak_raise_is_journalled():
@@ -499,3 +507,37 @@ def test_a_gap_against_an_unverified_open_loss_at_the_roll_halts_not_breaches():
     )
     assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
     assert peaks(effects) == [{"peak": 50_000.0, "ts": iso(at("09:30", D2).ts)}]
+
+
+# NinjaTrader's equity 50,100 (through its floor), 50,200 (at it: a breach for the rules), 52,200
+@pytest.mark.parametrize(("unrealized", "breach"), [(-2100.0, True), (-2000.0, True), (0.0, False)])
+def test_an_open_loss_ninjatrader_still_holds_through_its_floor_breaches_at_the_roll(
+    unrealized, breach
+):
+    """Review of #221, P1: the app and NinjaTrader agree at 52,200 (no gap), and a long with a
+    known stop is held unverified over the close at -2,100 open. NinjaTrader's floor is 50,200.
+    If NinjaTrader still holds that loss (its equity 50,100), it is a real breach, flattened as
+    on main; if it shows none (the exit filled and the app never saw it), it is the gap's halt."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))
+    s, _ = core.on_fill(s, {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20110.0})
+    s, _ = core.on_bar(s, at("09:31"))  # the exit's own bar
+    assert (s.acct.balance, s.position.qty, s.halted) == (2200.0, 0, None)
+    now = T.ts + timedelta(minutes=2)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    assert (s.position.qty, s.position.stop) == (1, 19000.0)
+    loss = 19895.0  # -105 points: -$2,100 open
+    s, _ = core.on_bar(s, bar("09:32", 20000.0, 20000.0, loss, loss))
+    assert (s.acct.open_pnl, s.halted) == (-2100.0, None)
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(52_200.0, today=2200.0, unrealized=unrealized), now)
+    s, effects = core.on_bar(s, bar("09:30", loss, loss, loss, loss, D2))
+    if breach:
+        assert s.halt_kind == "breach"
+        assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
+        assert [type(e.action) for e in effects if isinstance(e, core.Send)] == [Flatten]
+    else:
+        assert s.halted.startswith("confirm balances: NinjaTrader's balance 52200.00 ")
+        assert s.halt_kind is None and not [e for e in effects if isinstance(e, core.Send)]

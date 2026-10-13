@@ -467,3 +467,18 @@ def test_a_buffered_qty_0_fill_is_not_counted_as_a_replay_never_counts_it():
     s, _ = core.on_reconcile(s, INSTRUMENT, (), (), read)
     s, effects = core.on_fill(s, fill(0, 20000.0, read - timedelta(seconds=1)))
     assert s.fills == () and kinds(effects) == ["fill", "alert"]
+
+
+def test_a_mismatch_under_a_safety_halt_is_still_reported():
+    # #212: the halt shows as halt_kind, but the mismatch must still reach the Book cell
+    s = ready(sim(daily_loss=500.0), at("09:30"))
+    s, _ = core.on_bar(replace(s, acct=replace(s.acct, balance=-400.0)), at("09:31"))
+    assert s.halt_kind == "safety"
+    stray = order("other", "buy", 1, 19900.0)
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), [stray], at("09:32").ts)
+    st = core.account_status(s)
+    assert (st["halted"], st["halt_kind"]) == (True, "safety")  # unchanged: the halt shows
+    assert [c["kind"] for c in st["conditions"]] == ["safety", "reconcile"]
+    assert st["conditions"][1]["reason"].startswith("NinjaTrader mismatch: stray_orders")
+    s, _ = core.resolve(s, INSTRUMENT, (), (), at("09:33").ts)  # lifts the pause, not the halt
+    assert [c["kind"] for c in core.account_status(s)["conditions"]] == ["safety"]

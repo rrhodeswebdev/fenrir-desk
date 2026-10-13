@@ -674,6 +674,19 @@ def safety_level(s: RunnerState) -> float:
     return level if dll is None else max(level, s.session_start - m * dll)
 
 
+def conditions(s: RunnerState) -> list[dict[str, Any]]:
+    """Every condition holding new entries back, each reported even under another (#212): the
+    halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
+    pause and a drift pause. The brief unreconciled pause is not one (only `halt_reason`)."""
+    held = (
+        (s.halt_kind, s.halted),
+        ("reconcile", s.mismatch),
+        ("stale", s.stale),
+        ("drift", s.drift),
+    )
+    return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
+
+
 def account_status(s: RunnerState) -> dict[str, Any]:
     """One AccountStatus (Plans 21–24)."""
     a, rules, acct = s.setup.armed, s.setup.rules, s.acct
@@ -690,6 +703,7 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "halt_kind": s.halt_kind if s.halted else pause,
         # the brief unreconciled pause shows only here
         "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.unreconciled,
+        "conditions": conditions(s),  # each one; halt_kind and halt_reason show the first
     }
     if not s.started:
         keys = ("balance", "nt_balance", "today_pnl", "limits", "position", "session")

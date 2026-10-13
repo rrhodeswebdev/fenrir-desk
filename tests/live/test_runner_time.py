@@ -206,3 +206,31 @@ def test_intraday_session_floor_trails_at_least_the_open_balance():
     rules = make_rules(trailing="intraday")
     s = started(make_setup(rules, mode="sim", start=start, day_start=day))
     assert (s.session_start, s.session_floor) == (500.0, -1500.0)
+
+
+def test_a_stale_pause_is_reported_under_a_halt():
+    # #212: a halt shows as halt_kind, but the stale pause must still light Feed
+    s = started(make_setup(make_rules(daily_loss=500.0)))
+    s, _ = core.on_bar(with_balance(s, -400.0), at("09:30"))
+    s, _ = core.on_tick(s, s.last_seen + timedelta(seconds=91), 90)
+    st = core.account_status(s)
+    assert (st["halted"], st["halt_kind"]) == (True, "safety")
+    assert [c["kind"] for c in st["conditions"]] == ["safety", "stale"]
+    assert st["conditions"][1]["reason"].startswith("no NQ bar for 91s")
+    s, _ = core.on_bar(s, at("09:32"))  # the bar clears the pause, not the halt
+    assert [c["kind"] for c in core.account_status(s)["conditions"]] == ["safety"]
+
+
+def test_conditions_list_every_pause_in_the_order_halt_kind_picks():
+    s = started(make_setup(make_rules()))
+    s = replace(s, halted="strategy error: x", mismatch="m", stale="st", drift="d")
+    st = core.account_status(s)
+    assert st["conditions"] == [
+        {"kind": None, "reason": "strategy error: x"},  # a halt no cell names
+        {"kind": "reconcile", "reason": "m"},
+        {"kind": "stale", "reason": "st"},
+        {"kind": "drift", "reason": "d"},
+    ]
+    assert (st["halted"], st["halt_kind"], st["halt_reason"]) == (True, None, "strategy error: x")
+    calm = core.account_status(replace(s, halted=None, mismatch=None, stale=None, drift=None))
+    assert (calm["halted"], calm["conditions"]) == (False, [])

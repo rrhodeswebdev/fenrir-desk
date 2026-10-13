@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '@/api'
-import { account, desk, status } from './fixtures'
+import { account, desk, held, status } from './fixtures'
 import {
   type LiveStatus,
   type Meter,
@@ -9,6 +9,8 @@ import {
   alertTone,
   bracketText,
   canResolve,
+  feedDown,
+  reasons,
   alarmsOf,
   focusOf,
   minis,
@@ -33,6 +35,7 @@ import {
 } from './model'
 
 const states = (s: LiveStatus) => systemStrip(s).map((c) => c.state)
+const lseDown = { connected: false, last_bar_ts: null, error: null, retry_at: null }
 
 describe('system strip', () => {
   it('is normal when the feed and the broker are up and nothing drifted', () => {
@@ -44,17 +47,17 @@ describe('system strip', () => {
   })
 
   it('Feed: alarm when LSE is not connected, caution when an account has a stale pause', () => {
-    expect(states(status({ lse: { connected: false, last_bar_ts: null } }))[0]).toBe('alarm')
+    expect(states(status({ lse: lseDown }))[0]).toBe('alarm')
     const stale = account({ halted: true, halt_kind: 'stale', halt_reason: 'no bar for 90 s' })
     expect(states(status({ accounts: [account(), stale] }))[0]).toBe('caution')
     // a lost feed outranks the pause it causes
-    expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [stale] }))[0]).toBe('alarm')
+    expect(states(status({ lse: lseDown, accounts: [stale] }))[0]).toBe('alarm')
     // a dry run steps on live bars too
-    expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [account({ mode: 'dry' })] }))[0]).toBe('alarm')
+    expect(states(status({ lse: lseDown, accounts: [account({ mode: 'dry' })] }))[0]).toBe('alarm')
   })
 
   it('Feed: idle with nothing armed, as nothing reads it', () => {
-    expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [] }))[0]).toBe('idle')
+    expect(states(status({ lse: lseDown, accounts: [] }))[0]).toBe('idle')
     expect(states(status({ accounts: [] }))[0]).toBe('idle')
   })
 
@@ -242,7 +245,7 @@ describe('focus', () => {
     const pick = pickOf('A', [a, b]) // B was in alarm when the user picked A
     expect(pick.alarms).toEqual(['B'])
     expect(id(focusOf([a, b], pick))).toBe('A (picked)')
-    const aAlarm = { ...a, halted: true, halt_kind: 'reconcile' as const }
+    const aAlarm = { ...a, ...held({ kind: 'reconcile', reason: 'mismatch' }) }
     expect(focusOf([aAlarm, b], pick)).toMatchObject({ account: { account: 'A' }, takeover: true })
     // a new alarm on a third, sim account while B (live) is in alarm: focus the new one
     const c = account({ account: 'C', mode: 'sim', halted: true, halt_kind: 'breach' })
@@ -373,5 +376,74 @@ describe('meters', () => {
     expect(meterLabel(meters(safety)[1]!)).toBe('Daily loss left: 81% used, safety mark at 80%')
     expect(meterLabel({ name: 'Daily loss left', none: 'No limit' })).toBe('Daily loss left: no limit')
     expect(meterLabel(meters(mismatch)[3]!)).toBe('Target: 7% of target')
+  })
+})
+
+describe('each condition counts, whatever the halt (#212)', () => {
+  const safety = { kind: 'safety', reason: 'safety margin: 81% of the daily loss used' } as const
+  const mismatch = { kind: 'reconcile', reason: 'NinjaTrader mismatch: stray_orders: o1' } as const
+  const stale = { kind: 'stale', reason: 'no NQ bar for 191s; new entries paused' } as const
+  const strip = (a: Parameters<typeof accountStrip>[0]) => accountStrip(a).map((c) => `${c.name} ${c.state}`)
+
+  it('a reconcile mismatch on a safety-halted account is a Book alarm', () => {
+    const a = account({ account: 'LPR 1123', mode: 'sim', ...held(safety, mismatch) })
+    expect(a.halt_kind).toBe('safety') // the server shows the halt first
+    expect(need(a)).toEqual({ cell: 'Book', state: 'alarm' })
+    expect(strip(a)).toEqual(['Risk caution', 'Book alarm'])
+    expect(alarmName([account({ account: 'LFE 0507', ...held(safety) }), a])).toBe('Book · LPR 1123')
+    expect(alarmsOf([a])).toEqual(['LPR 1123'])
+    expect(canResolve(a)).toBe(true) // Resolve lifts the pause, never the halt
+    expect(alertTone(a)).toBe('alarm')
+  })
+
+  it('a breach and a mismatch light both cells', () => {
+    expect(strip(account(held({ kind: 'breach', reason: 'breach max_drawdown: x' }, mismatch)))).toEqual(['Risk alarm', 'Book alarm'])
+    expect(strip(account(held({ kind: null, reason: 'strategy error: x' }, mismatch)))).toEqual(['Risk normal', 'Book alarm'])
+    expect(need(account(held({ kind: null, reason: 'strategy error: x' }, safety)))).toEqual({ cell: 'Halt', state: 'alarm' })
+  })
+
+  it('a stale pause lights Feed whatever halt the account is under', () => {
+    for (const halt of [safety, { kind: 'breach', reason: 'breach' } as const, { kind: null, reason: 'strategy error' } as const, mismatch])
+      expect(states(status({ accounts: [account(held(halt, stale))] }))[0]).toBe('caution')
+    expect(states(status({ accounts: [account(held(safety))] }))[0]).toBe('normal')
+  })
+
+  it('a drift pause under a halt still offers Resolve', () => {
+    expect(canResolve(account(held(safety, { kind: 'drift', reason: 'drift: 9 ticks' })))).toBe(true)
+    expect(canResolve(account(held(safety, stale)))).toBe(false)
+  })
+
+  it('the focus lists every reason, each in its own tone; the brief unreconciled pause as plain text', () => {
+    expect(reasons(account(held(safety, mismatch, stale)))).toEqual([
+      { tone: 'caution', text: safety.reason },
+      { tone: 'alarm', text: mismatch.reason },
+      { tone: 'caution', text: stale.reason },
+    ])
+    expect(reasons(account(held({ kind: null, reason: 'cannot start: boom' })))).toEqual([{ tone: 'alarm', text: 'cannot start: boom' }])
+    expect(reasons(account({ halt_reason: 'not reconciled with NinjaTrader yet: no new entries' }))).toEqual([
+      { tone: 'normal', text: 'not reconciled with NinjaTrader yet: no new entries' },
+    ])
+    expect(reasons(account())).toEqual([])
+  })
+})
+
+describe('feed outage', () => {
+  const now = Date.parse('2026-10-13T18:31:00Z')
+  const lse = (error: string | null, retry_at: string | null) => ({ connected: error === null, last_bar_ts: null, error, retry_at })
+
+  it('is nothing while the feed has no error', () => {
+    expect(feedDown(lse(null, null), now)).toBeNull()
+  })
+
+  it('names the reason and the next retry in New York time', () => {
+    expect(feedDown(lse('LSE stream stopped: Max 1 concurrent', '2026-10-13T18:33:00+00:00'), now)).toEqual({
+      reason: 'LSE stream stopped: Max 1 concurrent',
+      retry: 'Retry 14:33:00',
+    })
+  })
+
+  it('says a restart is needed when no retry is coming, and a passed retry is under way', () => {
+    expect(feedDown(lse('FENRIR_LSE_API_KEY is not set', null), now)?.retry).toBe('Restart needed')
+    expect(feedDown(lse('refused', '2026-10-13T18:30:00+00:00'), now)?.retry).toBe('Retrying')
   })
 })

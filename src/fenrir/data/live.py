@@ -144,12 +144,16 @@ async def _bars_from(
         await ticks.aclose()
 
 
-async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]:
+async def stream_bars(
+    settings: Settings, contracts: Sequence[str], *, on_auth: Callable[[], None] | None = None
+) -> AsyncIterator[Bar]:
     """Closed 1-minute bars for `contracts` (front-month codes) from the LSE stream. The SDK
     reconnects after a drop; `FeedStopped` when it stops instead (no or bad key, quota, or the
-    key's one socket still held). Closing the stream closes the socket."""
+    key's one socket still held). `on_auth` is called each time the socket authenticates.
+    Closing the stream closes the socket."""
     from fenrir.data.lse import stream_ticks  # lse imports Tick from here
 
-    async with aclosing(_bars_from(stream_ticks(settings, contracts), _now)) as bars:
+    ticks = stream_ticks(settings, contracts, on_auth=on_auth)
+    async with aclosing(_bars_from(ticks, _now)) as bars:
         async for bar in bars:
             yield bar

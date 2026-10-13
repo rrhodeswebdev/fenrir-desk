@@ -1,7 +1,9 @@
 // Status fixtures for the Live page's tests (Vitest and Playwright). Never imported by the app.
 import type { JournalRow } from './journal'
-import type { AccountStatus, LiveStatus } from './model'
+import type { AccountStatus, Condition, LiveStatus } from './model'
 
+/** An account; unless `conditions` is given, a halted one has the one condition its `halt_kind` and `halt_reason` name,
+ * as the server reports a single condition. */
 export function account(over: Partial<AccountStatus> = {}): AccountStatus {
   return {
     account: 'LFE 0507',
@@ -19,13 +21,22 @@ export function account(over: Partial<AccountStatus> = {}): AccountStatus {
     limits: { drawdown_remaining: 2000, drawdown_max: 2000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 4, held_minis: 0 },
     position: { qty: 0, entry: null, stop: null, target: null },
     session: { start: 0, floor: -2000, target: 3000, safety: -400, equity: [], fills: [] },
+    conditions: over.halted ? [{ kind: over.halt_kind ?? null, reason: over.halt_reason ?? '' }] : [],
     ...over,
   }
 }
 
+/** The status fields of an account under `conditions`: the first shows as `halt_kind`/`halt_reason`, as the server does. */
+export const held = (...conditions: Condition[]): Pick<AccountStatus, 'halted' | 'halt_kind' | 'halt_reason' | 'conditions'> => ({
+  halted: conditions.length > 0,
+  halt_kind: conditions[0]?.kind ?? null,
+  halt_reason: conditions[0]?.reason ?? null,
+  conditions,
+})
+
 export function status(over: Partial<LiveStatus> = {}): LiveStatus {
   return {
-    lse: { connected: true, last_bar_ts: '2026-10-13T18:31:00+00:00' },
+    lse: { connected: true, last_bar_ts: '2026-10-13T18:31:00+00:00', error: null, retry_at: null },
     nt: { connected: true, last_heartbeat: '2026-10-13T18:31:05.250Z' },
     drift: { ok: true, ticks: null },
     accounts: [account()],

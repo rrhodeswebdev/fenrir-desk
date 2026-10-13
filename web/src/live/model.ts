@@ -6,6 +6,8 @@ import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
 export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach'
+/** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …). */
+export type Condition = { kind: HaltKind | null; reason: string }
 
 type Limits = {
   drawdown_remaining: number
@@ -36,6 +38,9 @@ export type AccountStatus = {
   halted: boolean
   halt_kind: HaltKind | null
   halt_reason: string | null
+  /** Every condition, each reported even under another (a mismatch under a safety halt); `halt_kind` and
+   * `halt_reason` show only the first. The strips read these. */
+  conditions: Condition[]
   balance: number | null
   nt_balance: number | null
   today_pnl: number | null
@@ -45,7 +50,8 @@ export type AccountStatus = {
 }
 
 export type LiveStatus = {
-  lse: { connected: boolean; last_bar_ts: string | null }
+  /** `error`: why the feed is down, until a bar or an authenticated resubscribe; `retry_at` null: only a restart helps. */
+  lse: { connected: boolean; last_bar_ts: string | null; error: string | null; retry_at: string | null }
   nt: { connected: boolean; last_heartbeat: string | null }
   drift: { ok: boolean; ticks: number | null }
   accounts: AccountStatus[]
@@ -56,12 +62,14 @@ export type KillResult = { ok: boolean; error: string | null }
 
 export type Cell = { name: string; state: Tone }
 
+/** Whether the account is under a condition of this kind, whatever else holds it. */
+const has = (a: AccountStatus, kind: HaltKind | null): boolean => a.conditions.some((c) => c.kind === kind)
+
 /** Feed · Broker · Drift, shared by every account. Stale and drift pauses light these, never an account. */
 export function systemStrip(s: LiveStatus): Cell[] {
-  const kinds = s.accounts.map((a) => a.halt_kind)
+  const stale = s.accounts.some((a) => has(a, 'stale')) // under a halt too
   // With nothing armed nothing reads the feed (as Broker): unlit, not an alarm to learn to ignore.
-  const feed: Tone =
-    s.accounts.length === 0 ? 'idle' : !s.lse.connected ? 'alarm' : kinds.includes('stale') ? 'caution' : 'normal'
+  const feed: Tone = s.accounts.length === 0 ? 'idle' : !s.lse.connected ? 'alarm' : stale ? 'caution' : 'normal'
   // A missed heartbeat reaches us as nt.connected false. Dry runs never use the broker.
   const broker: Tone = s.accounts.every((a) => a.mode === 'dry') ? 'idle' : s.nt.connected ? 'normal' : 'alarm'
   const drift: Tone = s.drift.ok ? 'normal' : 'caution'
@@ -79,19 +87,25 @@ export const stripLabel = (cells: Cell[]): string =>
 /** What an account needs, as the cell it lights (Risk, Book) or "Halt" for a halt no cell names. */
 export type Need = { cell: 'Book' | 'Risk' | 'Halt'; state: 'caution' | 'alarm' }
 
-export function need(a: AccountStatus): Need | null {
-  if (a.halt_kind === 'reconcile') return { cell: 'Book', state: 'alarm' }
-  if (a.halt_kind === 'breach') return { cell: 'Risk', state: 'alarm' }
-  if (a.halted && a.halt_kind === null) return { cell: 'Halt', state: 'alarm' } // strategy error, cannot start, …
-  const s = a.session
-  const pastSafety = s !== null && a.today_pnl !== null && s.start + a.today_pnl <= s.safety
-  if (a.halt_kind === 'safety' || pastSafety) return { cell: 'Risk', state: 'caution' }
-  return null
-}
-
 const stateRank = { alarm: 0, caution: 1 } as const
 const modeRank: Record<Mode, number> = { live: 0, sim: 1, dry: 2 }
 const cellRank = { Book: 0, Risk: 1, Halt: 2 } as const
+const byNeed = (x: Need, y: Need) => stateRank[x.state] - stateRank[y.state] || cellRank[x.cell] - cellRank[y.cell]
+
+/** Everything an account needs, one per condition (a mismatch under a safety halt is both), most severe first. */
+export function needs(a: AccountStatus): Need[] {
+  const s = a.session
+  const pastSafety = s !== null && a.today_pnl !== null && s.start + a.today_pnl <= s.safety
+  const out: Need[] = []
+  if (has(a, 'reconcile')) out.push({ cell: 'Book', state: 'alarm' })
+  if (has(a, 'breach')) out.push({ cell: 'Risk', state: 'alarm' })
+  if (has(a, null)) out.push({ cell: 'Halt', state: 'alarm' }) // strategy error, cannot start, …
+  if (has(a, 'safety') || pastSafety) out.push({ cell: 'Risk', state: 'caution' })
+  return out.sort(byNeed)
+}
+
+/** The most severe of `needs`: alarm before caution, then Book, Risk, Halt. */
+export const need = (a: AccountStatus): Need | null => needs(a)[0] ?? null
 
 /** The account most in need: alarm before caution, then real money first (live, sim, dry run), then
  * Book (a position mismatch) before Risk before Halt; ties keep the server's order. Null when none needs anything. */
@@ -166,13 +180,12 @@ export const killErrorText = (e: unknown): string =>
 
 // ---- Focus field, sleeves and meters (#98) ----
 
-/** An account's own strip, Risk · Book (contract "Code strips"): stale and drift pauses never light it. */
+/** An account's own strip, Risk · Book (contract "Code strips"), each cell its most severe need: a mismatch under a
+ * safety halt lights both. Stale and drift pauses never light it. */
 export function accountStrip(a: AccountStatus): Cell[] {
-  const n = need(a)
-  return [
-    { name: 'Risk', state: n?.cell === 'Risk' ? n.state : 'normal' },
-    { name: 'Book', state: n?.cell === 'Book' ? n.state : 'normal' },
-  ]
+  const all = needs(a)
+  const cell = (name: Need['cell']): Cell => ({ name, state: all.find((n) => n.cell === name)?.state ?? 'normal' })
+  return [cell('Risk'), cell('Book')]
 }
 
 /** The accounts in alarm now. */
@@ -201,13 +214,31 @@ export function focusOf(
   return auto ? { account: auto, picked: false, takeover: false } : null
 }
 
-/** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only. */
-export const canResolve = (a: AccountStatus): boolean => a.halt_kind === 'reconcile' || a.halt_kind === 'drift'
+/** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only, under a halt too. */
+export const canResolve = (a: AccountStatus): boolean => has(a, 'reconcile') || has(a, 'drift')
 
 /** The colour of an account's alert line and sleeve outline: its need, or caution for a stale or drift pause
  * (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
 export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
   return need(a)?.state ?? (a.halted ? 'caution' : null)
+}
+
+const conditionTone: Record<HaltKind, 'caution' | 'alarm'> = { reconcile: 'alarm', breach: 'alarm', safety: 'caution', stale: 'caution', drift: 'caution' }
+
+/** The focus field's lines: every condition's reason in its own tone (a halt no cell names is an alarm), else the
+ * brief unreconciled pause's reason, plain. */
+export function reasons(a: AccountStatus): { tone: Tone; text: string }[] {
+  if (a.conditions.length) return a.conditions.map((c) => ({ tone: c.kind === null ? 'alarm' : conditionTone[c.kind], text: c.reason }))
+  return a.halt_reason ? [{ tone: 'normal', text: a.halt_reason }] : []
+}
+
+/** The LSE feed's outage for the top strip: its reason, and when it is retried (`Restart needed` when only a restart
+ * helps, `Retrying` once that time has passed). Null while the feed has no error. */
+export function feedDown(lse: LiveStatus['lse'], now: number): { reason: string; retry: string } | null {
+  if (lse.error === null) return null
+  const at = lse.retry_at === null ? NaN : Date.parse(lse.retry_at)
+  const retry = lse.retry_at === null ? 'Restart needed' : at <= now ? 'Retrying' : `Retry ${nyTime(at)}`
+  return { reason: lse.error, retry }
 }
 
 export const modeText: Record<Mode, string> = { dry: 'Dry run', sim: 'Sim', live: 'Live' }

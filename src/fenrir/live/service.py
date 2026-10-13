@@ -65,9 +65,11 @@ ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024
 INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
-# a warm-up replays a day (up to ~1,380 steps, ~3 s for a trivial strategy) under the hub lock,
-# as a strategy load holds it: one that takes longer halts the account
-WARM_TIMEOUT = 60.0
+# a warm-up replays a day (up to ~1,380 steps, ~3 s for a trivial strategy) under the hub lock;
+# meanwhile the bar feed's consumer waits (ticks buffer in the builder, which drops them as late
+# past about a minute, and the socket's 30 s ping may drop the link: a full replay), and other
+# accounts' bars and fills wait. A strategy that needs longer halts instead (fail closed)
+WARM_TIMEOUT = 20.0
 TICK_EVERY = 5.0
 FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
 FEED_RETRY_MAX = 900.0
@@ -88,6 +90,8 @@ STORE_SHORT = (
     " today; run `fenrir data pull`. No new entries until then"
 )
 STORE_ERROR = "warming up: cannot load the bars before today ({error}); no new entries until then"
+WARM_ERROR = "warming up: failed ({error}); no new entries until it succeeds"
+STORE_RETRY = timedelta(minutes=1)  # a short or unreadable store is loaded again no sooner
 
 # stream_bars: (settings, contracts, *, on_auth, start, on_live): on_auth on each authentication,
 # a replay of the ticks since `start` first, on_live(contract) on each live tick (#79)
@@ -254,6 +258,7 @@ class LiveHub:
         self._lock = asyncio.Lock()  # a tick and a bar never interleave
         self._tasks: list[asyncio.Task] = []
         self._follow_bars = False  # start() was called: the first armed row starts the bar feed
+        self._store_retry: dict[str, datetime] = {}  # per account: no store load before then
         self._feed: asyncio.Task | None = None  # run_bars, from then until stop()
 
     def start(self) -> None:
@@ -273,6 +278,7 @@ class LiveHub:
                 log.error("live task had failed: %s", type(r).__name__)
         self._tasks.clear()
         self._feed = None
+        self._follow_bars = False  # a sync after stop() starts no feed that nothing cancels
         for account in list(self.children):
             await self._kill(account)
         if self.conn is not None:
@@ -822,6 +828,7 @@ class LiveHub:
             self.drift_ticks.pop(account, None)
             self.instruments.pop(account, None)
             self.failed.pop(account, None)
+            self._store_retry.pop(account, None)
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]
@@ -895,31 +902,51 @@ class LiveHub:
         await self._warm(a.account, now)
 
     async def _warm(self, account: str, now: datetime) -> None:
+        """`_warm_up`, its errors contained: never out of a sync (from a bar, up to `run_bars`,
+        which would resubscribe: a full replay). One after the strategy stepped halts the account
+        (`_failed`): stepped twice, its state would not be the day's."""
+        try:
+            await self._warm_up(account, now)
+        except Exception as e:
+            await self._failed(account, "a warm-up", e)
+
+    async def _warm_up(self, account: str, now: datetime) -> None:
         """DEC-4e: replay today's bars (`today`) through the account's strategy child, actions
         suppressed, then step sees the backtest's window (`core.warm_up`, `core.warmed`). No
         new entries until then: while its series replays (`WAITING`), or while the bar store
-        does not reach the last trading day before today (`STORE_SHORT`, alerted once)."""
+        does not reach the last trading day before today (`STORE_SHORT`, alerted once; loaded
+        again at most once per `STORE_RETRY`)."""
         s, proc = self.states[account], self.children.get(account)
         if s.warming is None or proc is None:  # warm, or no strategy to warm (halted)
             return
         series, day = s.setup.spec.series, trading_day(now)
         if series in self.replaying:
             return await self._warming(account, WAITING.format(series=series))
+        if now < self._store_retry.get(account, now):
+            return
         instruments = self.instruments[account]
         try:
             history, last = await asyncio.to_thread(self._history, instruments, series, day)
             contract = front_month(instruments, series, day)
         except Exception as e:  # a broken or planted parquet file, a calendar that has ended
+            self._store_retry[account] = now + STORE_RETRY
             return await self._warming(account, STORE_ERROR.format(error=_error(e)), alert=True)
         if not history or trading_day(history[-1].ts) < last:
+            self._store_retry[account] = now + STORE_RETRY
             why = STORE_SHORT.format(series=series, day=last.isoformat())
             return await self._warming(account, why, alert=True)
-        bars = [b for b in self.today.get(contract, ()) if trading_day(b.ts) == day]
-        since = s.setup.armed.armed_at
-        rows = [
-            (r.ts, r.kind, r.payload) for r in journal.rows(self.conn, account, day, since=since)
-        ]
-        ctxs, window = core.warm_up(s, history, bars, rows)
+        self._store_retry.pop(account, None)
+        try:  # nothing stepped yet: kept warming, tried again on the next tick
+            bars = [b for b in self.today.get(contract, ()) if trading_day(b.ts) == day]
+            since = s.setup.armed.armed_at
+            rows = [
+                (r.ts, r.kind, r.payload)
+                for r in journal.rows(self.conn, account, day, since=since)
+            ]
+            ctxs, window = core.warm_up(s, history, bars, rows)
+        except Exception as e:
+            log.exception("live account %s: warm-up failed", account)
+            return await self._warming(account, WARM_ERROR.format(error=_error(e)), alert=True)
         replayed = []
         try:
             async with asyncio.timeout(WARM_TIMEOUT):

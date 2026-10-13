@@ -602,8 +602,10 @@ def warm_up(
     is replayed with its actions suppressed, and the window after the last of them. The window
     is `history` (the bar store's bars before today) then today's bars, the last WINDOW, with no
     roll-window bar, as the backtest. Position and account come from today's journal `rows`
-    (write time, kind, payload; oldest first) as `replay` books them, from today's open, each
-    row before the bar that closed after it was written, and every bar marked as live."""
+    (write time, kind, payload; in journal order) as `replay` books them, from today's open, and
+    every bar marked as live: before a bar, the rows journalled ahead of its own "bar" row (live
+    booked them before it reached step), or, for a bar with none, the rows written before it
+    closed."""
     a = s.acct
     r = replace(
         s,
@@ -618,11 +620,23 @@ def warm_up(
         opened=None,
         warming=None,
     )
-    close, todo, ctxs = math.nan, list(rows), []
+    # live order: the rows journalled ahead of a bar's own "bar" row were booked before it
+    # reached step (a fill in the feed's grace, or while the hub lock was held); a bar with no
+    # row (before arming, while down) takes the rows written before it closed
+    marks: dict[datetime, int] = {}
+    for i, (_, kind, p) in enumerate(rows):
+        if kind == "bar":
+            marks.setdefault(_at(p), i)
+    close, done, ctxs = math.nan, 0, []
     for b in bars:
-        while todo and todo[0][0] < b.ts + MINUTE:
-            _, kind, p = todo.pop(0)
+        upto = marks.get(b.ts)
+        if upto is None:
+            upto = done
+            while upto < len(rows) and rows[upto][0] < b.ts + MINUTE:
+                upto += 1
+        for _, kind, p in rows[done:upto]:
             r, close = _replayed(r, kind, p, close)
+        done = max(done, upto)
         r, _ = on_bar(r, b)
         if runs_step(b):
             ctxs.append(ctx(r))
@@ -651,6 +665,11 @@ def warmed(
     return s, ()
 
 
+def _at(p: Mapping[str, Any]) -> datetime:
+    """A "bar" row's bar open (journalled as str)."""
+    return datetime.fromisoformat(str(p["ts"]))
+
+
 def _decisions(
     rows: Sequence[tuple[datetime, str, Mapping[str, Any]]],
 ) -> dict[datetime, list[dict[str, Any]]]:
@@ -661,7 +680,7 @@ def _decisions(
     ts, left = None, 0
     for _, kind, p in rows:
         if kind == "bar":
-            ts, left = datetime.fromisoformat(str(p["ts"])), 0
+            ts, left = _at(p), 0
             if not p.get("warming"):
                 out[ts], left = [], p["actions"]
         elif kind in ("action", "rejection") and left:
@@ -782,12 +801,14 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause and a drift pause. The brief unreconciled pause is not one (only `halt_reason`)."""
+    pause, a drift pause and warming up (#79; not a halt: `halted` stays false for it alone). The
+    brief unreconciled pause is not one (only `halt_reason`)."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),
         ("stale", s.stale),
         ("drift", s.drift),
+        ("warming", s.warming),
     )
     return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
 

@@ -112,6 +112,68 @@ def test_warm_up_position_and_account_come_from_todays_journalled_fills():
     assert ctxs[3].account.today_pnl == 60.0 - setup.rules.costs.commission_per_side.NQ
 
 
+def sim_setup():
+    return make_setup(
+        make_rules(),
+        mode="sim",
+        start=Start(50_000.0, 50_000.0, 50_000.0),
+        day_start=DayStart(50_000.0, 50_000.0),
+    )
+
+
+def lived(setup, today, entry_at, bar_rows_at=timedelta(seconds=2)):
+    """Today run live: a Bracket at bar 0, its entry fill at `entry_at`; each bar's rows
+    written `bar_rows_at` after it closed (the feed's grace, or a hub lock held), in journal
+    order. Returns the rows and the (position, today's P&L) each bar's live step saw."""
+    s = reconciled(core.start(setup, today[0].ts)[0])
+    rows, seen, filled = [], [], False
+    for i, b in enumerate(today):
+        written = b.ts + MINUTE + bar_rows_at
+        if not filled and entry_at < written:  # the fill is booked before this bar's step
+            entry = fill(1, 20000.0, entry_at, commission=2.5, cid=s.working.client_id)
+            s, out = core.on_fill(s, entry)
+            rows += rows_of(out, entry_at + timedelta(milliseconds=500))
+            filled = True
+        s, out = core.on_bar(s, b)
+        seen.append((s.position.qty, core.ctx(s).account.today_pnl))
+        s, more = core.decide(s, [LONG] if i == 0 else [], written, 180)
+        rows += rows_of(out + more, written)
+    return journalled(rows), seen
+
+
+def test_warm_up_books_rows_in_the_order_live_booked_them():
+    # review of #224: a fill booked in the grace before bar 1 reached step was in its position
+    today = day_bars(D3, 4)
+    entry_at = today[1].ts + MINUTE  # bar 1 has ended; its bar arrives 2 s later
+    rows, seen = lived(sim_setup(), today, entry_at)
+    assert [qty for qty, _ in seen] == [0, 1, 1, 1]
+    s = reconciled(core.start(sim_setup(), today[-1].ts + MINUTE)[0])
+    ctxs, _ = core.warm_up(s, (), today, rows)
+    assert [(c.position.qty, c.account.today_pnl) for c in ctxs] == seen
+
+
+def test_warm_up_books_by_time_the_rows_of_bars_never_journalled():
+    # before arming, or while down: no "bar" row says where the bar was stepped
+    today = day_bars(D3, 4)
+    rows, _ = lived(sim_setup(), today, today[1].ts + timedelta(seconds=20))
+    rows = [r for r in rows if not (r[1] == "bar" and r[2]["ts"] != str(today[0].ts))]
+    s = reconciled(core.start(sim_setup(), today[-1].ts + MINUTE)[0])
+    ctxs, _ = core.warm_up(s, (), today, rows)
+    assert [c.position.qty for c in ctxs] == [0, 1, 1, 1]
+
+
+def test_warm_up_replays_from_todays_open_not_the_position_held_now():
+    # a restart holding today's position: the replay starts flat, at the open's balance
+    today = day_bars(D3, 3)
+    rows, seen = lived(sim_setup(), today, today[0].ts + timedelta(seconds=80))
+    s = reconciled(core.start(sim_setup(), today[-1].ts + MINUTE)[0])
+    s = core.replay(s, [(kind, p) for _, kind, p in rows])
+    assert s.position.qty == 1 and s.acct.balance == -2.5  # the entry's commission, booked
+    ctxs, _ = core.warm_up(s, (), today, rows)
+    assert [(c.position.qty, c.account.today_pnl) for c in ctxs] == seen
+    assert [qty for qty, _ in seen] == [0, 1, 1] and seen[0][1] == 0.0
+
+
 # --- divergence ---
 
 
@@ -143,6 +205,27 @@ def test_a_replayed_action_that_differs_from_the_journal_halts():
     assert out.halted.startswith(f"warm-up diverged at {today[0].ts.isoformat()}: journalled [")
     assert out.halted.endswith(", replayed []")
     assert out.warming is None  # warmed all the same: the halt holds entries back
+
+
+def test_a_later_action_that_differs_halts_too():
+    today = day_bars(D3, 1)
+    s = core.on_bar(core.start(make_setup(make_rules()), today[0].ts)[0], today[0])[0]
+    _, effects = decide_now(s, [LONG, Cancel("x")])
+    rows = stepped(effects, today[0].ts + MINUTE)
+    _, logs = core.warmed(s, today, [(today[0].ts, (LONG, Cancel("y")))], rows)
+    assert kinds(logs) == ["halt"]
+
+
+def test_only_the_bars_own_actions_count_not_the_runners_after_them():
+    # a runner's Flatten (a stopless fill) journalled after the bar's actions is not step's
+    today = day_bars(D3, 1)
+    s = core.on_bar(core.start(make_setup(make_rules()), today[0].ts)[0], today[0])[0]
+    _, effects = decide_now(s, [LONG])
+    rows = stepped(effects, today[0].ts + MINUTE)
+    flatten = {"type": "Flatten", "mode": "sim", "sent": True, "client_id": "c", "reason": "x"}
+    rows += [(today[0].ts + MINUTE * 1.5, "action", flatten)]
+    _, logs = core.warmed(s, today, [(today[0].ts, (LONG,))], rows)
+    assert logs == ()
 
 
 def test_a_rejected_action_is_compared_as_the_strategy_returned_it():
@@ -181,7 +264,15 @@ def test_warming_blocks_entries_but_exits_keep_working():
     assert kinds(effects) == ["bar", "rejection", "action"]
     assert effects[1].payload["reason"] == f"paused: {WARMING}"
     status = core.account_status(replace(s, warming=WARMING))
-    assert (status["halt_reason"], status["halted"], status["conditions"]) == (WARMING, False, [])
+    # a condition the strips show, under a stale pause too, but not a halt
+    warming = {"kind": "warming", "reason": WARMING}
+    assert (status["halt_reason"], status["halted"], status["conditions"]) == (
+        WARMING,
+        False,
+        [warming],
+    )
+    stale = core.account_status(replace(s, warming=WARMING, stale="no NQ bar"))
+    assert stale["conditions"] == [{"kind": "stale", "reason": "no NQ bar"}, warming]
 
 
 def test_a_warming_account_still_flattens_at_flat_by():
@@ -398,6 +489,90 @@ async def test_a_replay_that_differs_from_the_journal_halts(hub, conn, tmp_path,
 
 
 @pytest.mark.anyio
+async def test_rows_from_an_earlier_arming_are_not_compared(hub, conn, tmp_path, clock):
+    a = arm(conn, tmp_path, NEVER)
+    old = ARMED_AT - timedelta(minutes=30)  # journalled by the arming before this one
+    row = {**asdict(live_bar(0)), "actions": 1}
+    order = {"type": "Bracket", "side": "long", "qty": 1, "stop": 19990.0, "target": 20020.0}
+    journal.write(conn, old, "Sim101", "bar", row)
+    journal.write(conn, old, "Sim101", "action", order | {"mode": "dry", "sent": False})
+    assert a.armed_at == ARMED_AT
+    await replay(hub, live_bar(0), live_bar(1))
+    clock["t"] = T0 + timedelta(minutes=2)
+    await hub.tick(clock["t"])
+    assert hub.states["Sim101"].halted is None
+
+
+@pytest.mark.anyio
+async def test_a_warm_up_replays_only_todays_bars(hub, conn, tmp_path, clock):
+    friday = Bar(T0 - timedelta(days=3), 1.0, 1.0, 1.0, 1.0, 1, "NQZ26")  # Friday 10:00 ET
+    await replay(hub, friday)  # the buffer still holds the last trading day's bars
+    arm(conn, tmp_path, REPORT)
+    await hub.tick(T0)
+    await hub.handle_bar(live_bar(0))
+    [seen] = [p["order_id"] for p in payloads(conn, "action")]
+    assert seen.startswith("0 ")  # nothing replayed: Friday's bar is not today's
+
+
+@pytest.mark.anyio
+async def test_an_error_while_warming_up_never_reaches_the_feed(hub, conn, tmp_path, monkeypatch):
+    # review of #224: from handle_bar it would reach run_bars, which resubscribes (a full replay)
+    def broken(*args):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(core, "warm_up", broken)
+    arm(conn, tmp_path, ALWAYS)
+    await hub.handle_bar(live_bar(0))  # starts the account: the warm-up fails inside
+    message = "warming up: failed (RuntimeError: a bug); no new entries until it succeeds"
+    assert hub.states["Sim101"].warming == message
+    assert payloads(conn, "alert") == [{"message": message}]
+    assert "Sim101" in hub.children  # the strategy never stepped: a later tick retries
+    monkeypatch.undo()
+    await hub.tick(T0 + timedelta(minutes=1, seconds=5))
+    assert hub.states["Sim101"].warming is None
+
+
+@pytest.mark.anyio
+async def test_an_error_after_the_replay_halts_that_account_and_never_leaves_the_bar(
+    hub, conn, tmp_path, monkeypatch
+):
+    def broken(*args):
+        raise RuntimeError("a bug")
+
+    monkeypatch.setattr(core, "warmed", broken)
+    arm(conn, tmp_path, ALWAYS)
+    await replay(hub, live_bar(0))
+    await hub.handle_bar(live_bar(1))  # starts the account; the error stays inside
+    s = hub.states["Sim101"]
+    assert s.halted == "live runner error: RuntimeError: a bug"  # stepped: never again
+    assert hub.children == {}
+
+
+@pytest.mark.anyio
+async def test_a_short_store_is_checked_again_at_most_once_a_minute(
+    tmp_path, conn, clock, monkeypatch
+):
+    settings = Settings(data_dir=tmp_path / "empty", private_dir=tmp_path / "private")
+    calls = []
+
+    def spy(*args, **kw):
+        calls.append(args)
+        return load_bars(*args, **kw)
+
+    monkeypatch.setattr(service, "load_bars", spy)
+    hub = LiveHub(settings)
+    try:
+        arm(conn, tmp_path, ALWAYS)
+        for seconds in range(0, 60, 5):  # a tick every 5 s
+            await hub.tick(T0 + timedelta(seconds=seconds))
+        assert len(calls) == 1
+        await hub.tick(T0 + timedelta(seconds=60))
+        assert len(calls) == 2
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.anyio
 async def test_a_strategy_error_while_warming_up_halts(hub, conn, tmp_path, clock):
     arm(conn, tmp_path, ALWAYS)
     await replay(hub, live_bar(0, close=-1.0))
@@ -462,12 +637,14 @@ async def test_a_store_short_of_the_last_trading_day_blocks_entries_with_an_aler
             " before today; run `fenrir data pull`. No new entries until then"
         )
         assert payloads(conn, "alert") == [{"message": message}]  # once
+        await hub.tick(T0 + timedelta(seconds=65))  # checked again: still short, not alerted again
+        assert payloads(conn, "alert") == [{"message": message}]
         assert hub.status()["accounts"][0]["halt_reason"] == message
         await hub.handle_bar(live_bar(0))  # exits still run; step does not
         assert journalled_kinds(conn) == ["alert", "bar"]
         assert payloads(conn, "bar")[0]["warming"] is True
-        stale.rename(bars)  # pulled
-        clock["t"] = T0 + timedelta(minutes=1, seconds=5)
+        stale.rename(bars)  # pulled; checked again a minute after the last check
+        clock["t"] = T0 + timedelta(minutes=2, seconds=5)
         await hub.tick(clock["t"])
         assert hub.states["Sim101"].warming is None
         await hub.handle_bar(live_bar(1))
@@ -565,3 +742,5 @@ async def test_the_server_starts_the_bar_feed_with_the_first_armed_account(
     assert hub.states["Sim101"].warming.startswith("warming up: today's NQ bars from LSE")
     await hub.stop()
     assert hub._feed is None and hub._tasks == []
+    await hub.tick(T0)  # e.g. a late route after stop(): no feed that nothing would cancel
+    assert hub._feed is None

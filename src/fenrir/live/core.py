@@ -894,6 +894,8 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"paused: {paused}"
     if old:  # a late or replayed bar: never trade at its old close
         return old
+    if s.bars[-1].ts + MINUTE != s.last_seen:  # e.g. a roll-window bar never joins `bars`
+        return "not the latest bar: no entry at an older bar's close"
     if pending:
         return "a bracket was already accepted this bar"
     if s.working:

@@ -173,6 +173,24 @@ def test_roll_window_bar_is_journalled_but_never_shown_to_step():
     assert core.ctx(core.on_bar(held, after)[0]).bars == (*s.bars, after)
 
 
+def test_roll_window_starts_and_ends_at_18_et():
+    # trading days start at 18:00 ET (23:00 UTC in December), as load_bars counts them
+    assert not core.runs_step(bar("18:30", 1.0, 1.0, 1.0, 1.0, date(2025, 12, 10)))  # Thu's
+    assert core.runs_step(bar("16:59", 1.0, 1.0, 1.0, 1.0, date(2025, 12, 10)))
+    assert core.runs_step(bar("18:30", 1.0, 1.0, 1.0, 1.0, date(2025, 12, 16)))  # Wed's
+
+
+def test_decide_takes_no_bracket_unless_the_last_bar_is_the_current_one():
+    s = run(
+        make_setup(make_rules()),
+        bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 10)),
+    )
+    s = core.on_bar(s, bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 16)))[0]
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "rejection"]
+    assert effects[1].payload["reason"] == "not the latest bar: no entry at an older bar's close"
+
+
 def test_step_sees_the_bars_the_backtest_shows_it_around_a_roll():
     days = (date(2025, 12, 10), date(2025, 12, 11), date(2025, 12, 12), date(2025, 12, 17))
     bars = tuple(

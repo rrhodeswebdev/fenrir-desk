@@ -7,22 +7,13 @@ services:
       - "127.0.0.1:8000:8000"
       - "[::1]:8000:8000"
     volumes:
-      - .:/app
-      # read-only: the terminal must not change what the host runs or reads without review
-      # (#185: a writable .git can redirect the host git's config through .git/commondir)
-      - ./.git:/app/.git:ro
-      - ./.claude:/app/.claude:ro
-      - ./compose.yaml:/app/compose.yaml:ro
-      - ./Dockerfile:/app/Dockerfile:ro
-      - ./.dockerignore:/app/.dockerignore:ro
-      # BuildKit reads this instead of .dockerignore when it exists, even empty
-      - ./Dockerfile.dockerignore:/app/Dockerfile.dockerignore:ro
-      # the host's docker compose reads these from the project dir; Docker creates them empty
-      - ./docker/empty:/app/.env:ro
-      - ./docker/empty:/app/compose.override.yaml:ro
-      - ./docker/empty:/app/compose.override.yml:ro
-      - ./docker/empty:/app/docker-compose.override.yaml:ro
-      - ./docker/empty:/app/docker-compose.override.yml:ro
+      # The repo is read-only: the host's git, docker compose and Claude Code read files here
+      # unreviewed, and a case-insensitive host defeats per-file read-only overlays (#185).
+      # Only the directories the app and the terminal write are read-write.
+      - .:/app:ro
+      - ./data:/app/data
+      - ./rules:/app/rules
+      - ./strategies:/app/strategies
       - fenrir-private:/var/lib/fenrir
       - claude-config:/home/claude/.claude-config
     init: true

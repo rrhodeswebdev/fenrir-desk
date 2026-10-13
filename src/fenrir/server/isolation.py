@@ -62,18 +62,27 @@ def check(
     return reasons
 
 
-def nested_git(root: Path) -> list[str]:
-    """Every `.git` entry under `root` but `root/.git`, relative and sorted. The host's git uses
-    the nearest `.git` above its cwd, so one the terminal plants runs its config on the host
-    (#184). Never follows a symlink; skips the read-only `root/.git` and `root/.claude`."""
+# the only read-write mounts in /app (compose.yaml): the rest of the repo is read-only
+RW_DIRS = ("data", "rules", "strategies")
+
+
+def nested_git(root: Path, dirs: Sequence[str] = RW_DIRS) -> list[str]:
+    """Every `.git` entry in `root/<dir>` for each of `dirs`, relative to `root` and sorted, plus
+    `<path> (unreadable)` for a directory the walk could not list. The host's git uses the
+    nearest `.git` above its cwd, so one the terminal plants runs its config on the host (#184).
+    Never follows a symlink."""
     found = []
-    for top, dirs, files in os.walk(root):
-        here = Path(top)
-        if here != root:
-            found += [
-                str((here / ".git").relative_to(root)) for n in (*dirs, *files) if n == ".git"
-            ]
-        dirs[:] = [d for d in dirs if d != ".git" and not (here == root and d == ".claude")]
+
+    def unreadable(e: OSError) -> None:
+        if not isinstance(e, FileNotFoundError):  # gone mid-walk, or a dir that is not there
+            found.append(f"{Path(e.filename).relative_to(root)} (unreadable)")
+
+    for d in dirs:
+        for top, subdirs, files in os.walk(root / d, onerror=unreadable):
+            here = Path(top)
+            if ".git" in subdirs or ".git" in files:
+                found.append(str((here / ".git").relative_to(root)))
+            subdirs[:] = [s for s in subdirs if s != ".git"]
     return sorted(found)
 
 

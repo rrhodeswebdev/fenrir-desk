@@ -23,21 +23,21 @@ The full v1 spec is [SPEC.md](SPEC.md).
 
 ## Run
 
-Requires Docker (Docker Desktop on macOS or Windows) and a `git clone`: a checkout whose `.git` is a file (`git worktree`, `--separate-git-dir`) or missing (a zip download) is not supported.
+Requires Docker (Docker Desktop on macOS or Windows).
 
 ```
 git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
 docker compose up
 ```
 
-Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo; the container never sees a repo `.env`. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
 
 - **This machine only.** The app includes a shell. Keep the `127.0.0.1:8000:8000` and `[::1]:8000:8000` port mappings in `compose.yaml`; never change them to `8000:8000`.
 - **Terminal.** It runs as an unprivileged `claude` user in `/app` (your clone), and cannot read the secrets, the session key or the server. Run CLI commands there, e.g. `uv run fenrir backtest strategies/orb.py --account lucid-flex-50k`. Each backtest worker holds a full price series (up to about 2 GB), and workers are capped to fit the container's memory, so a larger Docker Desktop memory limit runs more of them.
-- **You commit, on the host.** Claude edits files and reads history in the terminal. The repo's own `.git`, `.claude/`, the Docker files (`compose.yaml`, `Dockerfile`, `.dockerignore`, `Dockerfile.dockerignore`), `.env` and the compose override names are read-only there. Docker creates empty `.env` and `compose.override.yaml`-style placeholder files in your clone; leave them (they are gitignored).
-- **Before running git after a terminal session.** The terminal can still create a `.git` in any subdirectory (a mount cannot block a name created anywhere), and your git, a git-aware shell prompt or an editor in that folder would run its config on your machine. From the repo root, first run `find . -name .git -not -path ./.git`: it must print nothing (the Settings page and `docker compose logs` warn when it would not). Then review with `git status --short --ignored` and `git diff`, and commit yourself.
-- **Review before every rebuild.** The server runs code built into the image, so changes take effect only after `docker compose up --build`, and the build runs package scripts as root. Every build input flows into the next image: `src/`, `web/` (including `web/package.json` and `web/package-lock.json`), `assets/brand/`, `pyproject.toml` and `uv.lock`. Review all of them first.
-- **Residual: `.mcp.json`.** The terminal can write a root `.mcp.json`; your Claude Code on the host asks before starting each new project MCP server, unless you turned on `enableAllProjectMcpServers`. Editor workspace files (`.vscode/`) are similar.
+- **In Docker, Claude edits strategies, rules and data only.** The repo is mounted read-only; only `data/`, `rules/` and `strategies/` are writable, so nothing in the terminal can change `.git`, `.claude/`, the Docker files, `.env`, the app's code or anything else your git, Claude Code or `docker compose` read. Edit the app's code natively (see Develop). Claude can read history (`git log`, `git diff`) but cannot commit; you review and commit on the host. Tools that write caches in the repo root (pytest, ruff) get a read-only error there.
+- **No secrets in the repo `.env`.** The app never reads it in Docker, but the terminal can read every file in the repo, `.env` included. Keep the keys on the Settings page.
+- **Before running git after a terminal session.** The terminal can create a `.git` inside `data/`, `rules/` or `strategies/`, and your git, a git-aware shell prompt or an editor in that folder would run its config on your machine. From the repo root, first run `find data rules strategies -name .git`: it must print nothing (the Settings page and `docker compose logs` warn when it would not). Then review with `git status --short --ignored` and `git diff`, and commit yourself. Review a strategy before running it natively: it is Python.
+- **Rebuilds.** The server runs code built into the image, so changes you make to `src/`, `web/`, `assets/brand/`, `pyproject.toml` or `uv.lock` take effect after `docker compose up --build`.
 - **Linux hosts.** Build with your uid so files the terminal writes are yours, every time, then start: `docker compose build --build-arg CLAUDE_UID=$(id -u) && docker compose up` (a plain `up --build` would rebuild with uid 1000).
 - **`docker compose exec`.** Add `-u claude` for anything you run inside; without it the command runs as root.
 - **NinjaTrader address.** `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine; `http://<VM IP>:8123` for NinjaTrader in a Windows VM on a Mac (run `ipconfig` in the VM; use bridged or shared networking). Live trading needs NinjaTrader 8 with the Fenrir add-on imported: see [addon/INSTALL.md](addon/INSTALL.md).

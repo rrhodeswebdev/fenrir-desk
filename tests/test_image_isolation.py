@@ -1,5 +1,5 @@
 """DEC-1 and #185 in the running image, as the terminal user: the private volume, the server's
-environment and open files are out of reach, and nothing the host reads unreviewed is writable.
+environment and open files are out of reach, and only data/, rules/ and strategies/ are writable.
 Skipped anywhere else. Run (SPEC Commands):
 `docker compose exec -u claude fenrir uvx pytest==9.1.1 -p no:cacheprovider <this file>`
 """
@@ -11,12 +11,7 @@ import pytest
 
 PRIVATE = Path("/var/lib/fenrir")
 APP = Path("/app")
-OVERRIDES = (
-    "compose.override.yaml",
-    "compose.override.yml",
-    "docker-compose.override.yaml",
-    "docker-compose.override.yml",
-)
+RW_DIRS = ("data", "rules", "strategies")  # compose.yaml's read-write mounts
 
 pytestmark = pytest.mark.skipif(
     not PRIVATE.is_dir() or os.geteuid() == 0, reason="runs in the image as the terminal user"
@@ -69,37 +64,46 @@ def test_server_fds_unreadable():
             (fds / str(fd)).read_bytes()
 
 
-def test_repo_env_is_an_empty_read_only_placeholder():
-    assert (APP / ".env").read_bytes() == b""  # nothing of the host's .env
-    with pytest.raises(OSError):
-        (APP / ".env").write_text("COMPOSE_FILE=evil.yaml\n")
+# case variants too: on a case-insensitive host (macOS) /app/.ENV is the host's .env (#185)
+READ_ONLY = [
+    ".env",
+    ".ENV",
+    "compose.yaml",
+    "COMPOSE.YAML",
+    "compose.override.yaml",
+    "Compose.Override.yaml",
+    "Dockerfile",
+    "dockerfile.dockerignore",
+    ".dockerignore",
+    ".mcp.json",
+    "CLAUDE.md",
+    ".claude/settings.json",
+    ".CLAUDE/settings.json",
+    ".git/config",
+    ".GIT/config",
+    ".git/commondir",
+    ".git/hooks/pre-commit",
+    "src/x",
+    "SRC/x",
+    "web/x",
+    "tests/x",
+]
 
 
-@pytest.mark.parametrize("name", OVERRIDES)
-def test_compose_overrides_not_writable(name):
-    with pytest.raises(OSError):
-        (APP / name).write_text("services: {}\n")
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        ".claude/settings.json",
-        ".git/config",
-        ".git/commondir",
-        ".git/hooks/pre-commit",
-        "Dockerfile.dockerignore",
-        ".dockerignore",
-    ],
-)
-def test_host_read_paths_not_writable(path):
+@pytest.mark.parametrize("path", READ_ONLY)
+def test_repo_not_writable(path):
     with pytest.raises(OSError):
         (APP / path).write_text("x\n")
 
 
-@pytest.mark.parametrize(
-    "name", [".git", ".claude", ".env", "compose.yaml", "Dockerfile.dockerignore"]
-)
-def test_mount_points_cannot_be_renamed(name):
+@pytest.mark.parametrize("name", RW_DIRS)
+def test_working_dirs_writable(name):
+    f = APP / name / ".fenrir-write-probe"
+    f.write_text("x\n")
+    f.unlink()
+
+
+@pytest.mark.parametrize("name", [".git", ".claude", "src", *RW_DIRS])
+def test_dirs_cannot_be_renamed(name):
     with pytest.raises(OSError):
         (APP / name).rename(APP / f"{name}.moved")

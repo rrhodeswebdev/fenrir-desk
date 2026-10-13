@@ -263,7 +263,7 @@ function SettingsPage() {
           </h2>
           {settings.data?.nested_git.length ? (
             <p role="alert" className="mb-6 max-w-[72ch] border border-ember p-4 text-ember">
-              The terminal left a .git in the repo: {settings.data.nested_git.join(', ')}. Git, a git-aware prompt or an editor on this machine would run its config there. Delete it before running git; from the repo root, <code>find . -name .git -not -path ./.git</code> must print nothing.
+              The terminal left a .git in the repo: {settings.data.nested_git.join(', ')}. Git, a git-aware prompt or an editor on this machine would run its config there. Delete it before running git; from the repo root, <code>find data rules strategies -name .git</code> must print nothing.
             </p>
           ) : null}
           {settings.data ? <SettingsForm server={settings.data} /> : state(settings)}

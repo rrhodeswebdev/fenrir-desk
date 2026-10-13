@@ -1,5 +1,6 @@
 """Settings API (contracts: Plan 24): the secrets file and the per-account choices."""
 
+import asyncio
 import os
 import tempfile
 from collections.abc import Mapping
@@ -110,18 +111,17 @@ def _read_env(path: Path | None) -> str:
         return ""
 
 
-def _settings_view(text: str) -> dict:
+def _settings_view(text: str, nested: list[str]) -> dict:
     try:
         shown = view(parse_env_text(text))
     except ValueError as e:  # a bad value typed into the file by hand: name it
         raise HTTPException(status_code=500, detail=f"{_env_file()}: {e}") from e
-    # shortcut: async PUT walks /app on the event loop; fine for a repo, thread it if it grows
-    return {**shown, "nested_git": nested_git_in_image()}
+    return {**shown, "nested_git": nested}
 
 
 @router.get("")
 def get_settings() -> dict:
-    return _settings_view(_read_env(_env_file()))
+    return _settings_view(_read_env(_env_file()), nested_git_in_image())  # in the threadpool
 
 
 @router.put("")
@@ -131,10 +131,11 @@ async def put_settings(request: Request):
         return _invalid(
             "Settings must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
-    return _save(data)
+    # the walk off the event loop, before _save's no-await section
+    return _save(data, await asyncio.to_thread(nested_git_in_image))
 
 
-def _save(data: dict):
+def _save(data: dict, nested: list[str]):
     try:
         update = SettingsUpdate.model_validate(data).model_dump(exclude_unset=True)
     except ValidationError as e:
@@ -152,7 +153,7 @@ def _save(data: dict):
             text = update_env_text(text, updates)
         except ValueError as e:  # a value with a line break
             return _invalid("The settings do not validate.", [{"loc": [], "msg": str(e)}])
-    response = _settings_view(text)  # built first: a 500 here must not follow a write
+    response = _settings_view(text, nested)  # built first: a 500 here must not follow a write
     if updates:
         _write(path, text.encode("utf-8"), 0o600)
     return response

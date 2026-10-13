@@ -69,9 +69,3 @@ Thumbs.db
 # Impeccable design-skill state (local only)
 .impeccable/
 
-
-# Docker: compose override names are read-only placeholders in the container (#185)
-compose.override.yaml
-compose.override.yml
-docker-compose.override.yaml
-docker-compose.override.yml

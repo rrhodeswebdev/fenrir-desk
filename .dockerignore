@@ -1,5 +1,4 @@
-# allowlist: nothing else (.env, .git, data/) reaches the build. Keep identical to
-# Dockerfile.dockerignore, which BuildKit reads instead (both mounted read-only).
+# allowlist: nothing else (.env, .git, data/) reaches the build
 *
 !pyproject.toml
 !uv.lock

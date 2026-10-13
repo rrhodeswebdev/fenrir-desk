@@ -1,10 +1,12 @@
-"""Static checks on the Docker setup (18.2, DEC-1, DEC-6): the app holds a shell, so the
-port stays on host loopback and nothing the terminal can write reaches the host's next build."""
+"""Static checks on the Docker setup (18.2, DEC-1, DEC-6, #185): the app holds a shell, so the
+port stays on host loopback, and the terminal can write only data/, rules/ and strategies/."""
 
 import re
 from pathlib import Path
 
 import yaml
+
+from fenrir.server.isolation import RW_DIRS
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_TEXT = (ROOT / "compose.yaml").read_text()
@@ -19,40 +21,13 @@ def test_ports_published_on_host_loopback_only():
     assert {str(p).rsplit(":", 2)[0] for p in SVC["ports"]} == {"127.0.0.1", "[::1]"}
 
 
-OVERRIDES = (
-    "compose.override.yaml",
-    "compose.override.yml",
-    "docker-compose.override.yaml",
-    "docker-compose.override.yml",
-)
-
-
-HOST_READ = (
-    ".git",
-    ".claude",
-    "compose.yaml",
-    "Dockerfile",
-    ".dockerignore",
-    "Dockerfile.dockerignore",
-)
-
-
-def test_host_read_files_mounted_read_only_over_the_repo():
-    volumes = SVC["volumes"]
-    assert ".:/app" in volumes
-    # .git whole (#185): a writable .git/commondir redirects the host git's config and hooks
-    for path in HOST_READ:
-        assert f"./{path}:/app/{path}:ro" in volumes
-    assert not [v for v in volumes if v.startswith("./.git/")]
-
-
-def test_env_and_compose_overrides_hidden_behind_an_empty_placeholder():
-    # the host's docker compose reads .env (COMPOSE_FILE=...) and the override names unreviewed
-    for name in (".env", *OVERRIDES):
-        assert f"./docker/empty:/app/{name}:ro" in SVC["volumes"]
-    assert (ROOT / "docker" / "empty").read_bytes() == b""
-    ignored = (ROOT / ".gitignore").read_text().split()
-    assert set(OVERRIDES) <= set(ignored)
+def test_repo_read_only_but_the_three_working_dirs():
+    # #185: a case-insensitive host defeats per-file read-only overlays (/app/.ENV writes .env),
+    # so the whole repo is read-only and only whole directories are read-write
+    repo = [v for v in SVC["volumes"] if v.startswith(".")]
+    assert repo[0] == ".:/app:ro"
+    assert repo[1:] == [f"./{d}:/app/{d}" for d in RW_DIRS]
+    assert RW_DIRS == ("data", "rules", "strategies")
 
 
 def test_named_volumes_for_secrets_and_claude_login():
@@ -86,13 +61,6 @@ def test_web_build_gets_brand_assets():
     assert re.search(r"^COPY assets/brand/ assets/brand/$", DOCKERFILE, re.M)
     ignore = (ROOT / ".dockerignore").read_text().split()
     assert "!assets/brand" in ignore
-
-
-def test_buildkit_ignore_file_is_the_same_allowlist():
-    # BuildKit prefers Dockerfile.dockerignore; an empty or different one would widen the context
-    legacy = (ROOT / ".dockerignore").read_bytes()
-    assert (ROOT / "Dockerfile.dockerignore").read_bytes() == legacy
-    assert legacy.splitlines()[2] == b"*"
 
 
 def test_image_isolation_env():

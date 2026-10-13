@@ -151,6 +151,21 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
+def _flattened(first: str | None, again: str | None) -> str | None:
+    """The kill's two `/flatten-all` errors (before the hub lock, then under it) as one, naming
+    which failed; None when both landed."""
+    if first and again:
+        if first == again:
+            return f"both flatten-alls failed: {first}"
+        return (
+            f"first flatten-all (before the lock) failed: {first}; "
+            f"second flatten-all (under the lock) failed: {again}"
+        )
+    if first:
+        return f"first flatten-all (before the lock) failed: {first}; the second landed"
+    return again and f"second flatten-all (under the lock) failed: {again}"
+
+
 class LiveHub:
     """Runs every armed account on live bars. Opens nothing until something is armed:
     `<private_dir>/fenrir.db` is opened once it exists, never created here."""
@@ -279,7 +294,7 @@ class LiveHub:
         async with self._lock:
             live = any(s.setup.armed.mode != "dry" for s in self.states.values())
             again = await self._flatten_all()
-            flat = "; ".join(dict.fromkeys(e for e in (first, again) if e)) or None
+            flat = _flattened(first, again)
             conn, armed, deleted = None, (), []
             disarm = unjournalled = unstopped = None
             try:
@@ -318,7 +333,12 @@ class LiveHub:
                         await self._apply(account, *core.halt(s, f"kill switch: {why}"))
             if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
                 flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
-            done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
+            if not flat:
+                done = "flattened and cancelled all"
+            elif self.addon is None:
+                done = f"flatten all failed: {flat}"
+            else:
+                done = flat  # names which flatten-all failed
             try:
                 for a in deleted:
                     alert = {"message": f"kill switch: disarmed; {done}"}

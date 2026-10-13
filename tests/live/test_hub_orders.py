@@ -730,15 +730,31 @@ async def test_kill_with_only_dry_runs_needs_no_ninjatrader(settings, conn, arme
     assert arming.list_armed(conn) == ()
 
 
+BROKER = "no connection to the broker"
+
+
 @pytest.mark.parametrize(
-    "rejects", [["no connection to the broker"], [None, "no connection to the broker"]]
+    ("rejects", "error"),
+    [
+        ([BROKER], f"first flatten-all (before the lock) failed: {BROKER}; the second landed"),
+        ([None, BROKER], f"second flatten-all (under the lock) failed: {BROKER}"),
+        ([BROKER, BROKER], f"both flatten-alls failed: {BROKER}"),  # the same error named once
+        (
+            ["x", "y"],
+            "first flatten-all (before the lock) failed: x; "
+            "second flatten-all (under the lock) failed: y",
+        ),
+    ],
 )
 async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
-    hub, conn, armed, fake, client, monkeypatch, rejects
+    hub, conn, armed, fake, client, monkeypatch, rejects, error
 ):
-    """Either flatten-all refused (the one before the lock, or the one under it) is reported."""
+    """Either flatten-all refused (the one before the lock, or the one under it) is reported,
+    naming which, so a failed first post whose second landed never reads as nothing flattened."""
     fake.rejects = rejects
-    assert await hub.kill() == {"ok": False, "error": "no connection to the broker"}
+    assert await hub.kill() == {"ok": False, "error": error}
+    [row] = rows(conn, "alert")
+    assert row.payload["message"] == f"kill switch: disarmed; {error}"
     arming.insert_armed(conn, armed)
 
     async def down(client_id):
@@ -746,7 +762,7 @@ async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
 
     monkeypatch.setattr(client, "flatten_all", down)
     result = await hub.kill()
-    assert result["ok"] is False and "unreachable" in result["error"]
+    assert result["error"] == "both flatten-alls failed: ConnectError: add-on unreachable"
 
 
 async def test_kill_flattens_all_even_when_the_disarm_fails(hub, conn, armed, fake, monkeypatch):

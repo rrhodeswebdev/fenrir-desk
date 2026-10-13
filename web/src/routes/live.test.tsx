@@ -3,7 +3,7 @@ import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/rea
 import { renderToString } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '@/api'
-import { account, desk, status } from '@/live/fixtures'
+import { account, desk, held, status } from '@/live/fixtures'
 import type { LiveStatus } from '@/live/model'
 import { routeTree } from '@/router'
 import { statusPollMs } from './live'
@@ -29,6 +29,26 @@ describe('live page', () => {
     expect(html).toContain('role="img" aria-label="Feed normal, broker alarm, drift normal"')
     expect(html).toContain('<span class="label text-red">Book · LFE 0911</span>')
     expect(html).toMatch(/<button[^>]*data-variant="destructive"[^>]*>Kill all<\/button>/)
+  })
+
+  it('shows why the LSE feed is down and when it is retried, beside the Feed alarm', async () => {
+    const lse = { connected: false, last_bar_ts: null, error: 'LSE stream stopped: Max 1 concurrent websocket connection(s)' }
+    const html = await render(status({ lse: { ...lse, retry_at: '2099-01-02T15:04:05+00:00' } }))
+    expect(html).toContain('aria-label="Feed alarm, broker normal, drift normal"')
+    expect(html).toContain('<span class="label text-red">Retry 10:04:05</span>')
+    expect(html).toContain('>LSE stream stopped: Max 1 concurrent websocket connection(s)</p>')
+    expect(await render(status({ lse: { ...lse, retry_at: null } }))).toContain('<span class="label text-red">Restart needed</span>')
+    expect(await render(status())).not.toContain('Retry')
+  })
+
+  it('a mismatch under a safety halt names the Book alarm, offers Resolve and shows both reasons', async () => {
+    const a = account({ account: 'LPR 1123', ...held({ kind: 'safety', reason: 'safety margin: 81% used' }, { kind: 'reconcile', reason: 'NinjaTrader mismatch: stray_orders' }) })
+    const html = await render(status({ accounts: [a] }))
+    expect(html).toContain('<span class="label text-red">Book · LPR 1123</span>')
+    expect(html).toContain('aria-label="Risk caution, book alarm"')
+    expect(html).toContain('aria-label="Resolve LPR 1123"')
+    expect(html).toMatch(/text-ember">safety margin: 81% used<\/p>/)
+    expect(html).toMatch(/text-red">NinjaTrader mismatch: stray_orders<\/p>/)
   })
 
   it('names no account when none is in alarm, and says when nothing is armed', async () => {

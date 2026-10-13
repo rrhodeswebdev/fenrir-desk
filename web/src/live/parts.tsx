@@ -23,6 +23,7 @@ import {
   modeText,
   phaseText,
   positionText,
+  reasons,
   segments,
   typeText,
   usd,
@@ -157,7 +158,6 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 /** The focus field (DESIGN.md "Catalog-Number Headline", "Session Dial"): identity, dial, then facts and meters.
  * `onAuto` is set while a user's pick holds the focus: it hands focus back to the most severe account. */
 export function FocusField({ a, onAuto, ...resolve }: ResolveProps & { a: AccountStatus; onAuto?: () => void }) {
-  const tone = alertTone(a)
   return (
     <section
       aria-label="Focused account"
@@ -174,7 +174,11 @@ export function FocusField({ a, onAuto, ...resolve }: ResolveProps & { a: Accoun
             {modeText[a.mode]} · {phaseText[a.phase]}
           </span>
         </div>
-        {a.halt_reason && <p className={cn('max-w-[44ch]', toneClass[tone ?? 'normal'])}>{a.halt_reason}</p>}
+        {reasons(a).map((r) => (
+          <p key={r.text} className={cn('max-w-[44ch]', toneClass[r.tone])}>
+            {r.text}
+          </p>
+        ))}
         <div className="flex flex-wrap gap-3">
           <ResolveButton a={a} {...resolve} />
           {onAuto && (
@@ -244,11 +248,11 @@ function Sleeve({ a, onFocus, ...resolve }: ResolveProps & { a: AccountStatus; o
       <span className="label">
         {typeText(a)} · {modeText[a.mode]}
       </span>
-      {a.halt_reason && (
-        <p className={cn('font-mono text-[11px] leading-[1.4] font-medium tracking-[0.12em] uppercase', toneClass[tone ?? 'normal'])}>
-          {a.halt_reason}
+      {reasons(a).map((r) => (
+        <p key={r.text} className={cn('font-mono text-[11px] leading-[1.4] font-medium tracking-[0.12em] uppercase', toneClass[r.tone])}>
+          {r.text}
         </p>
-      )}
+      ))}
       {/* the facts drop below the mini dial when the sleeve is too narrow for both */}
       <div className="flex flex-wrap items-center gap-4">
         <div className={cn('w-[112px] shrink-0', dim)}>

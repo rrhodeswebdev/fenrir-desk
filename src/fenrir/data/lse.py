@@ -2,7 +2,7 @@
 
 import logging
 import math
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import aclosing
 from datetime import UTC, datetime, time, timedelta
 
@@ -71,11 +71,15 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
     )
 
 
-async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]:
+async def stream_ticks(
+    settings: Settings, contracts: Sequence[str], *, on_auth: Callable[[], None] | None = None
+) -> AsyncGenerator[Tick, None]:
     """Live trades for our front-month `contracts`, from LSE's continuous `ES.F`/`NQ.F`
     (docs/data-gate.md Item 3). The SDK reconnects after a drop and stops only on an error it
     deems fatal (any error before auth), which raises `FeedStopped` with the server's last
-    error message; an empty key raises a permanent `FeedStopped` before any connection."""
+    error message; an empty key raises a permanent `FeedStopped` before any connection.
+    `on_auth` is called each time the socket authenticates (the first connect and each SDK
+    reconnect), before any tick on it."""
     from lse import LSE, LSEError
 
     ours = {lse_symbol(c): c for c in contracts}
@@ -89,6 +93,8 @@ async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGen
         log.warning("LSE stream: %s", message)
 
     client.on("error", on_error)
+    if on_auth is not None:
+        client.on("authenticated", on_auth)
     try:
         async with aclosing(client.stream_async(list(ours), reconnect=True)) as ticks:
             async for t in ticks:

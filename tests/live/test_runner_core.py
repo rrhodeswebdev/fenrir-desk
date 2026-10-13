@@ -355,7 +355,7 @@ def test_account_status_shape():
     assert set(st) == {
         "account", "mode", "phase", "strategy", "rules_account", "contract", "halted",
         "halt_kind", "halt_reason", "balance", "nt_balance", "today_pnl", "limits", "position",
-        "session",
+        "session", "conditions",
     }  # fmt: skip
     assert st["nt_balance"] is None  # no NinjaTrader figures (always for dry runs)
     assert st["limits"] == {

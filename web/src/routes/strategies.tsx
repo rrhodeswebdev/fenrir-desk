@@ -443,21 +443,36 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
   )
 }
 
+/** `POST /api/arming/disarm`: `ok: false` with no error when the account was not armed. */
+export type DisarmResult = { ok: boolean; error: string | null }
+
+/** The disarm confirmation: a sim or live disarm flattens the account in NinjaTrader first (#223). */
+export const disarmText = (mode: Mode): string =>
+  mode === 'dry'
+    ? 'The runner stops trading this account. A dry run sends nothing to NinjaTrader, so there is nothing to flatten.'
+    : 'NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled. Then the runner stops trading it. If the flatten fails, the account stays armed and halted, and the position may still be open.'
+
+/** A disarm that did not happen (or did not finish) in words; null when it did. */
+export const disarmResultText = (account: string, r: DisarmResult): string | null =>
+  r.ok ? null : r.error == null ? `${account} was not armed: nothing was disarmed.` : `${account}: ${r.error.replace(/[.\s]+$/, '')}.`
+
 /** Disarm one account, after a confirmation. */
-function Disarm({ account }: { account: string }) {
+function Disarm({ account, mode }: { account: string; mode: Mode }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
   const send = useSingleFlight()
   const refresh = () => void qc.invalidateQueries({ queryKey: ['arming'], exact: true })
   const disarm = useMutation({
-    mutationFn: () => apiFetch<{ ok: boolean }>('/api/arming/disarm', { method: 'POST', body: JSON.stringify({ account }) }),
-    // ok: false (the kill switch or another tab disarmed it first) stays open to say so; closing refreshes
+    mutationFn: () => apiFetch<DisarmResult>('/api/arming/disarm', { method: 'POST', body: JSON.stringify({ account }) }),
+    // ok: false (not armed: the kill switch or another tab disarmed it first; or the flatten failed and it stays
+    // armed and halted) stays open to say so; closing refreshes
     onSuccess: (r) => {
       if (!r.ok) return
       setOpen(false)
       refresh()
     },
   })
+  const failed = disarm.data && disarmResultText(account, disarm.data)
   return (
     <AlertDialog
       open={open}
@@ -476,16 +491,16 @@ function Disarm({ account }: { account: string }) {
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Disarm {account}</AlertDialogTitle>
-          <AlertDialogDescription>The runner stops trading this account within 5 seconds. An open position stays open with its broker-side stop and target.</AlertDialogDescription>
+          <AlertDialogDescription>{disarmText(mode)}</AlertDialogDescription>
         </AlertDialogHeader>
-        {(disarm.error != null || disarm.data?.ok === false) && (
+        {(disarm.error != null || failed) && (
           <p role="alert" className="text-red">
-            {disarm.error != null ? errorText(disarm.error) : `${account} was not armed: nothing was disarmed.`}
+            {disarm.error != null ? errorText(disarm.error) : failed}
           </p>
         )}
         <AlertDialogFooter>
           <Button variant="destructive" disabled={disarm.isPending} onClick={() => send(disarm, undefined)}>
-            Disarm
+            {mode === 'dry' ? 'Disarm' : 'Flatten and disarm'}
           </Button>
           <AlertDialogCancel disabled={disarm.isPending}>Cancel</AlertDialogCancel>
         </AlertDialogFooter>
@@ -526,7 +541,7 @@ export function ArmedTable({ rows }: { rows: Armed[] }) {
             <TableCell>{PHASES[a.phase]}</TableCell>
             <TableCell>{armedAt(a.armed_at)}</TableCell>
             <TableCell className="text-right">
-              <Disarm account={a.account} />
+              <Disarm account={a.account} mode={a.mode} />
             </TableCell>
           </TableRow>
         ))}

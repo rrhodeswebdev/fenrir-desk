@@ -3,7 +3,8 @@ between that balance and the app's own alone is never a breach. NinjaTrader book
 never saw as a fill (a manual trade on another instrument, an exit while the server was down):
 it halts with "confirm balances" instead, open-ended, until re-armed. A real breach still is one.
 #222: the same for an intraday peak raise from NinjaTrader's account figures. #229: under that
-halt, the flatten of a held position is one at a time, and whatever NinjaTrader holds goes too."""
+halt, the flatten of a held position is one at a time, and whatever NinjaTrader holds goes too.
+#225: a later-day restart under that halt checks NinjaTrader's floor, journalled with the halt."""
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -436,3 +437,92 @@ async def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened(
         assert flattens(fake, sent) == [two]
     finally:
         await hub.stop()
+
+
+THU = T0 + timedelta(days=3, hours=-0.5)  # Thursday 09:30 ET, trading day 2026-10-15
+
+
+async def restarted(settings, client, clock, at, balance):
+    """A new hub at `at`, started by NinjaTrader's `balance` and reconciled (flat)."""
+    clock["t"] = at
+    h = LiveHub(settings, addon=client)
+    await h.handle_stream({"type": "connected"})
+    await h.tick(at)
+    await h.handle_stream(account(balance))
+    await h.tick(at + timedelta(seconds=5))
+    return h
+
+
+async def test_a_later_day_restart_under_the_gap_halt_checks_ninjatraders_floor(
+    settings, client, conn, armed, fake, clock
+):
+    """#225's probe: the gap halt at the 2026-10-13 roll (the app at 50,000, NinjaTrader at
+    52,200, its floor 50,100), then a restart on Thursday with NinjaTrader at 52,200. The restart
+    opens at NinjaTrader's balance, so it takes NinjaTrader's journalled peak too: room 2,100,
+    not 4,200, and a manual 10 MNQ loss of -2,510 (NinjaTrader at 49,690, through its floor)
+    breaches. It used to leave the floor at 48,000: no breach. A second restart that day opens
+    as the first did, at NinjaTrader's figures."""
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_stream(account(52_200.0, realized=2200.0))
+        await first.handle_bar(bar(D2))  # the gap halt
+        reason = first.states["Sim101"].halted
+    finally:
+        await first.stop()
+    second = await restarted(settings, client, clock, THU, 52_200.0)
+    try:
+        s = second.states["Sim101"]
+        assert s.started and (s.halted, s.halt_kind) == (reason, None)
+        assert (s.acct.balance, s.acct.peak, s.acct.floor) == (2200.0, 2200.0, 100.0)
+        [acc] = second.status()["accounts"]
+        assert acc["limits"]["drawdown_remaining"] == 2100.0
+    finally:
+        await second.stop()
+    third = await restarted(settings, client, clock, THU + timedelta(hours=1), 52_200.0)
+    try:
+        s = third.states["Sim101"]
+        assert (s.acct.balance, s.acct.peak, s.acct.floor) == (2200.0, 2200.0, 100.0)
+        at = clock["t"]
+        await third.handle_fill(fill(10, 20000.0, at + timedelta(seconds=10)))
+        await third.handle_fill(fill(-10, 19875.0, at + timedelta(seconds=20)))  # -2,500 - $10
+        await third.handle_stream(account(49_690.0, realized=-2510.0))
+        await third.handle_bar(bar(at + timedelta(minutes=1)))
+        s = third.states["Sim101"]
+        assert s.halt_kind == "breach"
+        assert s.halted == "breach max_drawdown: equity -310.00 at or below drawdown floor 100.00"
+    finally:
+        await third.stop()
+    [row] = [r.payload for r in journal.rows(conn, kind="peak")]  # the gap roll's, both peaks
+    assert (row["peak"], row["nt_peak"]) == (50_000.0, 52_200.0)
+
+
+async def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_peak(
+    settings, client, conn, armed, fake, clock
+):
+    """The other side (#221's M5): a restart the day of the gap halt rebuilds the app's own
+    balance from today's open, so NinjaTrader's journalled peak is not taken; its floor would
+    breach the app's figures. The app's own loss through its own floor still breaches."""
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_stream(account(52_200.0, realized=2200.0))
+        await first.handle_bar(bar(D2))
+    finally:
+        await first.stop()
+    second = await restarted(settings, client, clock, D2 + timedelta(hours=1), 52_200.0)
+    try:
+        at = clock["t"]
+        await second.handle_bar(bar(at))
+        s = second.states["Sim101"]
+        assert s.halted.startswith("confirm balances: a gap ") and s.halt_kind is None
+        assert (s.acct.balance, s.acct.peak, s.acct.floor) == (0.0, 0.0, -2000.0)
+        await second.handle_fill(fill(10, 20000.0, at + timedelta(seconds=70)))
+        await second.handle_fill(fill(-10, 19900.0, at + timedelta(seconds=80)))  # -2,010
+        await second.handle_bar(bar(at + timedelta(minutes=2)))
+        s = second.states["Sim101"]
+        assert (
+            s.halted == "breach max_drawdown: equity -2010.00 at or below drawdown floor -2000.00"
+        )
+    finally:
+        await second.stop()

@@ -560,7 +560,7 @@ class LiveHub:
     conn: sqlite3.Connection | None    # <private_dir>/fenrir.db, opened once that file exists; never created here
     states: dict[str, RunnerState]; broken: dict[str, tuple[Armed, str]]; children: dict[str, Process]
     lse_connected: bool; last_bar_ts: datetime | None
-    async def tick(now)                # sync the armed table, then core.on_tick(stale_seconds) per account
+    async def tick(now)                # sync the armed table, then core.on_tick(stale_seconds) per account; one account's error is logged, the rest still run
     async def handle_bar(bar)          # sync, then per account whose spec.series front month is bar.contract:
         # hash check (file changed → open-ended halt), core.on_bar, then only when core.runs_step(bar): step in its child,
         # core.decide (now = the wall clock after step, stale_seconds) / step_failed; each Send is posted to the add-on (22.4, below)

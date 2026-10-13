@@ -87,9 +87,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             await app.state.live.stop()
         finally:
-            app.state.jobs.stop()
-            if app.state.addon is not None:
-                await app.state.addon.aclose()
+            try:
+                app.state.jobs.stop()
+            finally:
+                if app.state.addon is not None:
+                    await app.state.addon.aclose()
 
 
 def create_app(

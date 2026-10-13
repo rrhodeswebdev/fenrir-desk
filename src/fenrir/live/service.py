@@ -191,7 +191,10 @@ class LiveHub:
         async with self._lock:
             await self._sync(now)
             for account, s in list(self.states.items()):
-                await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                try:
+                    await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                except Exception:  # e.g. its rows still refused: the others' retries still go out
+                    log.exception("live account %s failed on a tick", account)
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:

@@ -41,6 +41,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly HashSet<Account> attached = new HashSet<Account>();
         private readonly Dictionary<string, FlatRequest> mustBeFlat = new Dictionary<string, FlatRequest>(); // "account|instrument"
         private readonly Dictionary<Order, Working> exactExits = new Dictionary<Order, Working>(); // CloseExactly orders until done
+        private readonly Dictionary<Order, DateTime> exactExitSent = new Dictionary<Order, DateTime>();
 
         // a bracket placed since this start
         private class Working
@@ -663,11 +664,16 @@ namespace NinjaTrader.NinjaScript.AddOns
                     OrderType.Market, OrderEntry.Automated, TimeInForce.Day, qty, 0, 0, string.Empty, CloseName,
                     NinjaTrader.Core.Globals.MaxDate, null);
                 exactExits[exit] = b;
+                exactExitSent[exit] = DateTime.UtcNow;
                 b.Account.Submit(new[] { exit });
             }
             catch (Exception e)
             {
-                if (exit != null) exactExits.Remove(exit);
+                if (exit != null)
+                {
+                    exactExits.Remove(exit);
+                    exactExitSent.Remove(exit);
+                }
                 FenrirLog.Alert("market exit failed (" + e.Message + "): flattening " + b.Instrument.FullName);
                 RequestFlat(b.Account, b.Instrument, false);
             }
@@ -756,7 +762,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                 {
                     if (!Order.IsTerminalState(kv.Key.OrderState)) continue;
                     exactExits.Remove(kv.Key);
+                    DateTime sent = exactExitSent[kv.Key];
+                    exactExitSent.Remove(kv.Key);
                     Working b = kv.Value;
+                    // a bracket placed there since may hold that position on purpose, under its own stop
+                    if (brackets.Values.Any(x => x.Account == b.Account && x.Instrument.FullName == b.Instrument.FullName
+                            && x.SubmittedAt > sent))
+                        continue;
                     int held = Held(b.Account, b.Instrument);
                     if (b.Long ? held < 0 : held > 0)
                     {

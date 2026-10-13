@@ -1121,10 +1121,10 @@ def test_a_gap_never_replaces_a_breach_or_another_gap():
     is not journalled again."""
     s = running(sim(trailing="intraday"))
     s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
-    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19895.0, 19895.0))
+    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19895.0, 20000.0))  # low -2,100
     breach = s.halted
-    assert s.halt_kind == "breach"
-    s, effects = core.on_account(s, account(balance=54_000.0, unrealized=-2100.0), T.ts)
+    assert s.halt_kind == "breach" and s.acct.balance + s.acct.open_pnl == 0.0
+    s, effects = core.on_account(s, account(balance=52_100.0), T.ts)  # a gap on the app's 0
     assert (s.halted, s.halt_kind) == (breach, "breach") and "halt" not in kinds(effects)
     s = running(sim(trailing="intraday"))
     s, _ = core.on_account(s, account(balance=52_200.0), T.ts)
@@ -1181,3 +1181,11 @@ def test_only_the_message_that_raises_the_gap_halt_flattens():
     assert (s.exiting, effects) == (None, ())
     s, effects = core.on_bar(s, at("09:31"))
     assert sends(effects) == [Flatten]
+
+
+def test_the_gap_message_sends_no_second_flatten_while_one_is_out():
+    """A Flatten already out (the strategy's, here) closes the account: none more."""
+    s, effects = decide_now(held_long(), [Flatten()])
+    assert sends(effects) == [Flatten] and s.exiting is not None
+    s, effects = core.on_account(s, account(balance=52_100.0, today=2100.0, unrealized=-50.0), T.ts)
+    assert s.halted.startswith(GAP_INTRADAY) and sends(effects) == []

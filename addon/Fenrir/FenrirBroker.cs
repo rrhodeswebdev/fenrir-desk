@@ -40,6 +40,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly Dictionary<string, Working> brackets = new Dictionary<string, Working>();
         private readonly HashSet<Account> attached = new HashSet<Account>();
         private readonly Dictionary<string, FlatRequest> mustBeFlat = new Dictionary<string, FlatRequest>(); // "account|instrument"
+        private readonly Dictionary<Order, Working> exactExits = new Dictionary<Order, Working>(); // CloseExactly orders until done
 
         // a bracket placed since this start
         private class Working
@@ -376,6 +377,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     FenrirLog.Alert("bracket " + b.ClientId + ": " + e.Message);
                 }
             }
+            WatchExactExits();
             foreach (KeyValuePair<string, FlatRequest> kv in mustBeFlat.ToList())
             {
                 try
@@ -529,21 +531,26 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
         // A market exit for exactly qty: whatever else is working, it cannot close more than that.
-        // If it throws, or NinjaTrader rejects it later (OnRejected), the instrument is flattened.
+        // If it throws, or NinjaTrader rejects it later (OnRejected), the instrument is flattened; once
+        // it is done, WatchExactExits flattens the instrument if a stop that filled at the same moment
+        // turned it into a reversal.
         private void CloseExactly(Working b, int qty, string why)
         {
             if (qty <= 0) return;
             b.Closed += qty;
             FenrirLog.Alert(why + ": closing " + qty + " " + b.Instrument.FullName + " on " + b.Account.Name + " at market");
+            Order exit = null;
             try
             {
-                Order exit = b.Account.CreateOrder(b.Instrument, b.Long ? OrderAction.Sell : OrderAction.BuyToCover,
+                exit = b.Account.CreateOrder(b.Instrument, b.Long ? OrderAction.Sell : OrderAction.BuyToCover,
                     OrderType.Market, OrderEntry.Automated, TimeInForce.Day, qty, 0, 0, string.Empty, CloseName,
                     NinjaTrader.Core.Globals.MaxDate, null);
+                exactExits[exit] = b;
                 b.Account.Submit(new[] { exit });
             }
             catch (Exception e)
             {
+                if (exit != null) exactExits.Remove(exit);
                 FenrirLog.Alert("market exit failed (" + e.Message + "): flattening " + b.Instrument.FullName);
                 RequestFlat(b.Account, b.Instrument, false);
             }
@@ -571,7 +578,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         }
 
         // One step toward flat; true once there is no position and no order in scope (Fenrir's, its
-        // exact-size exits, or with Everything any order) in any non-terminal state.
+        // exact-size exits, any market order, or with Everything any order) in any non-terminal state.
         // NinjaTrader's Flatten cancels the instrument's working orders and closes its position. It is
         // not sent again while a close is working there (a market order on the reducing side that is
         // not a Fenrir entry), while cancels in scope are still pending (NinjaTrader may not have sent
@@ -583,7 +590,10 @@ namespace NinjaTrader.NinjaScript.AddOns
             int held = Held(r.Account, r.Instrument);
             List<Order> working = Snapshot(r.Account.Orders)
                 .Where(o => o.Instrument.FullName == r.Instrument.FullName && !Order.IsTerminalState(o.OrderState)).ToList();
-            List<Order> scope = working.Where(o => r.Everything || ClientId(o.Name) != null || o.Name == CloseName).ToList();
+            // any market order that is not a Fenrir entry stays in scope too: NinjaTrader's own close
+            // must be done before the request ends, or a late close could reverse unwatched
+            List<Order> scope = working.Where(o => r.Everything || ClientId(o.Name) != null || o.Name == CloseName
+                || o.OrderType == OrderType.Market).ToList();
             if (held == 0 && scope.Count == 0) return true;
 
             if (now - r.LastAlert >= NotFlatAlert && now - r.Since >= NotFlatAlert)
@@ -599,7 +609,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 if (r.CancellingSince == DateTime.MaxValue) r.CancellingSince = now;
                 if (now - r.CancellingSince < CancelWait) return false;
-                FenrirLog.Alert(r.Instrument.FullName + " on " + r.Account.Name + ": cancels pending for 10 s, flattening again");
+                // the age alert above already says it is stuck
+                FenrirLog.Info(r.Instrument.FullName + " on " + r.Account.Name + ": cancels pending for 10 s, flattening again");
                 r.CancellingSince = DateTime.MaxValue;
             }
             else r.CancellingSince = DateTime.MaxValue;
@@ -616,6 +627,31 @@ namespace NinjaTrader.NinjaScript.AddOns
                 r.GraceUntil = DateTime.UtcNow + TimeSpan.FromTicks(Math.Min(CloseGrace.Ticks * r.Tries, TimeSpan.FromSeconds(30).Ticks));
             }
             return false;
+        }
+
+        // An exact-size exit that is done: if the position now points the other way than its bracket,
+        // the exit and a simultaneous stop fill reversed it. Flatten it.
+        private void WatchExactExits()
+        {
+            foreach (KeyValuePair<Order, Working> kv in exactExits.ToList())
+            {
+                try
+                {
+                    if (!Order.IsTerminalState(kv.Key.OrderState)) continue;
+                    exactExits.Remove(kv.Key);
+                    Working b = kv.Value;
+                    int held = Held(b.Account, b.Instrument);
+                    if (b.Long ? held < 0 : held > 0)
+                    {
+                        FenrirLog.Alert("market exit for " + b.ClientId + " reversed " + b.Instrument.FullName + " on " + b.Account.Name + " to " + held + ": flattening it");
+                        RequestFlat(b.Account, b.Instrument, false);
+                    }
+                }
+                catch (Exception e)
+                {
+                    FenrirLog.Alert("checking a market exit: " + e.Message);
+                }
+            }
         }
 
         // signed position on one instrument

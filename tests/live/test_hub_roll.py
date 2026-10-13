@@ -1,8 +1,11 @@
 """#219: an end_of_day roll raises the drawdown floor from NinjaTrader's closing balance; a gap
 between that balance and the app's own alone is never a breach. NinjaTrader booked P&L the app
 never saw as a fill (a manual trade on another instrument, an exit while the server was down):
-it halts with "confirm balances" instead, open-ended, until re-armed. A real breach still is one."""
+it halts with "confirm balances" instead, open-ended, until re-armed. A real breach still is one.
+#222: the same for an intraday peak raise from NinjaTrader's account figures. #229: under that
+halt, the flatten of a held position is one at a time, and whatever NinjaTrader holds goes too."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -157,7 +160,8 @@ async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, arme
         "confirm balances: a gap at the end-of-day session close: NinjaTrader's balance 52200.00"
         " puts the drawdown floor at 50100.00, at or above the app's equity 50000.00 (P&L the app"
         " never booked: a trade on another instrument, or a fill while the server was down); any"
-        " position is flattened; re-arm with the confirmed balances"
+        " position the app holds is flattened, and the whole account while NinjaTrader shows"
+        " open P&L; re-arm with the confirmed balances"
     )
     assert [h["kind"] for h in halts(conn)] == [None]
     assert [r.payload["peak"] for r in journal.rows(conn, kind="peak")] == [50_000.0]
@@ -289,3 +293,106 @@ async def test_a_position_held_over_a_gap_close_is_flattened_and_breaches(
         await hub.handle_bar(bar(D2 + timedelta(minutes=1 + (20000 - close) // 100), close))
         s = hub.states["Sim101"]
         assert s.halt_kind == "breach" and s.halted.startswith("breach max_drawdown: ")
+
+
+def flattens(fake, since=0):
+    """The client ids of the /flatten posts from request `since` on."""
+    return [body["client_id"] for path, body in fake.requests[since:] if path == "/flatten"]
+
+
+async def test_the_gap_flatten_is_one_at_a_time_and_follows_reconciles_and_restarts(
+    settings, client, conn, armed, fake, clock
+):
+    """Review of #221 (round 3), non-blocking 2 (K1, K7, K10): the app at +990 adopts 10 MNQ
+    long held at -900 over a close where NinjaTrader is at 52,250 (a $1,260 gap). The roll halts
+    and flattens once; the add-on accepts the flatten but never fills it. Bars, ticks and account
+    messages send no more while it is out. A reconcile (the link back, NinjaTrader's figures not
+    yet) ends it, and the next bar flattens again under a new id; so does a restart that day."""
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_fill(fill(10, 20000.0, T0 + timedelta(seconds=10)))
+        await first.handle_fill(fill(-10, 20050.0, T0 + timedelta(seconds=20)))  # +1,000 - $10
+        await first.handle_bar(bar(T0 + timedelta(minutes=1)))  # the exit's own bar
+        fake.positions, fake.orders = [HELD], [STOP]
+        await first.handle_stream({"type": "connected"})  # adopts NinjaTrader's long
+        await first.handle_bar(bar(T0 + timedelta(minutes=2), close=19955.0))  # -900 open
+        await first.handle_stream({"type": "disconnected", "error": "stream closed"})
+        held = account(52_250.0, realized=2250.0) | {"unrealized_pnl": -900.0}
+        await first.handle_stream(held)
+        sent = len(fake.requests)
+        await first.handle_bar(bar(D2, close=19955.0))  # the roll
+        s = first.states["Sim101"]
+        assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
+        assert (s.halt_kind, s.acct.floor, s.position.qty) == (None, -1010.0, 10)
+        [one] = flattens(fake, sent)
+        rows = journal.rows(conn, account="Sim101", kind="action")
+        assert [r.payload["reason"] for r in rows if r.payload["client_id"] == one] == [s.halted]
+        for n in range(1, 4):  # not filled: no storm over bars, ticks and account messages
+            await first.handle_bar(bar(D2 + timedelta(minutes=n), close=19955.0))
+            await first.tick(D2 + timedelta(minutes=n, seconds=30))
+            await first.handle_stream(held)
+        assert flattens(fake, sent) == [one]
+        await first.handle_stream({"type": "disconnected", "error": "stream closed"})
+        await first.handle_stream({"type": "connected"})  # reconciles: still long, no figures
+        assert first.states["Sim101"].nt is None
+        await first.handle_bar(bar(D2 + timedelta(minutes=5), close=19955.0))
+        [again] = flattens(fake, sent)[1:]
+        assert again != one
+    finally:
+        await first.stop()
+    clock["t"] = D2 + timedelta(minutes=10)
+    second = LiveHub(settings, addon=client)
+    try:
+        await second.handle_stream({"type": "connected"})
+        await second.tick(clock["t"])
+        await second.handle_stream(held)
+        await second.tick(clock["t"] + timedelta(seconds=5))  # reconciles: adopts the long
+        before = len(fake.requests)
+        await second.handle_bar(bar(clock["t"], close=19955.0))
+        s = second.states["Sim101"]
+        assert s.halted.startswith("confirm balances: a gap ") and s.position.qty == 10
+        assert len(flattens(fake, before)) == 1
+    finally:
+        await second.stop()
+
+
+async def test_an_intraday_gain_the_app_never_saw_halts_and_survives_a_restart(
+    settings, client, conn, armed, fake, clock
+):
+    """#222's probe on a Lucid Daily 50k (intraday, $2,000, locks at +100): the app at 50,000,
+    NinjaTrader at 52,200. Its raise would put the floor at 50,100, above the app's equity: the
+    gap's halt, no breach, nothing sent (flat, and NinjaTrader shows no open P&L). A restart that
+    day rebuilds the app's figures and still never breaches."""
+    daily = pinned(replace(armed, rules_account="lucid-daily-50k"))
+    arming.insert_armed(conn, daily)
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_stream(account(52_200.0, realized=2200.0))
+        await first.handle_bar(bar(T0 + timedelta(minutes=1)))
+        s = first.states["Sim101"]
+        assert s.halted == (
+            "confirm balances: a gap on NinjaTrader's account figures: NinjaTrader's equity"
+            " 52200.00 puts the drawdown floor at 50100.00, at or above the app's equity 50000.00"
+            " (P&L the app never booked: a trade on another instrument, or a fill while the"
+            " server was down); any position the app holds is flattened, and the whole account"
+            " while NinjaTrader shows open P&L; re-arm with the confirmed balances"
+        )
+        assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
+        assert fake.requests == [] and [h["kind"] for h in halts(conn)] == [None]
+    finally:
+        await first.stop()
+    clock["t"] = T0 + timedelta(hours=1)
+    second = LiveHub(settings, addon=client)
+    try:
+        await second.handle_stream({"type": "connected"})
+        await second.tick(clock["t"])
+        await second.handle_stream(account(52_200.0, realized=2200.0))
+        await second.handle_bar(bar(clock["t"]))
+        s = second.states["Sim101"]
+        assert s.started and (s.halted, s.halt_kind) == (halts(conn)[0]["reason"], None)
+        assert (s.acct.balance, s.acct.peak, s.acct.floor) == (0.0, 0.0, -2000.0)
+        assert [h["kind"] for h in halts(conn)] == [None] and fake.requests == []
+    finally:
+        await second.stop()

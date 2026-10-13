@@ -1,8 +1,12 @@
 """SQLite trade journal. Shell: every function does I/O on the connection."""
 
+import contextlib
 import json
+import os
 import sqlite3
+import uuid
 from collections.abc import Mapping
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -52,6 +56,17 @@ def iso(ts: datetime) -> str:
 
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        # built aside and linked in, so a reader never sees the file without its tables (#179);
+        # link, not replace: never clobbers a db another writer created meanwhile
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with closing(sqlite3.connect(tmp)) as c:
+                c.executescript(_SCHEMA)
+            with contextlib.suppress(FileExistsError):
+                os.link(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")  # readers (`open_ro`) never block the hub's writes
     conn.executescript(_SCHEMA)
@@ -60,7 +75,9 @@ def open_db(path: Path) -> sqlite3.Connection:
 
 def open_ro(path: Path) -> sqlite3.Connection:
     """A read-only connection to an existing db (sqlite3.OperationalError if missing): the
-    journal API reads on its own, never on the hub's connection, and never creates the file."""
+    journal API reads on its own, never on the hub's connection, and never creates the file.
+    The db is in WAL mode, so even a read-only reader may create `-wal`/`-shm` beside it: the
+    private dir must be writable by the server."""
     return sqlite3.connect(f"{path.absolute().as_uri()}?mode=ro", uri=True)
 
 

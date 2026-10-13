@@ -155,7 +155,7 @@ async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, arme
     assert s.halt_kind is None and s.halt_day is None  # open-ended, never a breach
     assert s.halted == (
         "confirm balances: NinjaTrader's balance 52200.00 at the end-of-day session close puts"
-        " the drawdown floor at 50100.00, at or above the app's balance 50000.00 (P&L the app"
+        " the drawdown floor at 50100.00, at or above the app's equity 50000.00 (P&L the app"
         " never booked: a trade on another instrument, or a fill while the server was down);"
         " re-arm with the confirmed balances"
     )

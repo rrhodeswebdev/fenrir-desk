@@ -59,7 +59,7 @@ CONFIRM_LIQUIDATED = (
 )
 CONFIRM_GAP = (
     "confirm balances: NinjaTrader's balance {nt:.2f} at the end-of-day session close puts the"
-    " drawdown floor at {floor:.2f}, at or above the app's balance {balance:.2f} (P&L the app"
+    " drawdown floor at {floor:.2f}, at or above the app's equity {equity:.2f} (P&L the app"
     " never booked: a trade on another instrument, or a fill while the server was down);"
     " re-arm with the confirmed balances"
 )
@@ -925,7 +925,7 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 # a gap between the balances is no breach (#219): keep the app's own figures
                 base = s.setup.start.phase_start
                 gap = CONFIRM_GAP.format(
-                    nt=s.nt.balance, floor=base + raised.floor, balance=base + equity
+                    nt=s.nt.balance, floor=base + raised.floor, equity=base + equity
                 )
                 s, more = halt(s, gap)
                 out += more

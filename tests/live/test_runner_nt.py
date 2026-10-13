@@ -476,3 +476,26 @@ def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
     assert s2.halted is None and "halt" not in kinds(effects)
     halted, _ = core.on_account(s, account(balance, is_sim=False), T.ts)
     assert halted.halted.startswith("mode mismatch: ")  # the mode is still checked
+
+
+# #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's
+# own figures (P&L the app never saw) halts with "confirm balances", never a breach
+
+
+def test_a_gap_against_an_unverified_open_loss_at_the_roll_halts_not_breaches():
+    """The link dropped holding a long (its exit fill may be missed) with $200 open loss at the
+    close: NinjaTrader's $51,900 puts the floor at -100, above the app's equity -200 though not
+    its balance 0. The equity is what the rules check, so this is the gap's halt, not a breach."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))
+    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19990.0, 19990.0))
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(balance=51_900.0), T.ts)
+    assert (s.acct.balance, s.acct.open_pnl, s.unreconciled) == (0.0, -200.0, core.LINK_LOST)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith(
+        "confirm balances: NinjaTrader's balance 51900.00 at the end-of-day session close puts"
+        " the drawdown floor at 49900.00, at or above the app's equity 49800.00"
+    )
+    assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
+    assert peaks(effects) == [{"peak": 50_000.0, "ts": iso(at("09:30", D2).ts)}]

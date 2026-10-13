@@ -480,11 +480,36 @@ def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
     figures stand, so no false safety-margin halt (review of #217, NB2)."""
     s = running(sim(), account(50_400.0))
     s2, effects = core.on_account(s, account(balance), T.ts)
-    assert effects == () and s2.nt == s.nt == core.NtAccount(50_400.0, 0.0, 0.0)
+    assert kinds(effects) == ["alert"]  # #220: no longer silent
+    assert s2.nt == s.nt == core.NtAccount(50_400.0, 0.0, 0.0)
     s2, effects = core.on_bar(s2, at("09:31"))
     assert s2.halted is None and "halt" not in kinds(effects)
     halted, _ = core.on_account(s, account(balance, is_sim=False), T.ts)
     assert halted.halted.startswith("mode mismatch: ")  # the mode is still checked
+
+
+def test_a_zero_balance_while_running_shows_a_condition_and_alerts_once_per_run():
+    """#220: an ignored balance at or below 0 is no longer silent. While it lasts the account has
+    a "figures" condition, after any other (no halt: entries go on, on the last figures), and the
+    run alerts once, however often it comes back."""
+    s = running(sim(), account(50_400.0))
+    figures = {"kind": "figures", "reason": core.NO_BALANCE}
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert [(e.kind, e.payload) for e in effects] == [("alert", {"message": core.NO_BALANCE})]
+    status = core.account_status(s)
+    assert status["conditions"] == [figures]
+    assert (status["halted"], status["halt_kind"], status["halt_reason"]) == (False, None, None)
+    assert status["nt_balance"] == 50_400.0
+    s, effects = core.on_account(s, account(-5.0), T.ts)
+    assert effects == () and core.conditions(s) == [figures]
+    s, _ = core.on_account(s, account(50_300.0), T.ts)
+    assert core.conditions(s) == [] and s.nt.balance == 50_300.0
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert effects == () and core.conditions(s) == [figures]  # one alert per run
+    s, _ = core.halt(s, "strategy error")
+    assert core.conditions(s) == [{"kind": None, "reason": "strategy error"}, figures]
+    again, effects = core.on_account(running(sim(), account(50_400.0)), account(0.0), T.ts)
+    assert kinds(effects) == ["alert"]  # a new run alerts again
 
 
 # #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's

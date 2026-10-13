@@ -66,6 +66,10 @@ CONFIRM_GAP = GAP + (
     " balances"
 )
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
+NO_BALANCE = (
+    "NinjaTrader reports a balance at or below 0, which is not a figure (its account data may not"
+    " have loaded): ignored, its last figures stand until one above 0"
+)
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
 
@@ -150,6 +154,9 @@ class RunnerState:
     held: tuple[Position, float] | None = None  # position and balance before this bar's exit
     nt: NtAccount | None = None  # for the stricter-of checks (DEC-4b); never for dry runs
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
+    # NinjaTrader's last balance was at or below 0 (#220): a condition while it lasts, no halt
+    no_balance: str | None = None
+    no_balance_alerted: bool = False  # one alert per run
 
 
 @dataclass(frozen=True, slots=True)
@@ -444,12 +451,19 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
     if s.setup.start is None:  # could not start: no phase start to set its figures against
         return s, ()
     if account["balance"] <= 0:  # not a figure yet (NinjaTrader before its account data loads)
-        return s, ()
+        return _no_balance(s)
     nt = NtAccount(account["balance"], account["realized_pnl_today"], account["unrealized_pnl"])
-    was, s = s, replace(s, nt=nt)
+    was, s = s, replace(s, nt=nt, no_balance=None)
     if phase_rules(s.setup.rules, s.acct.phase).max_drawdown.trailing == "intraday":
         s = replace(s, acct=_raised(s.setup, s.acct, nt.balance + nt.unrealized_pnl))
     return s, _peaked(was, s, now)
+
+
+def _no_balance(s: RunnerState) -> Step:
+    """A balance at or below 0 (#220): the last figures stand, shown as a condition until a
+    balance above 0, with one alert per run however often it comes back."""
+    out = () if s.no_balance_alerted else (Log("alert", {"message": NO_BALANCE}),)
+    return replace(s, no_balance=NO_BALANCE, no_balance_alerted=True), out
 
 
 def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
@@ -689,12 +703,14 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause and a drift pause. The brief unreconciled pause is not one (only `halt_reason`)."""
+    pause and a drift pause. The brief unreconciled pause is not one (only `halt_reason`). Last,
+    NinjaTrader's balance at or below 0 ("figures", #220): shown, though it holds nothing back."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),
         ("stale", s.stale),
         ("drift", s.drift),
+        ("figures", s.no_balance),
     )
     return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
 

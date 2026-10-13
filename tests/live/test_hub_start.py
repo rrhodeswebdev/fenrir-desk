@@ -383,6 +383,11 @@ async def test_a_running_account_ignores_a_balance_at_or_below_zero(hub, conn, a
     s = hub.states["Sim101"]
     assert s.halted is None and s.nt == core.NtAccount(50_300.0, 0.0, 0.0)
     assert [path for path, _ in fake.requests] == ["/bracket"]
+    # #220: shown while it lasts and journalled once, however many such messages came
+    [acc] = hub.status()["accounts"]
+    assert acc["conditions"] == [{"kind": "figures", "reason": core.NO_BALANCE}]
+    alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+    assert alerts.count(core.NO_BALANCE) == 1
 
 
 async def test_the_liquidation_level_comes_from_the_journalled_peak_not_the_pin(hub, conn, armed):

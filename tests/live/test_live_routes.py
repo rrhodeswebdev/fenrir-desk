@@ -70,6 +70,7 @@ def test_status_lists_armed_accounts_with_limits_and_session(client):
         "evaluation",
         False,
     )
+    assert acc["conditions"] == []
     assert set(acc["limits"]) == {
         "drawdown_remaining",
         "drawdown_max",

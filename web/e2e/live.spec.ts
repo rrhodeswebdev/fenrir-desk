@@ -1,5 +1,5 @@
 import { type Page, type Route, expect, test } from '@playwright/test'
-import { account, desk, deskJournal, status } from '../src/live/fixtures'
+import { account, desk, deskJournal, held as under, status } from '../src/live/fixtures'
 import type { LiveStatus } from '../src/live/model'
 
 // Set by global-setup.ts after it opened the launch link.
@@ -59,7 +59,7 @@ test('the most severe account is focused; a sleeve click focuses another', async
 
 test('a new alarm takes focus from a picked account', async ({ page }) => {
   const calm = desk()
-  calm.accounts = calm.accounts.map((a) => (a.account === 'LFE 0911' ? { ...a, halted: false, halt_kind: null, halt_reason: null } : a))
+  calm.accounts = calm.accounts.map((a) => (a.account === 'LFE 0911' ? { ...a, ...under() } : a))
   let live = calm
   await page.route('**/api/live/status', (route) => route.fulfill({ json: live }))
   await page.route('**/api/live/journal?*', (route) => route.fulfill({ json: [] }))
@@ -77,11 +77,52 @@ test('a new alarm takes focus from a picked account', async ({ page }) => {
   await page.getByRole('button', { name: 'Focus LDA 0042' }).click()
   await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LDA 0042')
   const next = desk()
-  next.accounts[3] = { ...next.accounts[3]!, halted: true, halt_kind: 'reconcile', halt_reason: 'position mismatch' }
+  next.accounts[3] = { ...next.accounts[3]!, ...under({ kind: 'reconcile', reason: 'position mismatch' }) }
   live = next
   await expect(page.getByRole('article', { name: 'LFE 0911' })).toBeVisible()
   await expect(focus(page).getByRole('img', { name: 'Risk normal, book alarm' })).toBeVisible()
   await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LDA 0042')
+})
+
+test('a mismatch under a safety halt is a Book alarm; a stale pause under a halt lights Feed (#212)', async ({ page }) => {
+  const live = desk()
+  // LPR 1123 is on a safety halt; NinjaTrader's book then disagrees and the feed goes quiet
+  live.accounts[1] = {
+    ...live.accounts[1]!,
+    ...under(
+      { kind: 'safety', reason: 'safety margin: 81% of the daily loss used' },
+      { kind: 'reconcile', reason: 'NinjaTrader mismatch: stray_orders: o1; fix it there, then resolve' },
+      { kind: 'stale', reason: 'no NQ bar for 191s; new entries paused' },
+    ),
+  }
+  live.accounts[2] = { ...live.accounts[2]!, ...under() } // LFE 0911's own mismatch is resolved
+  await mock(page, live)
+  await page.goto('/live')
+  await expect(page.getByRole('img', { name: 'Feed caution, broker normal, drift normal' })).toBeVisible()
+  await expect(page.getByText('Book · LPR 1123')).toBeVisible()
+  await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LPR 1123')
+  await expect(focus(page).getByRole('img', { name: 'Risk caution, book alarm' })).toBeVisible()
+  await expect(focus(page).getByText('NinjaTrader mismatch: stray_orders: o1; fix it there, then resolve')).toHaveCSS('color', 'rgb(229, 72, 77)')
+  await expect(focus(page).getByText('safety margin: 81% of the daily loss used')).toBeVisible()
+  await expect(focus(page).getByRole('button', { name: 'Resolve LPR 1123' })).toBeVisible()
+})
+
+test('the strip says why the LSE feed is down and when it is retried', async ({ page }) => {
+  const live = desk()
+  const error = 'LSE stream stopped: Max 1 concurrent websocket connection(s) for this API key'
+  live.lse = { connected: false, last_bar_ts: '2026-10-13T18:31:00+00:00', error, retry_at: '2099-01-02T15:04:05+00:00' }
+  await mock(page, live)
+  await page.goto('/live')
+  const feed = page.getByRole('group', { name: 'Connections' })
+  await expect(page.getByRole('img', { name: /^Feed alarm/ })).toBeVisible()
+  await expect(feed.getByText('Retry 10:04:05')).toHaveCSS('color', 'rgb(229, 72, 77)')
+  await expect(feed.getByText(error)).toBeVisible()
+  // the same strip on the full journal
+  await page.getByRole('link', { name: 'Full journal' }).click()
+  await expect(page.getByRole('group', { name: 'Connections' }).getByText(error)).toBeVisible()
+  live.lse = { ...live.lse, retry_at: null }
+  await page.reload()
+  await expect(page.getByRole('group', { name: 'Connections' }).getByText('Restart needed')).toBeVisible()
 })
 
 test('the focused dial redraws on a focus change, not on every status poll', async ({ page }) => {
@@ -192,7 +233,7 @@ test('while Resolve runs every Resolve is disabled, also after leaving the page 
   let release = () => {}
   const held = new Promise<void>((r) => (release = r))
   const two = desk() // LDA 0042 on a drift pause: a second Resolve, on its sleeve
-  two.accounts[3] = { ...two.accounts[3]!, halted: true, halt_kind: 'drift', halt_reason: 'drift: 9 ticks' }
+  two.accounts[3] = { ...two.accounts[3]!, ...under({ kind: 'drift', reason: 'drift: 9 ticks' }) }
   await mock(page, two, async (route) => {
     await held
     await route.fulfill({ json: { ok: true } })

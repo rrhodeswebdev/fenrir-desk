@@ -65,11 +65,15 @@ LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
 FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
 FEED_RETRY_MAX = 900.0
+# a run is told of a new outage no sooner than this after its last feed alert: a flapping feed
+# (a bar, then refused again, each minute) alerts every 15 min, not every minute
+FEED_ALERT_EVERY = timedelta(minutes=15)
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
-Stream = Callable[[Settings, Sequence[str]], AsyncGenerator[Bar, None]]
+# stream_bars: (settings, contracts, *, on_auth) where on_auth is called on each authentication
+Stream = Callable[..., AsyncGenerator[Bar, None]]
 
 
 def _no_constant(name: str) -> None:
@@ -151,6 +155,7 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
         "halted": True,
         "halt_kind": None,
         "halt_reason": f"cannot start: {error}",
+        "conditions": [{"kind": None, "reason": f"cannot start: {error}"}],
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
@@ -196,9 +201,12 @@ class LiveHub:
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
-        self.lse_error: str | None = None  # why the feed is down (FeedStopped), until a bar
+        # why the feed is down (FeedStopped), until a bar or an authenticated resubscribe
+        self.lse_error: str | None = None
         self.lse_retry_at: datetime | None = None  # next resubscribe; None = only a restart
-        self._lse_alerted: set[str] = set()  # accounts told about this outage
+        self._lse_outage = 0  # counts outages, for the alerts
+        # per run, (account, armed_at): the outage it was last told of, and when
+        self._lse_alerted: dict[tuple[str, datetime], tuple[int, datetime]] = {}
         self.nt_connected = False  # the add-on stream is up (22.5)
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
@@ -245,8 +253,7 @@ class LiveHub:
                     await self._reconcile(account)
                 s = self.states[account]
                 s, effects = core.on_tick(s, now, self.settings.stale_seconds)
-                if self.lse_error is not None and account not in self._lse_alerted:
-                    self._lse_alerted.add(account)  # once per outage, not per retry
+                if self._feed_alert_due(account, now):
                     effects = (*effects, Log("alert", {"message": self._feed_alert()}))
                 await self._apply(account, s, effects)
 
@@ -464,14 +471,29 @@ class LiveHub:
     def feed_down(self, reason: str, retry_at: datetime | None) -> None:
         """The bar feed stopped (`FeedStopped`): shown in `status()` and, once per outage, as an
         alert on each running account at its next tick. `retry_at` None: only a restart helps."""
-        if self.lse_error is None:
-            self._lse_alerted.clear()  # a new outage
+        if self.lse_error is None:  # a new outage; forget the runs that stopped
+            self._lse_outage += 1
+            running = {(a, s.setup.armed.armed_at) for a, s in self.states.items()}
+            self._lse_alerted = {r: v for r, v in self._lse_alerted.items() if r in running}
         self.lse_connected = False
         self.lse_error, self.lse_retry_at = reason, retry_at
 
     def feed_up(self) -> None:
+        """The feed is up again: a bar arrived, or a resubscribe authenticated."""
         self.lse_connected = True
         self.lse_error = self.lse_retry_at = None
+
+    def _feed_alert_due(self, account: str, now: datetime) -> bool:
+        """Whether this run (a re-arm is a new one) is told of the feed's outage now: once per
+        outage, and no sooner than `FEED_ALERT_EVERY` after its last one (a flapping feed)."""
+        if self.lse_error is None:
+            return False
+        run = (account, self.states[account].setup.armed.armed_at)
+        last = self._lse_alerted.get(run)
+        if last is not None and (last[0] == self._lse_outage or now - last[1] < FEED_ALERT_EVERY):
+            return False
+        self._lse_alerted[run] = (self._lse_outage, now)
+        return True
 
     def _feed_alert(self) -> str:
         then = (
@@ -783,7 +805,9 @@ async def run_bars(hub: LiveHub, stream: Stream) -> None:
         try:
             instruments = load_instruments()
             contracts = [front_month(instruments, series, day) for series in SERIES]
-            async with contextlib.aclosing(stream(hub.settings, contracts)) as bars:
+            # an authenticated (re)subscribe ends an outage before the next bar (e.g. a weekend)
+            subscribed = stream(hub.settings, contracts, on_auth=hub.feed_up)
+            async with contextlib.aclosing(subscribed) as bars:
                 async for bar in bars:
                     hub.feed_up()
                     delay = FEED_RETRY

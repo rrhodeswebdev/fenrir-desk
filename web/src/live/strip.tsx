@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { type Cell, type LiveStatus, age, alarmName, killCounts, nyTime, stripLabel, systemStrip } from './model'
+import { type Cell, type LiveStatus, age, alarmName, feedDown, killCounts, nyTime, stripLabel, systemStrip } from './model'
 
 /** The current time, ticking each second. */
 export function useNow(): number {
@@ -39,12 +39,13 @@ export function CodeStrip({ cells, large }: { cells: Cell[]; large?: boolean }) 
   )
 }
 
-/** Label over Value, as every fact in the top strip. */
-function Fact({ label, children }: { label: string; children: ReactNode }) {
+/** Label over Value, as every fact in the top strip; `note` goes under them. */
+function Fact({ label, children, note }: { label: string; children: ReactNode; note?: ReactNode }) {
   return (
     <div className="grid gap-1.5">
       <span className="label">{label}</span>
       <div className="flex items-baseline gap-2">{children}</div>
+      {note}
     </div>
   )
 }
@@ -56,6 +57,7 @@ export function SystemStrip({ status, failed }: { status: LiveStatus | undefined
   const bar = status?.lse.last_bar_ts ?? null
   const beat = status?.nt.last_heartbeat ?? null
   const alarm = status && alarmName(status.accounts)
+  const down = status && feedDown(status.lse, now)
   return (
     <>
       <Fact label="New York">
@@ -63,9 +65,14 @@ export function SystemStrip({ status, failed }: { status: LiveStatus | undefined
       </Fact>
       <div role="group" aria-label="Connections" className="flex flex-wrap items-center gap-x-6 gap-y-4 max-md:gap-4">
         {/* A dash alone while the status is unknown; with it, a dash and what has not arrived yet. */}
-        <Fact label="LSE feed">
+        {/* while the feed is down: when it is retried, and why (until a bar or an authenticated resubscribe) */}
+        <Fact
+          label="LSE feed"
+          note={down && <p className="max-w-[44ch] whitespace-normal text-red">{down.reason}</p>}
+        >
           <span className="value">{bar ? nyTime(Date.parse(bar)) : '—'}</span>
           {status && <span className="label">{age(bar, now) ?? 'no bar yet'}</span>}
+          {down && <span className="label text-red">{down.retry}</span>}
         </Fact>
         <Fact label="NinjaTrader">
           <span className="value">{age(beat, now) ?? '—'}</span>

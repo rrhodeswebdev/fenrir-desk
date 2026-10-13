@@ -976,7 +976,7 @@ class LiveHub:
             why = STORE_SHORT.format(series=series, day=last.isoformat())
             return await self._warming(account, why, alert=True)
         self._store_retry.pop(account, None)
-        try:  # nothing stepped yet: kept warming, tried again on the next tick
+        try:  # nothing stepped yet: kept warming, tried again after STORE_RETRY
             bars = [b for b in self.today.get(contract, ()) if trading_day(b.ts) == day]
             since = s.setup.armed.armed_at
             rows = [

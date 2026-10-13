@@ -498,6 +498,8 @@ async def test_a_kept_row_waiting_for_ninjatrader_shows_the_reason_and_loads_not
         assert reasons["Sim102"].startswith("waiting for NinjaTrader")
         await hub.handle_stream(account("Sim101"))
         assert hub.states["Sim101"].halted == why and hub.children == {}
+        [acc] = [a for a in hub.status()["accounts"] if a["account"] == "Sim101"]
+        assert acc["conditions"] == [{"kind": None, "reason": why}]  # no strategy: not warming
         assert [r.payload for r in rows(conn, "halt")] == [
             {"reason": why, "kind": None, "until": None}
         ]

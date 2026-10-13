@@ -32,7 +32,7 @@ Copy `addon\fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.
 ```
 
 - `token`: at least 16 characters, the same value as Fenrir's NinjaTrader token (Settings page, or `FENRIR_NT_TOKEN` natively). With a shorter token the add-on logs why and serves nothing.
-- `managed_accounts`: the NinjaTrader account names Fenrir may see and trade. Every other account is invisible to Fenrir and refused. An empty list is logged as an alert at start.
+- `managed_accounts`: the NinjaTrader account names Fenrir may see and trade. Every other account is invisible to Fenrir and refused. An empty list is logged as an alert at start. A managed account is Fenrir's: while the add-on flattens an instrument there, a manual market order on it is cancelled if still working, or its position flattened.
 
 Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the last 7 days, so a request Fenrir retries after a NinjaTrader restart is still answered `duplicate` instead of placed twice. Leave it alone.
 

@@ -34,9 +34,11 @@ Copy `addon\fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.
 
 - `token`: at least 16 characters, the same value as Fenrir's NinjaTrader token (Settings page, or `FENRIR_NT_TOKEN` natively). With a shorter token the add-on logs why and serves nothing.
 - `managed_accounts`: the NinjaTrader account names Fenrir may see and trade. Every other account is invisible to Fenrir and refused. An empty list is logged as an alert at start.
-- `flatten_on_disconnect_seconds`: `null` (default) keeps the broker-side stop and target when Fenrir's link drops. A number of seconds flattens every managed account holding a position once no Fenrir stream has been connected for that long, counted from NinjaTrader's start too.
+- `flatten_on_disconnect_seconds`: `null` (default) keeps the broker-side stop and target when Fenrir's link drops. A number of seconds flattens every managed account holding a position once no Fenrir stream has been connected for that long, counted from NinjaTrader's start too. It runs with the add-on's HTTP server, so not while the token is too short or the port cannot be opened.
 
 Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the last 7 days, so a request Fenrir retries after a NinjaTrader restart is still answered `duplicate` instead of placed twice. Leave it alone.
+
+Don't recompile (F5) or restart NinjaTrader while Fenrir has an entry filling: the add-on keeps its brackets in memory, so a recompile in that second leaves the rest of that fill without its stop until Fenrir reconciles.
 
 Restart NinjaTrader. **New → NinjaScript Output** shows `Fenrir: listening on port 8123`.
 

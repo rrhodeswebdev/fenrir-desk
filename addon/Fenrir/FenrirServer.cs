@@ -56,7 +56,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             broker.Publish = delegate { };
             outbox.CompleteAdding();
             listener.Close();
-            lock (sockets) foreach (WebSocket ws in sockets) ws.Abort();
+            lock (sockets) foreach (WebSocket ws in sockets) Drop(ws);
         }
 
         private void Enqueue(Dictionary<string, object> msg)
@@ -78,7 +78,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        // every 2 s: heartbeat, one account message per managed account, flatten_on_disconnect_seconds
+        // every 2 s: heartbeat, one account message per managed account, flatten_on_disconnect_seconds;
+        // each in its own try, so one failing never stops the others
         private void Beat()
         {
             try
@@ -90,6 +91,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                     msg["type"] = "account";
                     Enqueue(msg);
                 }
+            }
+            catch (Exception e)
+            {
+                FenrirLog.Info("heartbeat: " + e.Message);
+            }
+            try
+            {
                 if (config.FlattenOnDisconnectSeconds > 0)
                 {
                     double alone;
@@ -100,29 +108,48 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
             catch (Exception e)
             {
-                FenrirLog.Info("heartbeat: " + e.Message);
+                FenrirLog.Alert("flatten_on_disconnect_seconds check failed: " + e.Message);
             }
         }
 
+        // a dedicated thread: nothing may escape it
         private void SendLoop()
         {
-            foreach (string text in outbox.GetConsumingEnumerable())
+            try
             {
-                ArraySegment<byte> bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(text));
-                WebSocket[] targets;
-                lock (sockets) targets = sockets.ToArray();
-                foreach (WebSocket ws in targets)
+                foreach (string text in outbox.GetConsumingEnumerable())
                 {
-                    try
+                    ArraySegment<byte> bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(text));
+                    WebSocket[] targets;
+                    lock (sockets) targets = sockets.ToArray();
+                    foreach (WebSocket ws in targets)
                     {
-                        if (!ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None).Wait(2000))
-                            ws.Abort(); // stalled: drop it rather than hold everyone up
-                    }
-                    catch
-                    {
-                        ws.Abort();
+                        try
+                        {
+                            if (!ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None).Wait(2000))
+                                Drop(ws); // stalled: drop it rather than hold everyone up
+                        }
+                        catch
+                        {
+                            Drop(ws);
+                        }
                     }
                 }
+            }
+            catch (Exception e)
+            {
+                FenrirLog.Alert("stream sender stopped: " + e.Message);
+            }
+        }
+
+        private static void Drop(WebSocket ws)
+        {
+            try
+            {
+                ws.Abort();
+            }
+            catch
+            {
             }
         }
 
@@ -160,7 +187,13 @@ namespace NinjaTrader.NinjaScript.AddOns
                         sockets.Remove(ws);
                         if (sockets.Count == 0) noClientSince = DateTime.UtcNow;
                     }
-                    ws.Dispose();
+                    try
+                    {
+                        ws.Dispose();
+                    }
+                    catch
+                    {
+                    }
                 }
             }
         }
@@ -192,8 +225,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             return diff == 0;
         }
 
+        // A pool thread: nothing may escape it, since an unhandled exception there ends NinjaTrader.
         private void Handle(HttpListenerContext ctx)
         {
+            int status;
+            object body;
             try
             {
                 HttpListenerRequest req = ctx.Request;
@@ -204,27 +240,40 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 if (!TokenOk(req.Headers["X-Fenrir-Token"]))
                 {
-                    Reply(ctx, 401, Error("unauthorized"));
-                    return;
+                    status = 401;
+                    body = Error("unauthorized");
                 }
-                object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
-                if (result == null) Reply(ctx, 404, Error("not found"));
-                else Reply(ctx, 200, result);
+                else
+                {
+                    object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
+                    status = result == null ? 404 : 200;
+                    body = result ?? Error("not found");
+                }
             }
             catch (BadRequest e)
             {
-                Reply(ctx, 400, Error(e.Message));
+                status = 400;
+                body = Error(e.Message);
             }
             catch (Exception e)
             {
                 FenrirLog.Info("request failed: " + e);
+                status = 500;
+                body = Error(e.GetType().Name + ": " + e.Message);
+            }
+            try
+            {
+                Reply(ctx, status, body);
+            }
+            catch
+            {
+                // client gone
                 try
                 {
-                    Reply(ctx, 500, Error(e.GetType().Name + ": " + e.Message));
+                    ctx.Response.Abort();
                 }
                 catch
                 {
-                    // client gone
                 }
             }
         }

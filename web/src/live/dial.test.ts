@@ -29,8 +29,8 @@ describe('dial', () => {
     const r = Object.fromEntries(d.rings.map((x) => [x.name, x.r]))
     expect(r.floor).toBe(R_IN)
     expect(r.target).toBe(R_OUT)
-    expect(r.start).toBeCloseTo(R_IN + (2000 / 5000) * (R_OUT - R_IN))
-    expect(d.rings.map((x) => x.label)).toEqual(['Floor −$2,000', 'Safety −$400', 'Start $0', 'Target $3,000'])
+    expect(r.open).toBeCloseTo(R_IN + (2000 / 5000) * (R_OUT - R_IN))
+    expect(d.rings.map((x) => x.label)).toEqual(['Floor −$2,000', 'Safety −$400', 'Open $0', 'Target +$3,000'])
   })
 
   it('turns the safety ring and the floor at risk only when equity reaches them, or on their halts', () => {
@@ -45,15 +45,15 @@ describe('dial', () => {
 
   it('draws no safety ring when the safety level is the floor, and no target ring when funded', () => {
     const d = dial(session({ safety: -2000, target: null }), 0, null)
-    expect(d.rings.map((x) => x.name)).toEqual(['floor', 'start'])
+    expect(d.rings.map((x) => x.name)).toEqual(['floor', 'open'])
     // funded: the outer edge is as far above the start as the floor is below it
     expect(d.rings[1]?.r).toBeCloseTo((R_IN + R_OUT) / 2)
   })
 
-  it('keeps ring labels above their rings and a line apart, never inside the hub', () => {
+  it('keeps ring labels above their rings and a line (28) apart, never inside the hub', () => {
     const d = dial(session({ safety: -1950 }), 0, null)
     const ys = [...d.rings].sort((a, b) => a.r - b.r).map((x) => x.y)
-    for (let i = 1; i < ys.length; i++) expect(ys[i - 1]! - ys[i]!).toBeGreaterThanOrEqual(24)
+    for (let i = 1; i < ys.length; i++) expect(ys[i - 1]! - ys[i]!).toBeGreaterThanOrEqual(28)
     for (const r of d.rings) expect(r.y).toBeLessThanOrEqual(SIZE / 2 - r.r)
     expect(Math.max(...ys)).toBeLessThan(SIZE / 2 - d.hub)
   })
@@ -80,6 +80,14 @@ describe('dial', () => {
     expect(empty.pnl).toBe('—')
   })
 
+  it('ends the trace at the stricter equity (the hub figure), never above it', () => {
+    const app = dial(session(), 200, null) // the app's own marks land on +200 too
+    const strict = dial(session(), 150, null) // NinjaTrader's figures are worse
+    expect(strict.live.split('L').length).toBe(app.live.split('L').length + 1)
+    expect(strict.now!.y).toBeGreaterThan(app.now!.y) // nearer the centre: lower equity (12 o'clock side)
+    expect(Math.hypot(strict.now!.x - SIZE / 2, strict.now!.y - SIZE / 2)).toBeCloseTo(R_IN + (2150 / 5000) * (R_OUT - R_IN), 0)
+  })
+
   it('has 23 hour spokes, even hours labelled from 18', () => {
     const d = dial(session(), 0, null)
     expect(d.spokes).toHaveLength(23)
@@ -87,7 +95,7 @@ describe('dial', () => {
   })
 
   it('says what it plots', () => {
-    expect(dialLabel(session(), -812)).toBe('Session dial: today −$812, floor −$2,000, safety −$400, start $0, target $3,000')
-    expect(dialLabel(session({ safety: -2000, target: null }), null)).toBe('Session dial: today unknown, floor −$2,000, start $0')
+    expect(dialLabel(session(), -812)).toBe('Session dial: today −$812, floor −$2,000, safety −$400, open $0, target +$3,000')
+    expect(dialLabel(session({ safety: -2000, target: null }), null)).toBe('Session dial: today unknown, floor −$2,000, open $0')
   })
 })

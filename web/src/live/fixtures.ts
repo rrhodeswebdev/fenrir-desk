@@ -46,16 +46,17 @@ export function equity(start: number, today: number, swing = 300): [string, numb
   return pts
 }
 
-/** The Live page's scene: live with a position, sim on a safety halt, sim with a book mismatch, a dry run. */
+/** The Live page's scene, with figures as the server's `view()` gives them (drawdown left = equity − floor; the floor
+ * trails 2,000 or 3,000 below the end-of-day peak; safety = floor + 20% of open − floor, or the DLL level when higher): live with a position, sim on a safety halt, sim with a book mismatch, a dry run. */
 export function desk(): LiveStatus {
   return status({
     accounts: [
       account({
         today_pnl: 212,
         balance: 1180,
-        limits: { drawdown_remaining: 1412, drawdown_max: 2000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 4, held_minis: 0.2 },
+        limits: { drawdown_remaining: 1768, drawdown_max: 2000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 4, held_minis: 0.2 },
         position: { qty: 2, entry: 25412.25, stop: 25402.25, target: 25432.25 },
-        session: { start: 968, floor: -588, target: 3000, safety: -277.2, equity: equity(968, 212), fills: ['2026-10-13T14:41:00+00:00', '2026-10-13T18:12:00+00:00'] },
+        session: { start: 968, floor: -588, target: 3000, safety: -276.8, equity: equity(968, 212), fills: ['2026-10-13T14:41:00+00:00', '2026-10-13T18:12:00+00:00'] },
       }),
       account({
         account: 'LPR 1123',
@@ -81,8 +82,8 @@ export function desk(): LiveStatus {
         halt_reason: 'position mismatch: NinjaTrader long 1, runner flat',
         today_pnl: 96,
         balance: 420,
-        limits: { drawdown_remaining: 3000, drawdown_max: 3000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 6, held_minis: 0 },
-        session: { start: 324, floor: -3000, target: 6000, safety: -2340, equity: equity(324, 96, 150), fills: [] },
+        limits: { drawdown_remaining: 3096, drawdown_max: 3000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 6, held_minis: 0 },
+        session: { start: 324, floor: -2676, target: 6000, safety: -2076, equity: equity(324, 96, 150), fills: [] },
       }),
       account({
         account: 'LDA 0042',

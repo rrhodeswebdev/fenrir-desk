@@ -1,6 +1,6 @@
-import { useQueries } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import type { ReactNode } from 'react'
+import { type ReactNode, useMemo } from 'react'
 import { apiFetch } from '@/api'
 import { toneClass } from '@/components/state-text'
 import { Button } from '@/components/ui/button'
@@ -53,15 +53,17 @@ const C = SIZE / 2
 const ringClass = {
   floor: (risk: boolean) => cn('[stroke-dasharray:2_4]', risk ? 'stroke-red' : 'stroke-ink-3'),
   safety: (risk: boolean) => cn('[stroke-dasharray:8_4]', risk ? 'stroke-ember' : 'stroke-ink-3'),
-  start: () => 'stroke-ink-3',
+  open: () => 'stroke-ink-3',
   target: () => 'stroke-ink-2',
 }
 
 /** The session dial (DESIGN.md "Session Dial"); `mini` is the sleeve's: no labels or ticks, trace at 2.5. The full
- * dial's live trace draws itself on mount (key it by account so it draws again when focus changes). */
+ * dial's live trace draws itself on mount (key it by account so it draws again when focus changes). The geometry is
+ * memoised: a re-render without a new status (a focus change elsewhere, the clock) does not recompute it. */
 export function Dial({ session, todayPnl, haltKind, mini }: { session: Session; todayPnl: number | null; haltKind: AccountStatus['halt_kind']; mini?: boolean }) {
-  const d = dial(session, todayPnl, haltKind)
-  const text = 'font-mono text-[20px] font-medium'
+  const d = useMemo(() => dial(session, todayPnl, haltKind), [session, todayPnl, haltKind])
+  // a Night halo (paint-order: stroke, not a shadow) keeps labels legible where they cross rings, spokes and the trace
+  const text = 'font-mono text-[20px] font-medium stroke-ground [paint-order:stroke] [stroke-linejoin:round] [stroke-width:8px]'
   return (
     <svg
       viewBox={`0 0 ${SIZE} ${SIZE}`}
@@ -152,8 +154,9 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-/** The focus field (DESIGN.md "Catalog-Number Headline", "Session Dial"): identity, dial, then facts and meters. */
-export function FocusField({ a, ...resolve }: ResolveProps & { a: AccountStatus }) {
+/** The focus field (DESIGN.md "Catalog-Number Headline", "Session Dial"): identity, dial, then facts and meters.
+ * `onAuto` is set while a user's pick holds the focus: it hands focus back to the most severe account. */
+export function FocusField({ a, onAuto, ...resolve }: ResolveProps & { a: AccountStatus; onAuto?: () => void }) {
   const tone = alertTone(a)
   return (
     <section
@@ -172,10 +175,14 @@ export function FocusField({ a, ...resolve }: ResolveProps & { a: AccountStatus 
           </span>
         </div>
         {a.halt_reason && <p className={cn('max-w-[44ch]', toneClass[tone ?? 'normal'])}>{a.halt_reason}</p>}
-        <p className="max-w-[44ch] text-ink-2">
-          {a.strategy} on {a.contract}. {positionText(a.position)}.
-        </p>
-        <ResolveButton a={a} {...resolve} className="self-start" />
+        <div className="flex flex-wrap gap-3">
+          <ResolveButton a={a} {...resolve} />
+          {onAuto && (
+            <Button onClick={onAuto} title="Focus follows the most severe account again">
+              Follow most severe
+            </Button>
+          )}
+        </div>
       </div>
 
       <div className="grid min-w-0 place-items-center max-[1181px]:col-span-full max-[1181px]:row-start-1 max-md:row-start-auto">
@@ -192,6 +199,8 @@ export function FocusField({ a, ...resolve }: ResolveProps & { a: AccountStatus 
           <Fact label="Contract">{a.contract}</Fact>
           <Fact label="Position">{positionText(a.position)}</Fact>
           <Fact label="Bracket">{bracketText(a.position)}</Fact>
+          <Fact label="NinjaTrader balance">{a.nt_balance === null ? '—' : usd(a.nt_balance)}</Fact>
+          <Fact label="Since phase start">{a.balance === null ? '—' : usd(a.balance, true)}</Fact>
         </dl>
         <div className="border-t" />
         <div className="grid gap-4">
@@ -273,21 +282,16 @@ export function Sleeves({ accounts, focused, onFocus, ...resolve }: ResolveProps
   )
 }
 
-/** Today's journal of every given account, merged newest first; polled every 5 s. */
-export function useJournal(accounts: string[], day: string) {
-  return useQueries({
-    queries: accounts.map((account) => ({
-      queryKey: ['live', 'journal', account, day],
-      queryFn: () => apiFetch<JournalRow[]>(`/api/live/journal?${new URLSearchParams({ account, day })}`),
-      refetchInterval: (q: { state: { error: unknown } }) => journalPollMs(q.state),
-      retry: false,
-    })),
-    combine: (results) => ({
-      rows: merge(results.map((r) => r.data ?? [])),
-      error: pageError(results.find((r) => r.error)?.error),
-      loading: results.some((r) => r.isPending),
-    }),
+/** Today's journal of every account, disarmed ones included, newest first; polled every 5 s. `skip` leaves kinds
+ * out on the server (the tape skips the per-minute bars). A failed read shows no rows: never stale ones. */
+export function useJournal(day: string, skip: JournalRow['kind'][] = []) {
+  const q = useQuery({
+    queryKey: ['live', 'journal', day, skip],
+    queryFn: () => apiFetch<JournalRow[]>(`/api/live/journal?${new URLSearchParams([['day', day], ...skip.map((k) => ['skip', k])])}`),
+    refetchInterval: (query) => journalPollMs(query.state),
+    retry: false,
   })
+  return { rows: q.isError ? [] : merge([q.data ?? []]), error: pageError(q.error), loading: q.isPending }
 }
 
 /** Journal rows on the 72px / 1fr grid, the kind in tracked caps in its tone. */
@@ -315,14 +319,18 @@ export function journalState(j: { rows: JournalRow[]; error: string | null; load
   return null
 }
 
-/** The latest of today's events across the armed accounts, ending with the Full journal link. */
-export function JournalTape({ accounts, day }: { accounts: string[]; day: string }) {
-  const j = useJournal(accounts, day)
+/** The latest of today's events across every account, ending with the Full journal link. `alone` when no sleeves
+ * stand beside it (nothing armed, or the status unreadable). */
+export function JournalTape({ day, alone }: { day: string; alone?: boolean }) {
+  const j = useJournal(day, ['bar', 'peak'])
   const rows = tape(j.rows)
   return (
     <section
       aria-labelledby="journal-title"
-      className="flex min-w-0 flex-col gap-4 border-l p-6 max-[1181px]:border-t max-[1181px]:border-l-0 max-md:px-4"
+      className={cn(
+        'flex min-w-0 flex-col gap-4 p-6 max-md:px-4',
+        alone ? 'border-t' : 'border-l max-[1181px]:border-t max-[1181px]:border-l-0',
+      )}
     >
       <div className="flex items-center justify-between gap-3">
         <h2 id="journal-title">Journal · today</h2>

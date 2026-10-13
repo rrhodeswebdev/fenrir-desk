@@ -9,7 +9,10 @@ import {
   alertTone,
   bracketText,
   canResolve,
+  alarmsOf,
   focusOf,
+  minis,
+  pickOf,
   meterLabel,
   meters,
   positionText,
@@ -211,20 +214,31 @@ describe('account strip', () => {
 
 describe('focus', () => {
   const accounts = desk().accounts
+  const id = (f: ReturnType<typeof focusOf>) => f && `${f.account.account}${f.picked ? ' (picked)' : ''}`
 
   it('focuses the most severe account: the book mismatch (alarm) over the safety halt (caution)', () => {
-    expect(focusOf(accounts, null)?.account).toBe('LFE 0911')
+    expect(id(focusOf(accounts, null))).toBe('LFE 0911')
   })
 
-  it("keeps the user's pick while it is armed, and falls back when it is gone", () => {
-    expect(focusOf(accounts, 'LDA 0042')?.account).toBe('LDA 0042')
-    expect(focusOf(accounts, 'LFE 9999')?.account).toBe('LFE 0911')
+  it("keeps the user's pick while it is armed and no new alarm came, and falls back when it is gone", () => {
+    expect(id(focusOf(accounts, pickOf('LDA 0042', accounts)))).toBe('LDA 0042 (picked)')
+    expect(id(focusOf(accounts, { account: 'LFE 9999', alarms: ['LFE 0911'] }))).toBe('LFE 0911')
+  })
+
+  it('a new alarm takes focus from the pick; the alarms that stood at the pick do not', () => {
+    const calm = accounts.filter((a) => a.account !== 'LFE 0911')
+    const pick = pickOf('LDA 0042', calm) // nothing in alarm then
+    expect(pick.alarms).toEqual([])
+    expect(id(focusOf(calm, pick))).toBe('LDA 0042 (picked)')
+    expect(id(focusOf(accounts, pick))).toBe('LFE 0911') // LFE 0911 went into alarm since
+    expect(id(focusOf(accounts, pickOf('LDA 0042', accounts)))).toBe('LDA 0042 (picked)')
+    expect(alarmsOf(accounts)).toEqual(['LFE 0911'])
   })
 
   it('with nothing wrong, focuses real money first: live, then sim, then dry run', () => {
     const calm = [account({ account: 'D', mode: 'dry' }), account({ account: 'S', mode: 'sim' }), account({ account: 'L' })]
-    expect(focusOf(calm, null)?.account).toBe('L')
-    expect(focusOf(calm.slice(0, 2), null)?.account).toBe('S')
+    expect(id(focusOf(calm, null))).toBe('L')
+    expect(id(focusOf(calm.slice(0, 2), null))).toBe('S')
     expect(focusOf([], null)).toBeNull()
   })
 })
@@ -236,7 +250,7 @@ describe('resolve', () => {
     for (const kind of ['safety', 'breach', 'stale', null] as const) expect(canResolve(account({ halted: true, halt_kind: kind }))).toBe(false)
   })
 
-  it('says what came back: ran, could not read the book, not running (404), server error (500)', () => {
+  it('says what came back: ran, could not read the book, not running (404), server error (500), no answer', () => {
     expect(resolveText('LFE 0911', { ok: true }, null)).toEqual({
       tone: 'normal',
       text: 'Resolve ran for LFE 0911: pauses lifted, NinjaTrader re-checked. A mismatch still there pauses it again.',
@@ -248,6 +262,10 @@ describe('resolve', () => {
     const failed = resolveText('LFE 0911', undefined, new ApiError(500, 'Internal Server Error'))
     expect(failed.tone).toBe('alarm')
     expect(failed.text).toContain('the pause may already be lifted')
+    expect(resolveText('LFE 0911', undefined, new DOMException('timed out', 'TimeoutError'))).toEqual({
+      tone: 'alarm',
+      text: 'Resolve for LFE 0911 got no answer in 90 s: it may still run. The status shows what holds.',
+    })
     expect(resolveText('LFE 0911', undefined, new TypeError('Failed to fetch')).text).toBe(
       'Resolve request for LFE 0911 failed (Failed to fetch): it may not have run.',
     )
@@ -301,22 +319,35 @@ describe('meters', () => {
 
   it('marks the safety level: today’s loss at the safety equity, and the drawdown left there', () => {
     const daily = meters(safety)[1] as Exclude<Meter, { none: string }>
-    expect(daily).toMatchObject({ figure: '$188', of: 'of $1,000', used: 812, max: 1000, limit: true })
+    expect(daily).toMatchObject({ figure: '$188', of: 'of $1,000', used: 812, max: 1000, alarm: 'full' })
     expect(daily.safety).toBeCloseTo(0.8) // (start 172 − safety −628) / 1000
     const dd = meters(mismatch)[0] as Exclude<Meter, { none: string }>
-    expect(dd.safety).toBeCloseTo(0.78) // 1 − (−2340 − −3000) / 3000
+    expect(dd.safety).toBeCloseTo(0.8) // 1 − (−2076 − −2676) / 3000
   })
 
-  it('lights cells Steel, Ember past the safety mark, Red at 100% of a limit only', () => {
-    const m = { name: 'Daily loss left', figure: '', of: '', used: 812, max: 1000, safety: 0.8, limit: true }
+  it('lights cells Steel, Ember from the safety mark on, Red at 100% of a loss limit only', () => {
+    const m = { name: 'Daily loss left', figure: '', of: '', used: 812, max: 1000, safety: 0.8, alarm: 'full' as const }
     const cells = segments(m)
     expect(cells).toHaveLength(20)
     expect(cells.filter((c) => c.state === 'caution')).toHaveLength(16)
     expect(cells.findIndex((c) => c.mark)).toBe(15)
     expect(segments({ ...m, used: 500 }).filter((c) => c.state === 'on')).toHaveLength(10)
     expect(segments({ ...m, used: 1200 }).every((c) => c.state === 'alarm')).toBe(true)
-    expect(segments({ ...m, used: 1000, limit: false, safety: null }).every((c) => c.state === 'on')).toBe(true)
+    // exactly at the safety fraction the server halts (at or below the level): Ember already
+    expect(segments({ ...m, used: 800 }).filter((c) => c.state === 'caution')).toHaveLength(16)
+    expect(segments({ ...m, used: 790 }).filter((c) => c.state === 'caution')).toHaveLength(0)
+    expect(segments({ ...m, used: 1000, alarm: null, safety: null }).every((c) => c.state === 'on')).toBe(true)
     expect(segments({ ...m, safety: null }).some((c) => c.mark)).toBe(false)
+  })
+
+  it('contracts: minis rounded to 0.1, Red only past the cap', () => {
+    const three = meters(account({ limits: { drawdown_remaining: 1, drawdown_max: 1, daily_loss_remaining: null, daily_loss_max: null, max_minis: 4, held_minis: 3 * 0.1 } }))[2]
+    expect(three).toMatchObject({ name: 'Contracts', figure: '0.3', of: 'of 4 minis', alarm: 'over' })
+    expect(minis(0.6000000000000001)).toBe('0.6')
+    expect(minis(2)).toBe('2')
+    const c = { name: 'Contracts', figure: '', of: '', used: 4, max: 4, safety: null, alarm: 'over' as const }
+    expect(segments(c).every((x) => x.state === 'on')).toBe(true) // holding the cap is allowed
+    expect(segments({ ...c, used: 4.1 }).every((x) => x.state === 'alarm')).toBe(true)
   })
 
   it('says each meter in words', () => {

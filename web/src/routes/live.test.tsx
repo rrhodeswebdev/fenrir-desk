@@ -57,7 +57,9 @@ describe('live page', () => {
       expect(html).not.toContain('Book · LFE 0911')
       // nor the focus field, sleeves or tape from it
       expect(html).not.toContain('aria-label="Focused account"')
-      expect(html).not.toContain('Journal · today')
+      expect(html).not.toContain('<article')
+      // the tape reads the journal on its own, so it stays (here still loading)
+      expect(html).toContain('Journal · today')
       expect(html).not.toContain('LFE 0911')
     }
   })

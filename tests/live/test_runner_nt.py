@@ -795,7 +795,10 @@ def test_an_intraday_gap_counts_the_apps_open_loss():
     the floor at -300: above the app's equity (-500), though not its balance (0). The equity is
     what the rules check, so it is the gap's halt, not a breach on the next bar."""
     s, close = held_over_the_close(0.0, 500.0, 52_200.0, -500.0, trailing="intraday")
-    assert s.halted.startswith(GAP_INTRADAY + "51700.00 puts the drawdown floor at 49700.00, ")
+    assert s.halted.startswith(
+        GAP_INTRADAY + "51700.00 puts the drawdown floor at 49700.00, at or above the app's"
+        " equity 49500.00 ("
+    )
     s, _ = core.on_bar(s, bar("09:33", close, close, close, close))
     assert s.halt_kind is None
 

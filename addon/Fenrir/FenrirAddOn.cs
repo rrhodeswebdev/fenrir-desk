@@ -46,10 +46,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 
     public static class FenrirLog
     {
-        // NinjaScript Output window, tab 1
+        // NinjaScript Output window, tab 1. Logging never throws: it runs inside catch blocks.
         public static void Info(string message)
         {
-            NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            try
+            {
+                NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            }
+            catch
+            {
+            }
         }
 
         // also the Control Center Log tab, as an alert

@@ -65,34 +65,50 @@ namespace NinjaTrader.NinjaScript.AddOns
             return diff == 0;
         }
 
+        // A pool thread: nothing may escape it, since an unhandled exception there ends NinjaTrader.
         private void Handle(HttpListenerContext ctx)
         {
+            int status;
+            object body;
             try
             {
                 HttpListenerRequest req = ctx.Request;
                 if (!TokenOk(req.Headers["X-Fenrir-Token"]))
                 {
-                    Reply(ctx, 401, Error("unauthorized"));
-                    return;
+                    status = 401;
+                    body = Error("unauthorized");
                 }
-                object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
-                if (result == null) Reply(ctx, 404, Error("not found"));
-                else Reply(ctx, 200, result);
+                else
+                {
+                    object result = Route(req.HttpMethod, req.Url.AbsolutePath, req);
+                    status = result == null ? 404 : 200;
+                    body = result ?? Error("not found");
+                }
             }
             catch (BadRequest e)
             {
-                Reply(ctx, 400, Error(e.Message));
+                status = 400;
+                body = Error(e.Message);
             }
             catch (Exception e)
             {
                 FenrirLog.Info("request failed: " + e);
+                status = 500;
+                body = Error(e.GetType().Name + ": " + e.Message);
+            }
+            try
+            {
+                Reply(ctx, status, body);
+            }
+            catch
+            {
+                // client gone
                 try
                 {
-                    Reply(ctx, 500, Error(e.GetType().Name + ": " + e.Message));
+                    ctx.Response.Abort();
                 }
                 catch
                 {
-                    // client gone
                 }
             }
         }

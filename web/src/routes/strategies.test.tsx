@@ -134,7 +134,9 @@ describe('arming helpers', () => {
 
   it('says a sim or live disarm flattens the position first, and a dry run has nothing to flatten (#223)', () => {
     for (const mode of ['sim', 'live'] as const) {
-      expect(disarmText(mode)).toMatch(/^NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled\./)
+      expect(disarmText(mode)).toMatch(
+        /^NinjaTrader flattens this account first: its open position is closed at market and the working orders on each instrument it flattens cancelled, Fenrir's among them; an order on any other instrument stays\./,
+      )
       expect(disarmText(mode)).toContain('If the flatten fails, the account stays armed and halted')
     }
     expect(disarmText('dry')).not.toContain('flattens')

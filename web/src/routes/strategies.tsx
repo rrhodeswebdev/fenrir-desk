@@ -450,7 +450,7 @@ export type DisarmResult = { ok: boolean; error: string | null }
 export const disarmText = (mode: Mode): string =>
   mode === 'dry'
     ? 'The runner stops trading this account. A dry run sends nothing to NinjaTrader, so there is nothing to flatten.'
-    : 'NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled. Then the runner stops trading it. If the flatten fails, the account stays armed and halted, and the position may still be open.'
+    : 'NinjaTrader flattens this account first: its open position is closed at market and the working orders on each instrument it flattens cancelled, Fenrir\'s among them; an order on any other instrument stays. Then the runner stops trading it. If the flatten fails, the account stays armed and halted, and the position may still be open.'
 
 /** A disarm that did not happen (or did not finish) in words; null when it did. */
 export const disarmResultText = (account: string, r: DisarmResult): string | null =>

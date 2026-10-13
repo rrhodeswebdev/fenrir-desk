@@ -196,7 +196,7 @@ for (const mode of ['sim', 'live'] as const) {
     const region = page.getByRole('region', { name: 'Armed accounts' })
     await region.getByRole('button', { name: 'Disarm Sim101' }).click()
     const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
-    await expect(dialog).toContainText('NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled.')
+    await expect(dialog).toContainText("NinjaTrader flattens this account first: its open position is closed at market and the working orders on each instrument it flattens cancelled, Fenrir's among them; an order on any other instrument stays.")
     await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click() // never just 'Disarm'
     await expect(dialog.getByRole('alert')).toHaveText(`Sim101: ${error}.`)
     await dialog.getByRole('button', { name: 'Cancel' }).click()

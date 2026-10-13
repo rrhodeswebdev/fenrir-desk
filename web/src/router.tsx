@@ -3,6 +3,7 @@ import { backtestReportRoute } from './routes/backtest-report'
 import { backtestsRoute } from './routes/backtests'
 import { dataRoute } from './routes/data'
 import { liveRoute } from './routes/live'
+import { liveJournalRoute } from './routes/live-journal'
 import { rootRoute } from './routes/root'
 import { rulesRoute } from './routes/rules'
 import { settingsRoute } from './routes/settings'
@@ -17,6 +18,7 @@ export const routeTree = rootRoute.addChildren([
   backtestReportRoute,
   strategiesRoute,
   liveRoute,
+  liveJournalRoute,
   settingsRoute,
 ])
 

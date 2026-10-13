@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS journal (
     payload_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS journal_account_ts ON journal (account, ts);
+-- the all-accounts day read (the Live tape, every 5 s): without it a day scans the whole history
+CREATE INDEX IF NOT EXISTS journal_ts ON journal (ts);
 CREATE TABLE IF NOT EXISTS armed (
     account TEXT PRIMARY KEY,
     strategy_path TEXT NOT NULL,
@@ -145,7 +147,24 @@ def rows(
     day: date | None = None,
     kind: str | None = None,
     since: datetime | None = None,
+    skip: Collection[str] = (),
 ) -> tuple[JournalRow, ...]:
+    """Rows by id; `skip` leaves those kinds out in SQL (never read nor decoded)."""
+    sql, args = select(account, day, kind, since, skip)
+    return tuple(
+        JournalRow(i, datetime.fromisoformat(ts), acc, kind, json.loads(p))
+        for i, ts, acc, kind, p in conn.execute(sql, args)
+    )
+
+
+def select(
+    account: str | None = None,
+    day: date | None = None,
+    kind: str | None = None,
+    since: datetime | None = None,
+    skip: Collection[str] = (),
+) -> tuple[str, list[str]]:
+    """The parameterised query `rows` runs (apart so a test can read its query plan)."""
     sql, args = "SELECT id, ts, account, kind, payload_json FROM journal WHERE 1=1", []
     if account is not None:
         sql += " AND account = ?"
@@ -160,7 +179,7 @@ def rows(
         start, end = day_bounds(day)
         sql += " AND ts >= ? AND ts < ?"
         args += [iso(start), iso(end)]
-    return tuple(
-        JournalRow(i, datetime.fromisoformat(ts), acc, kind, json.loads(p))
-        for i, ts, acc, kind, p in conn.execute(sql + " ORDER BY id", args)
-    )
+    if skip:
+        sql += f" AND kind NOT IN ({', '.join('?' * len(skip))})"
+        args += list(skip)
+    return sql + " ORDER BY id", args

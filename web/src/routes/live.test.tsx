@@ -3,14 +3,14 @@ import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/rea
 import { renderToString } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 import { ApiError } from '@/api'
-import { account, status } from '@/live/fixtures'
+import { account, desk, status } from '@/live/fixtures'
 import type { LiveStatus } from '@/live/model'
 import { routeTree } from '@/router'
 import { statusPollMs } from './live'
 
-async function render(s?: LiveStatus, client = new QueryClient()) {
+async function render(s?: LiveStatus, client = new QueryClient(), path = '/live') {
   if (s) client.setQueryData(['live', 'status'], s)
-  const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/live'] }) })
+  const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: [path] }) })
   await router.load()
   return renderToString(
     <QueryClientProvider client={client}>
@@ -55,7 +55,46 @@ describe('live page', () => {
       expect(html).toContain('Status unavailable')
       expect(html).not.toContain('aria-label="Feed')
       expect(html).not.toContain('Book · LFE 0911')
+      // nor the focus field, sleeves or tape from it
+      expect(html).not.toContain('aria-label="Focused account"')
+      expect(html).not.toContain('<article')
+      // the tape reads the journal on its own, so it stays (here still loading)
+      expect(html).toContain('Journal · today')
+      expect(html).not.toContain('LFE 0911')
     }
+  })
+
+  it('focuses the most severe account, with Resolve, and files the others as sleeves', async () => {
+    const html = await render(desk())
+    const focus = html.match(/<section aria-label="Focused account".*?<\/section>/s)?.[0] ?? ''
+    expect(focus).toMatch(/<h2[^>]*>LFE 0911<\/h2>/)
+    expect(focus).toContain('aria-label="Risk normal, book alarm"')
+    expect(focus).toContain('aria-label="Resolve LFE 0911"')
+    for (const other of ['LFE 0507', 'LPR 1123', 'LDA 0042']) expect(html).toContain(`<article aria-label="${other}"`)
+    expect(html).not.toContain('<article aria-label="LFE 0911"')
+  })
+
+  it('draws the dial trace with the eased animation, off under reduced motion', async () => {
+    const html = await render(desk())
+    const trace = html.match(/<path data-trace="live"[^>]*>/)?.[0] ?? ''
+    expect(trace).toContain('pathLength="1"')
+    expect(trace).toContain('animate-trace')
+    expect(trace).toContain('motion-reduce:animate-none')
+  })
+
+  it('marks the meter safety cell with the inset safety-mark utility, never an arbitrary shadow', async () => {
+    const html = await render(desk())
+    const mark = html.match(/<i [^>]*data-mark="true"[^>]*>/)?.[0] ?? ''
+    expect(mark).toContain('safety-mark')
+    expect(mark).not.toContain('shadow-[')
+  })
+
+  it("ends the journal tape with a Full journal link to today's journal", async () => {
+    const html = await render(desk())
+    expect(html).toMatch(/<a [^>]*href="\/live\/journal"[^>]*>Full journal<\/a>/)
+    const page = await render(desk(), new QueryClient(), '/live/journal')
+    expect(page).toContain('<h1>Journal</h1>')
+    expect(page).toContain('Trading day')
   })
 
   it('polls every 2 s through errors, but not after a 401', () => {

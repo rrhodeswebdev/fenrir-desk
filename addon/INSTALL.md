@@ -2,7 +2,19 @@
 
 Needs NinjaTrader 8 on Windows: the host itself, or a Windows VM when Fenrir runs on a Mac.
 
-## 1. Install from source
+## 1. Install
+
+### From the zip
+
+On any machine with Python 3, from the repo root:
+
+```bash
+python3 addon/build.py   # writes addon/dist/FenrirAddOn.zip
+```
+
+Copy `FenrirAddOn.zip` to the NinjaTrader machine and import it with **Tools → Import → NinjaScript Add-On…**. NinjaTrader compiles it on import. It puts the three files in `Documents\NinjaTrader 8\bin\Custom\AddOns\`, the same place as a source install, so importing a newer zip replaces them. The zip layout copies NinjaTrader's own export format and has not yet been confirmed by an import on a clean NinjaTrader; if the import fails, install from source.
+
+### From source
 
 Copy the three files in `addon\Fenrir\` into NinjaTrader's add-on folder (PowerShell, from the repo root):
 

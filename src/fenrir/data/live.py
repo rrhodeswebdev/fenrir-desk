@@ -21,8 +21,14 @@ log = logging.getLogger(__name__)
 
 
 class FeedStopped(Exception):
-    """The live feed stopped for good (no key, a refused key, quota, or the key's one socket
-    already in use): retrying will not help until the settings or the other client change."""
+    """The live feed's client stopped and will not reconnect by itself: a refused key, quota, or
+    the key's one socket still held (by another client, or a half-open old connection that the
+    server drops later). Worth retrying with a backoff, except when `permanent` (no key in the
+    settings, which only a restart changes)."""
+
+    def __init__(self, message: str, *, permanent: bool = False):
+        super().__init__(message)
+        self.permanent = permanent
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +106,12 @@ async def _bars_from(
     state = empty_builder()
     dropped: Counter[str] = Counter()  # since the last warning: a clock off shows up here
     reported = now()
+
+    def report() -> None:
+        counts = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items()) if n)
+        log.warning("live ticks dropped in the last minute: %s", counts)
+        dropped.clear()
+
     pending = asyncio.ensure_future(_next(ticks))
     try:
         while True:
@@ -122,11 +134,11 @@ async def _bars_from(
             for bar in bars + due:
                 yield bar
             if +dropped and now() - reported >= MINUTE:
-                counts = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items()) if n)
-                log.warning("live ticks dropped in the last minute: %s", counts)
-                dropped.clear()
+                report()
                 reported = now()
     finally:
+        if +dropped:  # the stream ended or was closed: still say what was dropped
+            report()
         pending.cancel()
         await asyncio.wait({pending})  # let the source see the cancel, then close it
         await ticks.aclose()
@@ -134,8 +146,8 @@ async def _bars_from(
 
 async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]:
     """Closed 1-minute bars for `contracts` (front-month codes) from the LSE stream. The SDK
-    reconnects after a drop; `FeedStopped` when it stops for good (no or bad key, quota, or the
-    key's one socket already in use). Closing the stream closes the socket."""
+    reconnects after a drop; `FeedStopped` when it stops instead (no or bad key, quota, or the
+    key's one socket still held). Closing the stream closes the socket."""
     from fenrir.data.lse import stream_ticks  # lse imports Tick from here
 
     async with aclosing(_bars_from(stream_ticks(settings, contracts), _now)) as bars:

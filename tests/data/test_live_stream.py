@@ -125,6 +125,19 @@ def test_bars_from_counts_dropped_ticks_in_one_warning_a_minute(caplog):
     assert warnings == ["live ticks dropped in the last minute: 3 ahead of the clock, 2 late"]
 
 
+def test_bars_from_reports_dropped_ticks_when_the_stream_ends(caplog):
+    clock = [utc(14, 30, 10)]
+
+    async def source():
+        for _ in range(2):
+            yield Tick(utc(14, 30, 10) + MAX_AHEAD * 2, 999.0, 1, "NQZ26")
+
+    with caplog.at_level(logging.WARNING, logger="fenrir.data.live"):
+        collect(source(), clock)
+    warnings = [r.getMessage() for r in caplog.records]
+    assert warnings == ["live ticks dropped in the last minute: 2 ahead of the clock"]
+
+
 # --- stream_ticks: the real SDK Tick through a fake client ---
 
 
@@ -215,7 +228,7 @@ def test_stream_ticks_drops_replay_quotes_and_bad_ticks_and_snaps_price(fake_lse
 def test_stream_ticks_refuses_an_empty_key_and_never_uses_the_sdk_env_var(fake_lse, monkeypatch):
     monkeypatch.setenv("LSE_API_KEY", "someone-elses-key")
     got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key=""), ["ESZ26"])))
-    assert got == [] and "FENRIR_LSE_API_KEY" in str(stopped)
+    assert got == [] and "FENRIR_LSE_API_KEY" in str(stopped) and stopped.permanent
     assert fake_lse.calls == []  # no client built, so no socket on another key
 
 
@@ -225,17 +238,16 @@ def test_a_fatal_sdk_stop_raises_feed_stopped_with_the_server_message(fake_lse, 
     with caplog.at_level(logging.WARNING, logger="fenrir.data.lse"):
         got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
     assert [t.contract for t in got] == ["ESZ26"]
-    assert "Max 1 concurrent" in str(stopped)
+    assert "Max 1 concurrent" in str(stopped) and not stopped.permanent
     assert "Max 1 concurrent" in caplog.text  # the SDK's error events are logged as they come
 
 
-def test_stream_ticks_logs_lse_error_and_ends(fake_lse, caplog):
+def test_an_lse_error_raises_feed_stopped(fake_lse):
     fake_lse.ticks = [sdk_tick("ES.F", 7851.5, 1.0)]
     fake_lse.error = lse.LSEError(403, "forbidden")
-    with caplog.at_level(logging.WARNING, logger="fenrir.data.lse"):
-        got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
-    assert [t.contract for t in got] == ["ESZ26"] and stopped is None
-    assert "forbidden" in caplog.text
+    got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
+    assert [t.contract for t in got] == ["ESZ26"]
+    assert "forbidden" in str(stopped) and not stopped.permanent
 
 
 def test_closing_stream_bars_closes_the_sdk_stream(fake_lse):

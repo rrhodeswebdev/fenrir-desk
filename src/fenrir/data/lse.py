@@ -73,13 +73,14 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
 
 async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]:
     """Live trades for our front-month `contracts`, from LSE's continuous `ES.F`/`NQ.F`
-    (docs/data-gate.md Item 3). The SDK reconnects after a drop and stops only on a fatal
-    error, which raises `FeedStopped` with the server's last error message."""
+    (docs/data-gate.md Item 3). The SDK reconnects after a drop and stops only on an error it
+    deems fatal (any error before auth), which raises `FeedStopped` with the server's last
+    error message; an empty key raises a permanent `FeedStopped` before any connection."""
     from lse import LSE, LSEError
 
     ours = {lse_symbol(c): c for c in contracts}
     if not settings.lse_api_key:
-        raise FeedStopped(NO_KEY)
+        raise FeedStopped(NO_KEY, permanent=True)
     client = LSE(api_key=settings.lse_api_key)
     errors: list[str] = []
 
@@ -109,7 +110,6 @@ async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGen
                     ts.astimezone(UTC), round(price / TICK) * TICK, round(t.volume), contract
                 )
     except LSEError as e:  # lse-data 0.14 only raises it from REST calls; kept for later versions
-        log.warning("LSE stream failed: %s", e)
-        return
+        raise FeedStopped(f"LSE stream failed: {e}") from e
     # with reconnect=True the SDK returns only after a fatal error (or a disconnect we never ask)
     raise FeedStopped(f"LSE stream stopped: {errors[-1] if errors else 'no reason given'}")

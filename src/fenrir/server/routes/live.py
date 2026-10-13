@@ -1,15 +1,22 @@
-"""Live API: the runner's status, from the hub's memory, and its journal."""
+"""Live API: the runner's status, from the hub's memory, its journal, the kill switch and
+Resolve. Kill and resolve are UI-only, like arming: no CLI counterpart."""
 
 from contextlib import closing
 from dataclasses import asdict
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, ConfigDict
 
 from fenrir.live import journal
 
 router = APIRouter(prefix="/api/live")
+
+
+class ResolveBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    account: str
 
 
 @router.get("/status")
@@ -27,3 +34,17 @@ def journal_rows(request: Request, account: str, day: date) -> list[dict[str, An
     with closing(journal.open_ro(path)) as conn:
         # ts as status writes it ("+00:00"), not pydantic's "Z"
         return [asdict(r) | {"ts": r.ts.isoformat()} for r in journal.rows(conn, account, day)]
+
+
+@router.post("/kill")
+async def kill(request: Request) -> dict[str, Any]:
+    # async, on the hub's loop: under its lock, as every bar and fill
+    return await request.app.state.live.kill()
+
+
+@router.post("/resolve")
+async def resolve(body: ResolveBody, request: Request) -> dict[str, bool]:
+    try:
+        return {"ok": await request.app.state.live.resolve(body.account)}
+    except KeyError:
+        raise HTTPException(404, f"{body.account!r} is not running") from None

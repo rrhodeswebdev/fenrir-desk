@@ -242,6 +242,40 @@ def test_changed_strategy_file_halts_at_start():
     assert kinds(decide_now(run(None, state=s), [LONG])[1]) == ["bar", "rejection"]
 
 
+@pytest.mark.parametrize(
+    ("now", "reason"),
+    [
+        ({"rules_hash": "r2"}, "rules file changed since arming; re-arm"),
+        ({"instruments_hash": "i2"}, "instruments.yaml changed since arming; re-arm"),
+        (
+            {"dll_on": True},
+            "dll_on changed since arming (armed off, accounts.yaml now on); re-arm",
+        ),
+    ],
+    ids=str,
+)
+@pytest.mark.parametrize("mode", ["dry", "sim"])
+def test_a_pinned_input_that_changed_halts_at_start(now, reason, mode):
+    """DEC-4d: the runner never trades rules, instruments or a DLL choice it was not armed with."""
+    start = Start(phase_start=50_000.0, peak=50_000.0, balance=50_000.0)
+    s, effects = core.start(make_setup(make_rules(), mode=mode, start=start, **now), BAR.ts)
+    assert kinds(effects) == ["halt"] and s.halted == reason
+    assert effects[0].payload == {"reason": reason, "kind": None, "until": None}
+    assert core.account_status(s)["balance"] is None  # cannot start: no figures
+    assert kinds(decide_now(run(None, state=s), [LONG])[1]) == ["bar", "rejection"]
+
+
+def test_a_row_armed_before_the_pins_halts_at_start():
+    setup = make_setup(make_rules())
+    legacy = replace(setup.armed, dll_on=None, rules_hash=None, instruments_hash=None)
+    s, _ = core.start(replace(setup, armed=legacy), BAR.ts)
+    assert (
+        s.halted
+        == "armed before dll_on and the rules and instruments.yaml hashes were pinned; re-arm"
+    )
+    assert not s.started
+
+
 def test_sim_without_start_balances_halts_and_dry_ignores_them():
     s, effects = core.start(make_setup(make_rules(), mode="sim"), BAR.ts)
     assert kinds(effects) == ["halt"] and "DEC-4a" in s.halted

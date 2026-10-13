@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, date, datetime
 
@@ -126,3 +127,118 @@ def test_read_only_never_creates_the_file(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         journal.open_ro(tmp_path / "fenrir.db")
     assert not (tmp_path / "fenrir.db").exists()
+
+
+OLD_ARMED = """CREATE TABLE armed (
+    account TEXT PRIMARY KEY, strategy_path TEXT NOT NULL, strategy_hash TEXT NOT NULL,
+    rules_account TEXT NOT NULL, contract TEXT NOT NULL, mode TEXT NOT NULL, phase TEXT NOT NULL,
+    armed_at TEXT NOT NULL)"""
+PINNED = Armed(
+    "Sim101",
+    "strategies/orb.py",
+    "h1",
+    "lucid-flex-50k",
+    "MNQ",
+    "sim",
+    "evaluation",
+    ARMED_AT,
+    dll_on=True,
+    rules_hash="r1",
+    instruments_hash="i1",
+    start_balance=50_000.0,
+    peak_balance=50_500.0,
+)
+
+
+def test_an_armed_table_from_before_23_3_is_migrated(tmp_path):
+    """CREATE TABLE IF NOT EXISTS never adds a column: open_db adds the pinned ones (DEC-4d)."""
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as old, old:
+        old.execute(OLD_ARMED)
+        old.execute(
+            "INSERT INTO armed VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ("Sim101", "strategies/orb.py", "h1", "lucid-flex-50k", "MNQ", "dry", "funded",
+             journal.iso(ARMED_AT)),
+        )  # fmt: skip
+    # a reader before any open_db (GET /api/arming right after an upgrade) still lists it
+    with closing(journal.open_ro(path)) as ro:
+        assert arming.list_armed(ro)[0].rules_hash is None
+    conn = journal.open_db(path)
+    # the row armed before the pins came reads as unpinned, which the runner refuses to start
+    [old_row] = arming.list_armed(conn)
+    assert old_row == Armed(
+        "Sim101", "strategies/orb.py", "h1", "lucid-flex-50k", "MNQ", "dry", "funded", ARMED_AT
+    )
+    assert (old_row.dll_on, old_row.rules_hash, old_row.start_balance) == (None, None, None)
+    journal.open_db(path).close()  # migrating twice is a no-op
+    arming.insert_armed(conn, replace(PINNED, account="Sim102"))
+    assert arming.list_armed(conn)[1] == replace(PINNED, account="Sim102")
+
+
+def test_armed_rows_are_read_and_written_by_column_name(tmp_path):
+    """The migration appends columns: insert and list must not depend on their order."""
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as c, c:
+        c.execute(
+            "CREATE TABLE armed (peak_balance REAL, dll_on INTEGER, armed_at TEXT NOT NULL,"
+            " instruments_hash TEXT, phase TEXT NOT NULL, mode TEXT NOT NULL, contract TEXT NOT"
+            " NULL, start_balance REAL, rules_account TEXT NOT NULL, strategy_hash TEXT NOT NULL,"
+            " rules_hash TEXT, strategy_path TEXT NOT NULL, account TEXT PRIMARY KEY)"
+        )
+    conn = journal.open_db(path)
+    arming.insert_armed(conn, PINNED)
+    [got] = arming.list_armed(conn)
+    assert got == PINNED and got.dll_on is True  # a bool, not sqlite's 1
+
+
+def test_two_writers_migrating_at_once_both_open(tmp_path):
+    """The hub and the arm route can open an old db together: the second sees the columns."""
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as old, old:
+        old.execute(OLD_ARMED)
+    first = journal.open_db(path)
+    second = journal.open_db(path)
+    arming.insert_armed(first, PINNED)
+    assert arming.list_armed(second) == (PINNED,)
+
+
+def test_a_writer_that_migrated_meanwhile_is_not_migrated_again(tmp_path, monkeypatch):
+    """B migrates between A's first look and A's lock: A looks again under the lock and adds
+    nothing (without BEGIN IMMEDIATE and the second look: "duplicate column name")."""
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as old, old:
+        old.execute(OLD_ARMED)
+    real, seen = journal._missing, []
+
+    def racing(conn):
+        got = real(conn)
+        seen.append(len(got))
+        if len(seen) == 1:  # A saw the old table; B opens (and migrates) before A's lock
+            monkeypatch.setattr(journal, "_missing", real)
+            journal.open_db(path).close()
+            monkeypatch.setattr(journal, "_missing", racing)
+        return got
+
+    monkeypatch.setattr(journal, "_missing", racing)
+    conn = journal.open_db(path)
+    assert seen == [5, 0]
+    arming.insert_armed(conn, PINNED)
+    assert arming.list_armed(conn) == (PINNED,)
+
+
+def test_disarm_journals_the_halt_and_deletes_the_row_in_one_transaction(conn):
+    arming.insert_armed(conn, PINNED)
+    # a delete that fails after the halt row went in must take the halt row with it
+    conn.execute(
+        "CREATE TRIGGER no_delete BEFORE DELETE ON armed BEGIN SELECT RAISE(ABORT, 'boom'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="boom"):
+        arming.disarm(conn, "Sim101", ARMED_AT)
+    assert journal.rows(conn) == () and arming.list_armed(conn) == (PINNED,)
+    conn.execute("DROP TRIGGER no_delete")
+    assert arming.disarm(conn, "Sim101", ARMED_AT) is True
+    assert arming.list_armed(conn) == ()
+    [row] = journal.rows(conn)
+    assert (row.kind, row.payload) == ("halt", {"reason": "disarmed", "kind": None, "until": None})
+    assert arming.disarm(conn, "Sim101", ARMED_AT) is False  # not armed: nothing journalled
+    assert len(journal.rows(conn)) == 1

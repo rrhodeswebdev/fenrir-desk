@@ -67,10 +67,10 @@ RW_DIRS = ("data", "rules", "strategies")
 
 
 def nested_git(root: Path, dirs: Sequence[str] = RW_DIRS) -> list[str]:
-    """Every `.git` entry in `root/<dir>` for each of `dirs`, relative to `root` and sorted, plus
-    `<path> (unreadable)` for a directory the walk could not list. The host's git uses the
-    nearest `.git` above its cwd, so one the terminal plants runs its config on the host (#184).
-    Never follows a symlink."""
+    """Every `.git` entry, in any case, in `root/<dir>` for each of `dirs`, relative to `root` and
+    sorted, plus `<path> (unreadable)` for a directory the walk could not list. The host's git
+    uses the nearest `.git` above its cwd, so one the terminal plants runs its config on the host
+    (#184). Never follows a symlink."""
     found = []
 
     def unreadable(e: OSError) -> None:
@@ -80,10 +80,14 @@ def nested_git(root: Path, dirs: Sequence[str] = RW_DIRS) -> list[str]:
     for d in dirs:
         for top, subdirs, files in os.walk(root / d, onerror=unreadable):
             here = Path(top)
-            if ".git" in subdirs or ".git" in files:
-                found.append(str((here / ".git").relative_to(root)))
-            subdirs[:] = [s for s in subdirs if s != ".git"]
+            # any case: a case-insensitive host (macOS) git finds .GIT as its .git
+            found += [str((here / n).relative_to(root)) for n in (*subdirs, *files) if _git(n)]
+            subdirs[:] = [s for s in subdirs if not _git(s)]
     return sorted(found)
+
+
+def _git(name: str) -> bool:
+    return name.casefold() == ".git"
 
 
 NESTED_GIT = "nested .git the terminal can write (your git there would run its config): %s"

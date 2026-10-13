@@ -203,6 +203,17 @@ def test_nested_git_walks_only_the_read_write_dirs(tmp_path):
     assert isolation.nested_git(tmp_path, ("missing",)) == []
 
 
+def test_nested_git_matches_any_case(tmp_path):
+    # a case-insensitive host (macOS) git uses strategies/.GIT as strategies/.git
+    (tmp_path / "strategies" / ".GIT").mkdir(parents=True)
+    (tmp_path / "strategies" / ".GIT" / "x" / ".git").mkdir(parents=True)  # not descended
+    (tmp_path / "rules" / "a").mkdir(parents=True)
+    (tmp_path / "rules" / "a" / ".Git").write_text("gitdir: ../../data/x\n")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / ".gitignore").write_text("x\n")  # not a .git
+    assert isolation.nested_git(tmp_path) == ["rules/a/.Git", "strategies/.GIT"]
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
 def test_nested_git_reports_an_unreadable_dir(tmp_path):
     (tmp_path / "data" / "locked" / ".git").mkdir(parents=True)

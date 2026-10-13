@@ -33,7 +33,8 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install.sh \
  && install -m 0755 "$(readlink -f /tmp/claude-install/.local/bin/claude)" /usr/local/bin/claude \
  && rm -rf /tmp/claude-install /tmp/install.sh
 
-# server code and UI live in /opt, outside the repo bind-mounted (terminal-writable) at /app
+# server code and UI live in /opt, outside the repo bind-mounted at /app (read-only, but for
+# data/, rules/ and strategies/, which the terminal can write)
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
 WORKDIR /opt/fenrir
 COPY pyproject.toml uv.lock ./

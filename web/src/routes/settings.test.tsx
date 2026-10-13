@@ -67,6 +67,6 @@ describe('settings page', () => {
   it('warns about a .git the terminal left in the repo', async () => {
     const html = await render({ ...settings, nested_git: ['strategies/.git'] })
     expect(html).toMatch(/<p role="alert"[^>]*>The terminal left a .git in the repo: <!-- -->strategies\/.git/)
-    expect(html).toContain('find data rules strategies -name .git')
+    expect(html).toContain('find data rules strategies -iname .git')
   })
 })

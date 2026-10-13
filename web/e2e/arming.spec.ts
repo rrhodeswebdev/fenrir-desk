@@ -185,22 +185,24 @@ test('Disarm asks first, then posts the account', async ({ page }) => {
   await expect(region).toContainText('Nothing armed.')
 })
 
-test('a sim disarm says the position is flattened first, and a failed flatten says it may still be open (#223)', async ({ page }) => {
-  await mockApi(page)
-  const armed = [{ account: 'Sim101', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode: 'sim', phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: 50000, peak_balance: 50500 }]
-  const error = 'disarm failed: flatten failed: ConnectError: add-on unreachable; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
-  await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
-  await page.route('**/api/arming/disarm', (route) => route.fulfill({ json: { ok: false, error } }))
-  await page.goto('/strategies')
-  const region = page.getByRole('region', { name: 'Armed accounts' })
-  await region.getByRole('button', { name: 'Disarm Sim101' }).click()
-  const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
-  await expect(dialog).toContainText('NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled.')
-  await dialog.getByRole('button', { name: 'Flatten and disarm' }).click()
-  await expect(dialog.getByRole('alert')).toHaveText(`Sim101: ${error}.`)
-  await dialog.getByRole('button', { name: 'Cancel' }).click()
-  await expect(region).toContainText('Sim101') // still armed, halted
-})
+for (const mode of ['sim', 'live'] as const) {
+  test(`a ${mode} disarm says the position is flattened first, and a failed flatten says it may still be open (#223, #227)`, async ({ page }) => {
+    await mockApi(page)
+    const armed = [{ account: 'Sim101', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode, phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: 50000, peak_balance: 50500 }]
+    const error = 'disarm failed: flatten failed: ConnectError: add-on unreachable; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
+    await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
+    await page.route('**/api/arming/disarm', (route) => route.fulfill({ json: { ok: false, error } }))
+    await page.goto('/strategies')
+    const region = page.getByRole('region', { name: 'Armed accounts' })
+    await region.getByRole('button', { name: 'Disarm Sim101' }).click()
+    const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
+    await expect(dialog).toContainText("NinjaTrader flattens this account first: its open position is closed at market and the working orders on each instrument it flattens cancelled, Fenrir's among them; an order on any other instrument stays.")
+    await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click() // never just 'Disarm'
+    await expect(dialog.getByRole('alert')).toHaveText(`Sim101: ${error}.`)
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+    await expect(region).toContainText('Sim101') // still armed, halted
+  })
+}
 
 test('a disarm the server reports as not armed says so, and closing refreshes the table', async ({ page }) => {
   await mockApi(page)

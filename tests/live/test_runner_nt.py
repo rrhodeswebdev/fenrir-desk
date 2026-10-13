@@ -1036,3 +1036,15 @@ def test_a_same_day_intraday_restart_starts_from_the_highest_journalled_peak():
     opens = [opened(D1, 50_000.0)]
     s, _ = core.start(replace(setup, day_start=None), T.ts, peaks=peak, opens=opens)
     assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+
+
+def test_a_same_day_intraday_restart_raises_the_peak_to_the_balance_kept_not_the_booked_one():
+    """The replay books +1,000 but NinjaTrader is at 50,500 (a loss the journal never saw): the
+    balance kept is NinjaTrader's lower one, and the peak rises to it, 500, not to 1,000."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=50_500.0, realized_today=500.0)
+    )
+    s, _ = core.start(replace(setup, day_start=None), T.ts, opens=[opened(D1, 50_000.0)])
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    s = core.replay(s, [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_)])
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (500.0, 500.0, -1500.0)

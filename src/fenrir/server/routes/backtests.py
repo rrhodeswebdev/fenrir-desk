@@ -10,7 +10,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from pydantic import BaseModel
 
 from fenrir.backtest.cache import list_reports, read_report
@@ -66,9 +66,9 @@ def _choices(settings: Settings) -> dict[str, AccountChoice]:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-def _reports(settings: Settings) -> tuple[dict, ...]:
+def _reports(settings: Settings, limit: int | None = None) -> tuple[dict, ...]:
     try:
-        return list_reports(settings)
+        return list_reports(settings, limit)
     except ValueError as e:  # a corrupt cached report: the message names the file to delete
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -129,10 +129,10 @@ def get_job(job_id: str, request: Request) -> dict[str, Any]:
 
 
 @router.get("/results")
-def results(request: Request) -> list[dict]:
+def results(request: Request, limit: int | None = Query(None, ge=1, le=100)) -> list[dict]:
     settings = request.app.state.settings
     choices = _choices(settings)
-    return [with_net(summarize(r), choices) for r in _reports(settings)]
+    return [with_net(summarize(r), choices) for r in _reports(settings, limit)]
 
 
 @router.get("/results/{key}")

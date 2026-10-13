@@ -153,6 +153,19 @@ def test_list_reports_breaks_created_at_ties_by_key(settings):
     assert list_reports(settings) == (b, a)
 
 
+def test_list_reports_limit_reads_only_the_newest_written(settings):
+    a = write_report(settings, "a", "2026-10-01T00:00:00Z")
+    b = write_report(settings, "b", "2026-10-01T00:00:00Z")
+    results = settings.data_dir / "results"
+    (results / "c.json").write_text("{")  # corrupt and oldest: never read
+    for name, ns in (("c", 1), ("b", 2), ("a", 3)):  # a written last, though b wins the key tie
+        os.utime(results / f"{name}.json", ns=(ns, ns))
+    assert list_reports(settings, limit=1) == (a,)
+    assert list_reports(settings, limit=2) == (b, a)  # still returned in (created_at, key) order
+    os.utime(results / "a.json", ns=(2, 2))  # an mtime tie: the name decides
+    assert list_reports(settings, limit=1) == (b,)
+
+
 BASE = {"key": "k", "created_at": "x", "account": "a"} | SHAPE
 
 

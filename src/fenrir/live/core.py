@@ -320,10 +320,11 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
     qty, price = fill["qty"], fill["price"]
     s, out = _roll_day(s, ts)  # journals its own "peak" row; a Fill never moves the peak
     out += (Log("fill", dict(fill)),)
-    if s.read_at is not None and ts <= s.read_at:  # buffered while the book was read: in it
-        return s, out
     if qty == 0:
         return s, (*out, Log("alert", {"message": "ignored a fill with qty 0"}))
+    if s.read_at is not None and ts <= s.read_at:  # buffered while the book was read: in it
+        # still today's fill: the "f<n>" ids count it, as a replay (which books it) does
+        return replace(s, fills=(*s.fills, ts)), out
     pos, w, spec = s.position, s.working, s.setup.spec
     rest = pos.qty + qty
     flipped = rest != 0 and pos.qty != 0 and (rest > 0) != (pos.qty > 0)

@@ -32,6 +32,13 @@ export function useLiveStatus() {
   return { status, fresh: status.isError ? undefined : status.data }
 }
 
+/** The Resolve request: the account, and a client timeout, so a hung hub never leaves Resolve running for ever. */
+export const resolveInit = (account: string): RequestInit => ({
+  method: 'POST',
+  body: JSON.stringify({ account }),
+  signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+})
+
 const killKey = ['live', 'kill']
 const resolveKey = ['live', 'resolve']
 
@@ -53,12 +60,7 @@ export function useResolve() {
   const queryClient = useQueryClient()
   const resolve = useMutation({
     mutationKey: resolveKey,
-    mutationFn: (account: string) =>
-      apiFetch<{ ok: boolean }>('/api/live/resolve', {
-        method: 'POST',
-        body: JSON.stringify({ account }),
-        signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
-      }),
+    mutationFn: (account: string) => apiFetch<{ ok: boolean }>('/api/live/resolve', resolveInit(account)),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['live'] }),
   })
   const last = useMutationState<MutationState<{ ok: boolean }, Error, string>>({ filters: { mutationKey: resolveKey } }).at(-1)

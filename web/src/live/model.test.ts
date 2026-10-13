@@ -231,8 +231,27 @@ describe('focus', () => {
     expect(pick.alarms).toEqual([])
     expect(id(focusOf(calm, pick))).toBe('LDA 0042 (picked)')
     expect(id(focusOf(accounts, pick))).toBe('LFE 0911') // LFE 0911 went into alarm since
+    expect(focusOf(accounts, pick)?.takeover).toBe(true)
     expect(id(focusOf(accounts, pickOf('LDA 0042', accounts)))).toBe('LDA 0042 (picked)')
     expect(alarmsOf(accounts)).toEqual(['LFE 0911'])
+  })
+
+  it('hands focus to the new alarm, never back to an alarm already seen (even a more severe one)', () => {
+    const a = account({ account: 'A', mode: 'sim' })
+    const b = account({ account: 'B', mode: 'live', halted: true, halt_kind: 'reconcile' }) // live outranks sim
+    const pick = pickOf('A', [a, b]) // B was in alarm when the user picked A
+    expect(pick.alarms).toEqual(['B'])
+    expect(id(focusOf([a, b], pick))).toBe('A (picked)')
+    const aAlarm = { ...a, halted: true, halt_kind: 'reconcile' as const }
+    expect(focusOf([aAlarm, b], pick)).toMatchObject({ account: { account: 'A' }, takeover: true })
+    // a new alarm on a third, sim account while B (live) is in alarm: focus the new one
+    const c = account({ account: 'C', mode: 'sim', halted: true, halt_kind: 'breach' })
+    expect(focusOf([a, b, c], pick)?.account.account).toBe('C')
+    // the most severe of several new alarms
+    const d = account({ account: 'D', mode: 'live', halted: true, halt_kind: 'breach' })
+    expect(focusOf([a, b, c, d], pick)?.account.account).toBe('D')
+    // recorded as the new pick, it holds until a further alarm
+    expect(id(focusOf([a, b, c], pickOf('C', [a, b, c])))).toBe('C (picked)')
   })
 
   it('with nothing wrong, focuses real money first: live, then sim, then dry run', () => {

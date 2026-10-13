@@ -69,7 +69,19 @@ test('a new alarm takes focus from a picked account', async ({ page }) => {
   await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LDA 0042')
   live = desk() // LFE 0911 goes into alarm
   await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LFE 0911')
-  await expect(focus(page).getByRole('button', { name: 'Follow most severe' })).toHaveCount(0)
+  // the takeover is held as the pick, until a further alarm; the way back to automatic focus stays
+  await expect(focus(page).getByRole('button', { name: 'Follow most severe' })).toBeVisible()
+
+  // pick LDA 0042 while LFE 0911 is in alarm; then LDA 0042 itself alarms: focus goes to it, not back to LFE 0911
+  // (a sim alarm outranks a dry run's, so "most severe of all" would have been LFE 0911)
+  await page.getByRole('button', { name: 'Focus LDA 0042' }).click()
+  await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LDA 0042')
+  const next = desk()
+  next.accounts[3] = { ...next.accounts[3]!, halted: true, halt_kind: 'reconcile', halt_reason: 'position mismatch' }
+  live = next
+  await expect(page.getByRole('article', { name: 'LFE 0911' })).toBeVisible()
+  await expect(focus(page).getByRole('img', { name: 'Risk normal, book alarm' })).toBeVisible()
+  await expect(focus(page).getByRole('heading', { level: 2 })).toHaveText('LDA 0042')
 })
 
 test('the focused dial redraws on a focus change, not on every status poll', async ({ page }) => {
@@ -129,12 +141,17 @@ test("the journal tape shows today's events, MISMATCH in Red, and links to the f
   await tape.getByRole('link', { name: 'Full journal' }).click()
   await expect(page).toHaveURL(/\/live\/journal$/)
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Journal')
+  // bars stay on the server until asked for
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(8)
+  expect(calls.journal.at(-1)?.getAll('skip')).toEqual(['bar'])
+  await page.getByRole('button', { name: 'Show bars' }).click()
   await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(9)
+  await expect(page.getByRole('button', { name: 'Hide bars' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('li[data-kind="BAR"]')).toContainText('LFE 0507 · MNQZ26 C 25,418.50 · hold')
+  expect(calls.journal.at(-1)?.getAll('skip')).toEqual([])
   // the full journal is a Live page: the system strip and Kill all stay in view
   await expect(page.getByRole('img', { name: 'Feed normal, broker normal, drift normal' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Kill all' })).toBeInViewport()
-  expect(calls.journal.at(-1)?.getAll('skip')).toEqual([])
 })
 
 test('Resolve posts the account, says it ran and re-reads the status', async ({ page }) => {

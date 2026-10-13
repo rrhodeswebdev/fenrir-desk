@@ -1,5 +1,7 @@
 import { Link, createRoute } from '@tanstack/react-router'
+import { useState } from 'react'
 import { Page } from '@/components/page'
+import { Button } from '@/components/ui/button'
 import { pageError } from '@/errorText'
 import { KillLine, LiveStrip, useLiveStatus } from '@/live/actions'
 import { tradingDay } from '@/live/journal'
@@ -12,12 +14,14 @@ export const liveJournalRoute = createRoute({
   component: LiveJournalPage,
 })
 
-/** Today's full journal (SPEC: today's journal): every row of every account, disarmed ones and bars included, newest
- * first, under the same top strip as `/live` (the system strip and Kill all stay in view). */
+/** Today's full journal (SPEC: today's journal): every row of every account, disarmed ones included, newest first,
+ * under the same top strip as `/live` (the system strip and Kill all stay in view). The per-minute bar rows (about
+ * 1,400 per account by the close) stay on the server until "Show bars" asks for them. */
 function LiveJournalPage() {
   const { status, fresh } = useLiveStatus()
   const day = tradingDay(Date.now())
-  const j = useJournal(day)
+  const [bars, setBars] = useState(false)
+  const j = useJournal(day, bars ? [] : ['bar'])
   const statusError = pageError(status.error)
   return (
     <Page title="Journal" strip={<LiveStrip fresh={fresh} failed={status.isError} />}>
@@ -32,6 +36,9 @@ function LiveJournalPage() {
           <span className="label">Trading day</span>
           <span className="value">{day}</span>
           <span className="label">All accounts</span>
+          <Button size="sm" aria-pressed={bars} onClick={() => setBars((b) => !b)}>
+            {bars ? 'Hide bars' : 'Show bars'}
+          </Button>
           <Link to="/live" className="label ml-auto text-ink-2 underline decoration-rule-strong underline-offset-4">
             Back to Live
           </Link>

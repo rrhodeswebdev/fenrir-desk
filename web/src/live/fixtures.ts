@@ -54,6 +54,7 @@ export function desk(): LiveStatus {
       account({
         today_pnl: 212,
         balance: 1180,
+        nt_balance: 51_180,
         limits: { drawdown_remaining: 1768, drawdown_max: 2000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 4, held_minis: 0.2 },
         position: { qty: 2, entry: 25412.25, stop: 25402.25, target: 25432.25 },
         session: { start: 968, floor: -588, target: 3000, safety: -276.8, equity: equity(968, 212), fills: ['2026-10-13T14:41:00+00:00', '2026-10-13T18:12:00+00:00'] },
@@ -70,6 +71,7 @@ export function desk(): LiveStatus {
         halt_reason: 'safety margin: 81% of the daily loss used',
         today_pnl: -812,
         balance: -640,
+        nt_balance: 49_360,
         limits: { drawdown_remaining: 1860, drawdown_max: 2500, daily_loss_remaining: 188, daily_loss_max: 1000, max_minis: 4, held_minis: 0 },
         session: { start: 172, floor: -2500, target: null, safety: -628, equity: equity(172, -812, 200), fills: ['2026-10-13T17:58:41+00:00'] },
       }),
@@ -82,6 +84,7 @@ export function desk(): LiveStatus {
         halt_reason: 'position mismatch: NinjaTrader long 1, runner flat',
         today_pnl: 96,
         balance: 420,
+        nt_balance: 100_420,
         limits: { drawdown_remaining: 3096, drawdown_max: 3000, daily_loss_remaining: null, daily_loss_max: null, max_minis: 6, held_minis: 0 },
         session: { start: 324, floor: -2676, target: 6000, safety: -2076, equity: equity(324, 96, 150), fills: [] },
       }),
@@ -90,6 +93,7 @@ export function desk(): LiveStatus {
         mode: 'dry',
         rules_account: 'lucid-daily-25k',
         contract: 'MESZ6',
+        nt_balance: null, // dry runs never read NinjaTrader
         limits: { drawdown_remaining: 1000, drawdown_max: 1000, daily_loss_remaining: 500, daily_loss_max: 500, max_minis: 2, held_minis: 0 },
         session: { start: 0, floor: -1000, target: 1250, safety: -400, equity: equity(0, 0, 0), fills: [] },
       }),

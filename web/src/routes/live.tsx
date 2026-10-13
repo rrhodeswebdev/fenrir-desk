@@ -24,11 +24,13 @@ function LivePage() {
   const accounts = fresh?.accounts ?? []
   const [pick, setPick] = useState<Pick | null>(null)
   const focus = focusOf(accounts, pick)
-  // a new alarm (or the picked account gone) ends the pick: focus follows the most severe account again
-  const overridden = pick !== null && fresh !== undefined && !focus?.picked
+  // a new alarm takes focus and becomes the pick (held until a further alarm); a picked account gone ends the pick
+  const takeover = focus?.takeover ? focus.account.account : null
+  const gone = pick !== null && fresh !== undefined && !focus?.picked && !takeover
   useEffect(() => {
-    if (overridden) setPick(null)
-  }, [overridden])
+    if (takeover) setPick(pickOf(takeover, accounts))
+    else if (gone) setPick(null)
+  }, [takeover, gone, accounts])
   const statusError = pageError(status.error)
   return (
     <Page title="Live" strip={<LiveStrip fresh={fresh} failed={status.isError} />} className="">

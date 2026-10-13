@@ -88,6 +88,15 @@ describe('dial', () => {
     expect(Math.hypot(strict.now!.x - SIZE / 2, strict.now!.y - SIZE / 2)).toBeCloseTo(R_IN + (2150 / 5000) * (R_OUT - R_IN), 0)
   })
 
+  it('places a winter session by New York winter time (one offset per session, read from its own times)', () => {
+    const at = (ts: string, open: string) => dial(session({ equity: [[open, 0], [ts, 0]], fills: [] }), 0, null).now
+    // 09:30 New York: 13:30 UTC in October (EDT), 14:30 UTC in December (EST): the same place on the dial
+    const summer = at('2026-10-13T13:30:00+00:00', '2026-10-12T22:00:00+00:00')
+    const winter = at('2026-12-15T14:30:00+00:00', '2026-12-14T23:00:00+00:00')
+    expect(winter).toEqual(summer)
+    expect(winter).not.toEqual(at('2026-12-15T13:30:00+00:00', '2026-12-14T23:00:00+00:00'))
+  })
+
   it('has 23 hour spokes, even hours labelled from 18', () => {
     const d = dial(session(), 0, null)
     expect(d.spokes).toHaveLength(23)

@@ -183,14 +183,22 @@ export const alarmsOf = (accounts: AccountStatus[]): string[] =>
 export type Pick = { account: string; alarms: string[] }
 export const pickOf = (account: string, accounts: AccountStatus[]): Pick => ({ account, alarms: alarmsOf(accounts) })
 
-/** The focused account. The user's pick holds while it is armed and no account has gone into alarm since the pick
- * (a new alarm takes focus: its Resolve and the kill switch must be a glance away); otherwise the most severe account,
- * else the first by real money (live, sim, dry run; ties keep the server's order). `picked` says which it is. */
-export function focusOf(accounts: AccountStatus[], pick: Pick | null): { account: AccountStatus; picked: boolean } | null {
+/** The focused account. The user's pick holds while it is armed and no account has gone into alarm since the pick.
+ * A new alarm takes focus (its Resolve and the kill switch must be a glance away): the most severe of the alarms that
+ * were not there at the pick, never an alarm the user had already seen and moved away from; `takeover` says so, and
+ * the page records it as the new pick. Without a pick, the most severe account, else the first by real money (live,
+ * sim, dry run; ties keep the server's order). `picked` says the focus is the user's (or a takeover's) pick. */
+export function focusOf(
+  accounts: AccountStatus[],
+  pick: Pick | null,
+): { account: AccountStatus; picked: boolean; takeover: boolean } | null {
   const own = pick && accounts.find((a) => a.account === pick.account)
-  if (own && alarmsOf(accounts).every((id) => pick.alarms.includes(id))) return { account: own, picked: true }
+  if (own) {
+    const fresh = mostSevere(accounts.filter((a) => need(a)?.state === 'alarm' && !pick.alarms.includes(a.account)))
+    return fresh ? { account: fresh.account, picked: false, takeover: true } : { account: own, picked: true, takeover: false }
+  }
   const auto = mostSevere(accounts)?.account ?? [...accounts].sort((x, y) => modeRank[x.mode] - modeRank[y.mode])[0]
-  return auto ? { account: auto, picked: false } : null
+  return auto ? { account: auto, picked: false, takeover: false } : null
 }
 
 /** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only. */

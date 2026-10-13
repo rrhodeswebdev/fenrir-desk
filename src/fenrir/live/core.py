@@ -487,7 +487,14 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
                 equity=base + equity,
             )
             s, out = halt(replace(s, acct=_raised(s.setup, a, base + a.balance)), gap)
-            return s, out + _peaked(was, s, now)
+            out += _peaked(was, s, now)
+            held = s.position.qty or round(nt.unrealized_pnl, 2) != 0
+            if s.halted != was.halted and held and not s.exiting:
+                # flattened now, as `_exit` would on the next LSE bar, which a feed outage may
+                # hold back; only on the message that raised it, so a refused send never storms
+                s, more = _flatten(s, now, f"g{now.timestamp()}", s.halted)
+                out += more
+            return s, out
         s = replace(s, acct=raised)
     return s, _peaked(was, s, now)
 
@@ -1063,14 +1070,20 @@ def _flatten(s: RunnerState, ts: datetime, suffix: str, why: str) -> Step:
 
 def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> Step:
     open_ended = s.halted is not None and s.halt_day is None
-    if s.halted == reason or (open_ended and (kind != "breach" or s.halt_kind == "breach")):
-        return s, ()  # an open-ended halt is replaced only by a first breach, never downgraded
+    # an open-ended halt is replaced only by a first breach, never downgraded; and by a first gap
+    # halt when it is no breach: under a strategy error, say, the gap's own row, alert and flatten
+    # would be lost (#235)
+    first_breach = kind == "breach" and s.halt_kind != "breach"
+    gap, was_gap = reason.startswith(GAP), (s.halted or "").startswith(GAP)
+    first_gap = gap and not was_gap and s.halt_kind != "breach"
+    if s.halted == reason or (open_ended and not (first_breach or first_gap)):
+        return s, ()
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
         # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
         # account message, then that bar's own Mark breaches: review of #231)
-        own = ", on the app's own figures, not the gap" if s.halted.startswith(GAP) else ""
+        own = ", on the app's own figures, not the gap" if was_gap else ""
         out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 

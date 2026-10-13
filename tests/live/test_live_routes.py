@@ -99,9 +99,29 @@ def test_journal_without_a_database_is_empty_and_creates_none(client, settings):
     assert not (settings.private_dir / "fenrir.db").exists()
 
 
-def test_journal_needs_an_account_and_a_day(client):
-    assert client.get("/api/live/journal?day=2026-10-12").status_code == 422
+def test_journal_without_an_account_has_every_account_and_skips_kinds(client, settings):
+    conn = journal.open_db(settings.private_dir / "fenrir.db")
+    journal.write(conn, T0, "Sim101", "bar", {"n": 1})
+    journal.write(conn, T0, "Sim102", "halt", {"n": 2})
+    journal.write(conn, T0, "Gone", "peak", {"n": 3})  # e.g. disarmed since: still today's
+    journal.write(conn, datetime(2026, 10, 12, 22, 0, tzinfo=UTC), "Sim101", "fill", {"n": 4})
+    conn.close()
+    every = client.get("/api/live/journal?day=2026-10-12").json()
+    assert [(r["account"], r["payload"]["n"]) for r in every] == [
+        ("Sim101", 1),
+        ("Sim102", 2),
+        ("Gone", 3),
+    ]
+    tape = client.get("/api/live/journal?day=2026-10-12&skip=bar&skip=peak").json()
+    assert [r["payload"]["n"] for r in tape] == [2]
+    one = client.get("/api/live/journal?account=Sim101&day=2026-10-12&skip=halt").json()
+    assert [r["payload"]["n"] for r in one] == [1]
+
+
+def test_journal_needs_a_day_and_known_kinds_to_skip(client):
+    assert client.get("/api/live/journal?account=Sim101").status_code == 422
     assert client.get("/api/live/journal?account=Sim101&day=12/10/2026").status_code == 422
+    assert client.get("/api/live/journal?day=2026-10-12&skip=bars").status_code == 422
 
 
 def test_kill_disarms_all_and_journals_it(client, settings):

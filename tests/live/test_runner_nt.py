@@ -42,9 +42,9 @@ def account(balance=50_000.0, today=0.0, unrealized=0.0, is_sim=True):
     }
 
 
-def running(setup, *messages, b=T):
-    """Started, given NinjaTrader's `messages`, then fed bar `b`."""
-    s = reconciled(core.start(setup, b.ts)[0])
+def running(setup, *messages, b=T, state=None):
+    """Started (or `state`), given NinjaTrader's `messages`, then fed bar `b`."""
+    s = reconciled(state or core.start(setup, b.ts)[0])
     for m in messages:
         s = core.on_account(s, m, b.ts)[0]
     return core.on_bar(s, b)[0]
@@ -323,16 +323,14 @@ def test_a_second_outage_drops_the_figures_too():
     assert s.halted.startswith("confirm balances: ") and peaks(effects) == []
 
 
-# #211: today's open (day_start) comes from the journal, else from the balance at start
+# #211: today's open (day_start) comes from the journal, else from NinjaTrader's figures at start
 
 
-def first_start(balance=50_300.0, opens=(), setup=None, now=T.ts):
-    """A sim start from the first account message (`balance`), with no day_start given, the
-    journalled opens since arming passed, then `open_day` as the hub runs it."""
-    setup = setup or replace(sim(), start=replace(START, balance=balance), day_start=None)
-    s, out = core.start(setup, now, opens=opens)
-    s, more = core.open_day(s, now)
-    return s, out + more
+def first_start(balance=50_300.0, realized=0.0, opens=(), now=T.ts):
+    """A sim start from the first account message (`balance`, `realized` today), with no
+    day_start given and the journalled opens since arming."""
+    setup = replace(sim(), start=replace(START, balance=balance, realized_today=realized))
+    return core.start(replace(setup, day_start=None), now, opens=opens)
 
 
 def opened(day, balance, peak=50_000.0):
@@ -340,24 +338,33 @@ def opened(day, balance, peak=50_000.0):
     return {"day": day.isoformat(), "balance": balance, "peak": peak, "ts": iso(T.ts)}
 
 
-def test_without_a_journalled_open_the_balance_at_start_opens_the_day():
-    s, effects = first_start(50_300.0, opens=[opened(D1 - timedelta(days=1), 1.0)])
-    assert s.setup.day_start == DayStart(50_300.0, 50_000.0)
-    assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (300.0, 300.0, 300.0)
+@pytest.mark.parametrize("realized", [0.0, -800.0, -1000.0, 500.0])
+def test_without_a_journalled_open_ninjatraders_own_open_opens_the_day(realized):
+    """The open is NinjaTrader's balance less its realized P&L today, so a morning loss counts
+    once in the stricter-of equity (DEC-4b), not twice: the room and the safety margin are right."""
+    yesterday = opened(D1 - timedelta(days=1), 1.0)
+    balance = 50_000.0 + realized
+    s, effects = first_start(balance, realized, opens=[yesterday])
+    assert s.setup.day_start == DayStart(50_000.0, 50_000.0)
+    assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (realized, 0.0, 0.0)
+    assert s.acct.traded_today is (realized != 0.0)
     note, row = effects
-    assert (
-        note.kind == "alert"
-        and "NinjaTrader's balance at start, 50300.00" in note.payload["message"]
-    )
-    assert row == Log("day_start", opened(D1, 50_300.0))
-    _, effects = decide_now(core.on_bar(reconciled(s), T)[0], [LONG])
+    assert note.kind == "alert" and "realized P&L today, 50000.00" in note.payload["message"]
+    assert row == Log("day_start", opened(D1, 50_000.0))
+    s = running(s.setup, account(balance, today=realized), state=s)
+    st = core.account_status(s)
+    assert (st["today_pnl"], st["limits"]["drawdown_remaining"]) == (realized, 2000.0 + realized)
+    assert s.halted is None  # L=1000 left the safety margin's room: no false halt
+    _, effects = decide_now(s, [LONG])
     assert kinds(effects) == ["bar", "action", "send"]  # today's open is known
 
 
 def test_a_journalled_open_for_today_is_todays_open_and_journals_nothing():
-    today = opened(D1, 50_300.0, peak=50_400.0)
-    s, effects = first_start(49_900.0, opens=[opened(D1 - timedelta(days=1), 1.0), today])
-    assert effects == () and s.setup.day_start == DayStart(50_300.0, 50_400.0)
+    early, today = opened(D1, 50_100.0), opened(D1, 50_300.0, peak=50_400.0)
+    s, effects = first_start(
+        49_900.0, -100.0, opens=[opened(D1 - timedelta(days=1), 1.0), early, today]
+    )
+    assert effects == () and s.setup.day_start == DayStart(50_300.0, 50_400.0)  # the latest
     assert (s.acct.balance, s.acct.day_start_balance) == (-100.0, 300.0)
     assert (s.session_start, s.session_floor) == (300.0, -1600.0)  # the open's floor, peak +400
     assert core.account_status(s)["today_pnl"] == -400.0  # not 0: the restart is mid-day
@@ -366,15 +373,54 @@ def test_a_journalled_open_for_today_is_todays_open_and_journals_nothing():
 @pytest.mark.parametrize(
     "setup",
     [
-        make_setup(make_rules(), start=START),  # dry runs start fresh
-        sim(),  # day_start given
-        make_setup(make_rules(), mode="sim"),  # no start: cannot start
-        replace(sim(), day_start=None, rules_hash="edited"),  # refused at start
+        make_setup(make_rules(), start=replace(START, realized_today=0.0)),  # dry: fresh
+        replace(sim(), start=replace(START, realized_today=0.0)),  # day_start given
+        replace(sim(), day_start=None),  # no NinjaTrader realized P&L today: no open known
     ],
 )
-def test_open_day_leaves_alone_what_it_must_not_open(setup):
-    s, _ = core.start(setup, T.ts)
-    assert core.open_day(s, T.ts) == (s, ())
+def test_no_open_is_derived_without_the_figures_or_the_need(setup):
+    s, effects = core.start(setup, T.ts)
+    assert s.setup.day_start == (None if setup.armed.mode == "dry" else setup.day_start)
+    assert effects == ()
+
+
+def test_a_refused_start_journals_no_open():
+    setup = replace(sim(), start=replace(START, realized_today=0.0), day_start=None)
+    s, effects = core.start(replace(setup, rules_hash="edited"), T.ts)
+    assert kinds(effects) == ["halt"] and not s.started
+
+
+def test_replayed_fills_count_once_against_ninjatraders_open():
+    """No open journalled (its row lost), today's +$200 trade journalled: NinjaTrader's open is
+    before that trade, so the replay books it once, as NinjaTrader's balance holds it."""
+    b, rows = T, []
+    s, effects = decide_now(running(sim()), [LONG])
+    rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    for f in (
+        {**fill_at(b.ts + timedelta(seconds=61), 1), "client_id": s.working.client_id},
+        {**fill_at(at("09:32").ts, -1), "price": 20010.0},
+    ):
+        s, effects = core.on_fill(s, f)
+        rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    booked = s.acct.balance
+    r, _ = first_start(50_000.0 + booked, booked, now=at("09:40").ts)
+    r = core.replay(r, rows)
+    assert (r.acct.balance, r.acct.day_start_balance) == (booked, 0.0)
+
+
+def test_a_first_balance_at_or_below_the_liquidation_level_cannot_start():
+    """Never a breach from a figure at start (NinjaTrader's figures never raise one): halted
+    "confirm balances" until re-armed, with no figures and no open journalled."""
+    s, effects = first_start(48_000.0, -2000.0)  # the pins' floor: 50,000 - 2,000
+    assert kinds(effects) == ["halt"] and not s.started and s.halt_kind is None
+    assert s.halted == (
+        "confirm balances: NinjaTrader's balance 48000.00 is at or below the liquidation level"
+        " 48000.00 from the armed balances; re-arm with the confirmed balances"
+    )
+    s, effects = core.on_bar(core.on_account(s, account(48_000.0), T.ts)[0], T)
+    assert s.halt_kind is None and "halt" not in kinds(effects)  # never a breach
+    assert core.account_status(s)["balance"] is None
+    assert first_start(48_000.01, -1999.99)[0].started
 
 
 def test_every_sim_roll_journals_the_new_days_open_and_a_restart_takes_it():
@@ -383,8 +429,7 @@ def test_every_sim_roll_journals_the_new_days_open_and_a_restart_takes_it():
     s, effects = core.on_bar(s, nxt)
     [row] = [e.payload for e in effects if isinstance(e, Log) and e.kind == "day_start"]
     assert row == {"day": D2.isoformat(), "balance": 50_000.0, "peak": 50_400.0, "ts": iso(nxt.ts)}
-    later = at("11:00", D2).ts
-    r, out = first_start(49_800.0, opens=[row], now=later)
+    r, out = first_start(49_800.0, -200.0, opens=[row], now=at("11:00", D2).ts)
     assert out == () and (r.session_start, r.session_floor) == (s.session_start, s.session_floor)
     assert r.acct.day_start_balance == s.acct.day_start_balance
     dry = make_setup(make_rules(), start=START)

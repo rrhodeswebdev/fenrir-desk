@@ -37,7 +37,9 @@ def bar(ts: datetime) -> Bar:
     return Bar(ts, 20000.0, 20005.0, 19995.0, 20000.0, 10, "NQZ26")
 
 
-def account(balance: float, account_id: str = "Sim101", is_sim: bool = True) -> dict:
+def account(
+    balance: float, account_id: str = "Sim101", is_sim: bool = True, realized: float = 0.0
+) -> dict:
     """An add-on "account" stream message, absolute $."""
     return {
         "type": "account",
@@ -45,7 +47,7 @@ def account(balance: float, account_id: str = "Sim101", is_sim: bool = True) -> 
         "name": account_id,
         "is_sim": is_sim,
         "balance": balance,
-        "realized_pnl_today": 0.0,
+        "realized_pnl_today": realized,
         "unrealized_pnl": 0.0,
     }
 
@@ -127,7 +129,8 @@ async def test_without_an_account_message_it_waits_and_sends_nothing(hub, conn, 
     assert hub.states == {} and hub.children == {}
     assert kinds(conn) == [] and fake.requests == []
     [acc] = hub.status()["accounts"]
-    assert acc["halt_reason"].startswith("waiting for NinjaTrader: no account message for Sim101")
+    assert acc["halt_reason"].startswith("waiting for NinjaTrader: no account message with a")
+    assert "for Sim101 yet" in acc["halt_reason"]
     assert (acc["halted"], acc["halt_kind"], acc["mode"]) == (True, None, "sim")
     assert [acc[k] for k in ("balance", "nt_balance", "limits", "position", "session")] == [
         None
@@ -145,7 +148,7 @@ async def test_the_first_account_message_starts_it_from_the_pins_and_ninjatrader
     await hub.tick(T0)
     await hub.handle_stream(account(50_300.0))
     s = hub.states["Sim101"]
-    assert s.setup.start == Start(phase_start=50_000.0, peak=50_500.0, balance=50_300.0)
+    assert s.setup.start == Start(50_000.0, 50_500.0, balance=50_300.0, realized_today=0.0)
     assert (s.acct.balance, s.acct.peak) == (300.0, 800.0)
     assert s.setup.day_start == DayStart(50_300.0, 50_800.0)
     assert s.nt == core.NtAccount(50_300.0, 0.0, 0.0)
@@ -172,7 +175,7 @@ async def test_a_restart_mid_day_opens_the_day_as_journalled_not_at_the_balance_
     second = LiveHub(settings, addon=client)
     try:
         await second.tick(clock["t"])
-        await second.handle_stream(account(49_900.0))  # down $400 since the open
+        await second.handle_stream(account(49_900.0, realized=-400.0))  # down $400 today
         s = second.states["Sim101"]
         assert s.setup.day_start == DayStart(50_300.0, 50_500.0)
         assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (-100.0, 300.0, 300.0)
@@ -217,3 +220,75 @@ async def test_a_strategy_that_cannot_load_still_journals_the_open_and_the_misma
     await hub.handle_stream(account(50_300.0, is_sim=False))
     assert kinds(conn) == ["alert", "day_start", "halt"]
     assert hub.states["Sim101"].halted.startswith("mode mismatch: ")  # the first halt stands
+
+
+@pytest.mark.parametrize("loss", [0.0, 800.0, 1000.0])
+async def test_a_morning_loss_before_the_first_start_counts_once(hub, conn, armed, fake, loss):
+    """No open journalled: the day opens at NinjaTrader's balance less its realized P&L today,
+    so the room is the real one and no false safety halt stops the account (review of #217)."""
+    arming.insert_armed(conn, replace(armed, peak_balance=50_000.0))  # floor 48,000
+    await hub.handle_stream({"type": "connected"})
+    await hub.tick(T0)
+    await hub.handle_stream(account(50_000.0 - loss, realized=-loss))
+    await hub.tick(T0 + timedelta(seconds=5))
+    await hub.handle_bar(bar(T0))
+    [acc] = hub.status()["accounts"]
+    assert (acc["today_pnl"], acc["limits"]["drawdown_remaining"]) == (-loss, 2000.0 - loss)
+    assert acc["halted"] is False and [path for path, _ in fake.requests] == ["/bracket"]
+
+
+async def test_a_balance_at_or_below_zero_is_not_a_figure_yet(hub, conn, armed):
+    await hub.tick(T0)
+    await hub.handle_stream(account(0.0))  # e.g. NinjaTrader before its account data loads
+    await hub.handle_stream(account(-5.0))
+    assert hub.states == {} and "Sim101" in hub.waiting and kinds(conn) == []
+    await hub.handle_stream(account(50_300.0))
+    assert hub.states["Sim101"].halted is None
+
+
+async def test_a_first_balance_at_the_liquidation_level_cannot_start(hub, conn, armed):
+    await hub.tick(T0)
+    await hub.handle_stream(account(45_000.0))  # the pins' level: 50,000 + 500 - 2,000
+    s = hub.states["Sim101"]
+    assert s.halted.startswith("confirm balances: NinjaTrader's balance 45000.00 is at or below")
+    assert not s.started and s.halt_kind is None and hub.children == {}
+    assert kinds(conn) == ["halt"]
+
+
+async def test_a_message_after_a_rearm_starts_the_new_arming_not_the_old(
+    hub, conn, armed, fake, clock
+):
+    """The stream syncs `armed` before starting a waiting row (review of #217): a disarm and a
+    re-arm with a corrected peak since the last tick never start the old arming."""
+    await hub.tick(T0)
+    clock["t"] = T0 + timedelta(seconds=1)
+    arming.disarm(conn, "Sim101", clock["t"])
+    new = replace(armed, armed_at=T0 + timedelta(seconds=2), peak_balance=50_300.0)
+    arming.insert_armed(conn, new)
+    clock["t"] = T0 + timedelta(seconds=3)
+    await hub.handle_stream(account(50_300.0))  # before the next tick's sync
+    s = hub.states["Sim101"]
+    assert s.setup.armed == new and s.setup.day_start == DayStart(50_300.0, 50_300.0)
+    assert (s.acct.floor, s.session_floor) == (-1700.0, -1700.0)
+    rows = journal.rows(conn, account="Sim101")
+    assert [r.kind for r in rows] == ["halt", "alert", "day_start"]  # disarmed, then the new start
+    assert rows[2].payload["peak"] == 50_300.0
+
+
+async def test_a_waiting_row_the_kill_could_not_disarm_never_loads_its_strategy(
+    hub, conn, armed, fake, monkeypatch
+):
+    await hub.tick(T0)
+
+    def locked(conn, account):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(service, "delete_armed", locked)
+    assert (await hub.kill())["ok"] is False
+    [acc] = hub.status()["accounts"]
+    assert acc["halt_reason"].startswith("kill switch: disarm failed for Sim101: ")  # not "waiting"
+    await hub.handle_stream(account(50_300.0))
+    assert hub.states["Sim101"].halted and hub.children == {}
+    await hub.tick(T0 + timedelta(seconds=5))
+    await hub.handle_bar(bar(T0))
+    assert [path for path, _ in fake.requests] == ["/flatten-all", "/flatten-all"]

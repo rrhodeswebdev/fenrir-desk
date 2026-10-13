@@ -154,11 +154,12 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
-def _waiting(a: Armed) -> dict[str, Any]:
-    """An AccountStatus for a sim or live row waiting for NinjaTrader's first account message."""
-    why = (
-        f"waiting for NinjaTrader: no account message for {a.account} yet;"
-        " nothing is sent until one arrives"
+def _waiting(a: Armed, killed: str | None) -> dict[str, Any]:
+    """An AccountStatus for a sim or live row waiting for NinjaTrader's first account message
+    (`killed`: the reason a kill that could not disarm it halts it with when it starts)."""
+    why = killed or (
+        f"waiting for NinjaTrader: no account message with a balance above 0 for {a.account}"
+        " yet; nothing is sent until one arrives"
     )
     return _cannot_start(a, "") | {"halt_reason": why}
 
@@ -292,9 +293,13 @@ class LiveHub:
                     )
             case "account":
                 async with self._lock:
-                    if msg["id"] in self.waiting:  # its balance now: the account can start
+                    if msg["id"] in self.waiting:  # never an arming changed since the last sync
+                        await self._sync(_now())
+                    # its balance now: the account can start; none yet (<= 0) is not a figure
+                    if msg["id"] in self.waiting and msg["balance"] > 0:
                         a, setup = self.waiting.pop(msg["id"])
-                        start = Start(a.start_balance, a.peak_balance, msg["balance"])
+                        figures = msg["balance"], msg["realized_pnl_today"]
+                        start = Start(a.start_balance, a.peak_balance, *figures)
                         await self._run(a, replace(setup, start=start), _now(), msg)
                     elif (s := self.states.get(msg["id"])) is not None:
                         await self._apply(msg["id"], *core.on_account(s, msg, _now()))
@@ -544,7 +549,7 @@ class LiveHub:
             },
             "accounts": [core.account_status(s) for s in self.states.values()]
             + [_cannot_start(a, error) for a, error in self.broken.values()]
-            + [_waiting(a) for a, _ in self.waiting.values()],
+            + [_waiting(a, self._killed(a)) for a, _ in self.waiting.values()],
         }
 
     async def _apply(self, account: str, s: RunnerState, effects: Sequence[Log | Send]) -> None:
@@ -707,8 +712,8 @@ class LiveHub:
     async def _run(
         self, a: Armed, setup: Setup, now: datetime, message: Mapping[str, Any] | None = None
     ) -> None:
-        """Start the account with what it journalled since arming, replay today, open the day
-        (sim/live with no open journalled today) and take NinjaTrader's first `message`."""
+        """Start the account with what it journalled since arming (today's open among it, else
+        NinjaTrader's), replay today and take NinjaTrader's first `message`."""
 
         def since(kind: str) -> list[Mapping[str, Any]]:
             return [
@@ -718,21 +723,23 @@ class LiveHub:
         s, out = core.start(setup, now, since("halt"), since("peak"), since("day_start"))
         today = journal.rows(self.conn, a.account, day=trading_day(now), since=a.armed_at)
         s = core.replay(s, [(r.kind, r.payload) for r in today])
-        s, more = core.open_day(s, now)  # after replay, which keeps NinjaTrader's balance then
-        out += more
         if message is not None:
             s, more = core.on_account(s, message, now)
             out += more
-        if s.started:
+        if killed := self._killed(a):  # the kill could not disarm it: no strategy loads
+            s, more = core.halt(s, killed)
+            out += more
+        elif s.started:
             try:
                 await self._spawn(a)
             except Exception as e:  # isolation refusal, load error, timeout
                 s, more = core.halt(s, f"cannot load the strategy: {e}")
                 out += more  # never instead of the rows before it (an open, a mode mismatch)
-        if self.killed and a.armed_at <= self.killed[0]:  # the kill could not disarm it
-            s, more = core.halt(s, self.killed[1])
-            out = (*out, *more)
         await self._apply(a.account, s, out)
+
+    def _killed(self, a: Armed) -> str | None:
+        """The halt reason of a kill whose disarm failed when `a` was armed by then."""
+        return self.killed[1] if self.killed and a.armed_at <= self.killed[0] else None
 
     async def _spawn(self, a: Armed) -> None:
         overlay, drop = as_user(strategy_user(self.settings))

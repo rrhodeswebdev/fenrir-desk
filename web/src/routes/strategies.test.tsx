@@ -137,7 +137,7 @@ describe('SummaryFacts', () => {
     for (const text of ['2019-01-02 to 2025-10-09', '1,700', '31.0%', '19.0%', '+$187.50', '+$90.00', '$50,000.00', '$50,250.00', '$48,500.00', 'On'])
       expect(html).toContain(text)
     // the first 12 characters, the full hash one tap or key press away (not a title tooltip)
-    expect(html).toContain(`<details><summary class="cursor-pointer list-none">bbbbbbbbbbbb…</summary><span class="break-all select-all">${summary.rules_hash}</span></details>`)
+    expect(html).toContain(`<details><summary class="cursor-pointer">bbbbbbbbbbbb…</summary><span class="break-all select-all">${summary.rules_hash}</span></details>`)
     expect(html).toContain(`>${summary.strategy_hash}<`)
     expect(html).not.toContain('title=')
     expect(html).toContain('<dd class="value">None</dd>')

@@ -173,11 +173,12 @@ const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'U
 const short = (hash: string) => hash.slice(0, 12)
 const fileName = (path: string) => path.split('/').pop() ?? path
 
-/** A hash's first 12 characters; the full hash opens below them (keyboard and touch, and copyable). */
+/** A hash's first 12 characters; the full hash opens below them (keyboard and touch, and copyable). The summary keeps
+ * its disclosure marker, so it reads as something that opens. */
 function Hash({ hash }: { hash: string }) {
   return (
     <details>
-      <summary className="cursor-pointer list-none">{`${short(hash)}…`}</summary>
+      <summary className="cursor-pointer">{`${short(hash)}…`}</summary>
       <span className="break-all select-all">{hash}</span>
     </details>
   )
@@ -269,6 +270,8 @@ function useSingleFlight() {
   return <T,>(m: { mutate: (v: T, o: { onSettled: () => void }) => void }, v: T) => {
     if (busy.current) return
     busy.current = true
+    // per-call onSettled is skipped if the mutation is reset() mid-request: never reset() one sent through this while
+    // it is in flight, or `busy` stays set and the button goes dead (cancel and the Disarm onOpenChange wait for it)
     m.mutate(v, { onSettled: () => (busy.current = false) })
   }
 }

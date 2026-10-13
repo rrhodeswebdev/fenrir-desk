@@ -425,6 +425,20 @@ describe('each condition counts, whatever the halt (#212)', () => {
     ])
     expect(reasons(account())).toEqual([])
   })
+
+  it("NinjaTrader's balance at or below 0 shows in the focus in caution, holding nothing back and lighting no cell (#220)", () => {
+    const figures = { kind: 'figures', reason: 'NinjaTrader reports a balance at or below 0, which is not a figure' } as const
+    const a = account(held(figures))
+    expect(a.halted).toBe(false)
+    expect(reasons(a)).toEqual([{ tone: 'caution', text: figures.reason }])
+    expect(need(a)).toBeNull()
+    expect(strip(a)).toEqual(['Risk normal', 'Book normal'])
+    expect(states(status({ accounts: [a] }))).toEqual(['normal', 'normal', 'normal'])
+    expect(reasons(account(held(safety, figures)))).toEqual([
+      { tone: 'caution', text: safety.reason },
+      { tone: 'caution', text: figures.reason },
+    ])
+  })
 })
 
 describe('feed outage', () => {

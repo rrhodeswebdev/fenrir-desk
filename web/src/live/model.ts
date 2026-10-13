@@ -6,8 +6,11 @@ import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
 export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach'
-/** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …). */
-export type Condition = { kind: HaltKind | null; reason: string }
+/** `figures` (#220): NinjaTrader's balance is at or below 0, so its last figures stand; it holds nothing back. */
+export type ConditionKind = HaltKind | 'figures'
+/** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …).
+ * `figures` holds nothing back and lights no cell: the focus shows it. */
+export type Condition = { kind: ConditionKind | null; reason: string }
 
 type Limits = {
   drawdown_remaining: number
@@ -63,7 +66,7 @@ export type KillResult = { ok: boolean; error: string | null }
 export type Cell = { name: string; state: Tone }
 
 /** Whether the account is under a condition of this kind, whatever else holds it. */
-const has = (a: AccountStatus, kind: HaltKind | null): boolean => a.conditions.some((c) => c.kind === kind)
+const has = (a: AccountStatus, kind: ConditionKind | null): boolean => a.conditions.some((c) => c.kind === kind)
 
 /** Feed · Broker · Drift, shared by every account. Stale and drift pauses light these, never an account. */
 export function systemStrip(s: LiveStatus): Cell[] {
@@ -223,7 +226,14 @@ export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
   return need(a)?.state ?? (a.halted ? 'caution' : null)
 }
 
-const conditionTone: Record<HaltKind, 'caution' | 'alarm'> = { reconcile: 'alarm', breach: 'alarm', safety: 'caution', stale: 'caution', drift: 'caution' }
+const conditionTone: Record<ConditionKind, 'caution' | 'alarm'> = {
+  reconcile: 'alarm',
+  breach: 'alarm',
+  safety: 'caution',
+  stale: 'caution',
+  drift: 'caution',
+  figures: 'caution',
+}
 
 /** The focus field's lines: every condition's reason in its own tone (a halt no cell names is an alarm), else the
  * brief unreconciled pause's reason, plain. */

@@ -23,7 +23,9 @@ namespace NinjaTrader.NinjaScript.AddOns
     {
         private static readonly TimeSpan EntryTimeout = TimeSpan.FromSeconds(2);
         private static readonly TimeSpan SeenFor = TimeSpan.FromDays(7);
-        private static readonly TimeSpan FlattenQuiet = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan CloseGrace = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan StaleBracket = TimeSpan.FromSeconds(4); // under the client's 5 s timeout
+        private static readonly TimeSpan ResizeSettle = TimeSpan.FromSeconds(3);
 
         private readonly FenrirConfig config;
         private readonly string seenPath;
@@ -34,7 +36,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly Dictionary<string, DateTime> seen = new Dictionary<string, DateTime>(); // client id -> first seen, UTC
         private readonly Dictionary<string, Working> brackets = new Dictionary<string, Working>();
         private readonly HashSet<Account> attached = new HashSet<Account>();
-        private readonly Dictionary<string, DateTime> lastFlatten = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, FlatRequest> mustBeFlat = new Dictionary<string, FlatRequest>(); // "account|instrument"
 
         // a bracket placed since this start
         private class Working
@@ -48,9 +50,22 @@ namespace NinjaTrader.NinjaScript.AddOns
             public Order Entry;
             public Order StopOrder;
             public Order TargetOrder;
-            public int Protected; // entry quantity the stop and target cover
+            public int Protected; // entry quantity handled: covered by the stop and target, or closed
+            public int Closed; // of that, closed at market by CloseExactly
             public DateTime SubmittedAt;
+            public DateTime ResizedAt;
             public bool CancelSent;
+            public bool Closing; // its instrument is being flattened: later entry fills are closed, not protected
+        }
+
+        // an account and instrument Fenrir keeps flattening until NinjaTrader shows it flat
+        private class FlatRequest
+        {
+            public Account Account;
+            public Instrument Instrument;
+            public bool Everything; // also every non-Fenrir working order there
+            public DateTime GraceUntil; // just flattened: its close may not be visible yet
+            public int Tries;
         }
 
         public FenrirBroker(FenrirConfig config)
@@ -87,7 +102,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 }
                 catch (Exception e)
                 {
-                    FenrirLog.Info("broker: " + e);
+                    FenrirLog.Alert("broker: " + e);
                 }
             }
         }
@@ -98,9 +113,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 work.Add(action);
             }
-            catch (InvalidOperationException)
+            catch (Exception)
             {
-                // stopped
+                // stopped; also called from timers and NinjaTrader's threads, so it never throws
             }
         }
 
@@ -173,17 +188,23 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         public Dictionary<string, object> Bracket(Dictionary<string, object> body)
         {
-            return Call(() => PlaceBracket(body));
+            DateTime received = DateTime.UtcNow;
+            return Call(() => PlaceBracket(body, received));
         }
 
-        private Dictionary<string, object> PlaceBracket(Dictionary<string, object> body)
+        private Dictionary<string, object> PlaceBracket(Dictionary<string, object> body, DateTime received)
         {
             string cid;
             Account account;
             Dictionary<string, object> refused = Check(body, true, out cid, out account);
             if (refused != null) return refused;
+            // the client has given up by now; a late market entry would trade at another price
+            if (DateTime.UtcNow - received > StaleBracket)
+                return Ack(false, false, "not placed: NinjaTrader was busy for over 4 s");
             Instrument instrument = FindInstrument(Str(body, "instrument"));
             if (instrument == null) return Ack(false, false, "unknown instrument");
+            if (mustBeFlat.ContainsKey(Key(account, instrument)))
+                return Ack(false, false, "not placed: " + instrument.FullName + " is being flattened on " + account.Name);
             string side = Str(body, "side");
             int qty = Int(body, "qty");
             double stop = Num(body, "stop");
@@ -379,18 +400,56 @@ namespace NinjaTrader.NinjaScript.AddOns
             attached.Clear();
         }
 
-        // every 500 ms: new accounts, and entries still incomplete 2 s after they were sent
+        // every 500 ms: new accounts, entries still incomplete 2 s after they were sent, stops that did
+        // not take a resize, and every account and instrument that must become flat
         private void Sweep()
         {
             AttachManaged();
             DateTime now = DateTime.UtcNow;
             foreach (Working b in brackets.Values)
             {
-                if (b.CancelSent || now - b.SubmittedAt < EntryTimeout || Order.IsTerminalState(b.Entry.OrderState)) continue;
-                b.CancelSent = true; // fills that still arrive are protected by OnFenrirOrder
-                FenrirLog.Info("entry " + b.ClientId + " not complete after 2 s: cancelling the remainder");
-                b.Account.Cancel(new[] { b.Entry });
+                try
+                {
+                    if (!b.CancelSent && !b.Closing && now - b.SubmittedAt >= EntryTimeout && !Order.IsTerminalState(b.Entry.OrderState))
+                    {
+                        FenrirLog.Info("entry " + b.ClientId + " not complete after 2 s: cancelling the remainder");
+                        b.Account.Cancel(new[] { b.Entry });
+                        b.CancelSent = true; // fills that still arrive are protected by OnFenrirOrder
+                    }
+                    CheckStopSize(b, now);
+                }
+                catch (Exception e)
+                {
+                    FenrirLog.Alert("bracket " + b.ClientId + ": " + e.Message);
+                }
             }
+            foreach (KeyValuePair<string, FlatRequest> kv in mustBeFlat.ToList())
+            {
+                try
+                {
+                    if (Advance(kv.Value))
+                    {
+                        mustBeFlat.Remove(kv.Key);
+                        FenrirLog.Info(kv.Value.Instrument.FullName + " flat on " + kv.Value.Account.Name);
+                    }
+                }
+                catch (Exception e)
+                {
+                    FenrirLog.Alert("flattening " + kv.Key + ": " + e.Message + "; retrying");
+                }
+            }
+        }
+
+        // A resize NinjaTrader refused leaves the stop smaller than what filled: close the difference.
+        private void CheckStopSize(Working b, DateTime now)
+        {
+            if (b.Closing || b.StopOrder == null || now - b.ResizedAt < ResizeSettle) return;
+            OrderState st = b.StopOrder.OrderState;
+            if (st != OrderState.Accepted && st != OrderState.Working && st != OrderState.TriggerPending) return;
+            int covered = b.StopOrder.Quantity;
+            int expected = b.Protected - b.Closed;
+            if (covered >= expected) return;
+            CloseExactly(b, expected - covered, "stop " + b.ClientId + " covers " + covered + " of " + expected);
         }
 
         // NinjaTrader's thread: never throw, never wait
@@ -399,10 +458,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 Order o = e.Order;
-                if (ClientId(o.Name) == null) return;
                 OrderState state = e.OrderState;
                 int filled = e.Filled;
-                Post(() => OnFenrirOrder(o, state, filled));
+                ErrorCode error = e.Error;
+                if (ClientId(o.Name) != null) Post(() => OnFenrirOrder(o, state, filled, error));
+                if (state == OrderState.Rejected) Post(() => OnRejected(o));
             }
             catch (Exception ex)
             {
@@ -410,7 +470,15 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        private void OnFenrirOrder(Order o, OrderState state, int filled)
+        // a rejected close: no close is coming, try again after 1 s per attempt so far (at most 30 s)
+        private void OnRejected(Order o)
+        {
+            FlatRequest r;
+            if (mustBeFlat.TryGetValue(Key(o.Account, o.Instrument), out r))
+                r.GraceUntil = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Min(Math.Max(r.Tries, 1), 30));
+        }
+
+        private void OnFenrirOrder(Order o, OrderState state, int filled, ErrorCode error)
         {
             Working b;
             // only brackets placed since this start: NinjaTrader may replay older orders' updates
@@ -418,13 +486,30 @@ namespace NinjaTrader.NinjaScript.AddOns
             string role = Role(o.Name);
             if (role == "entry")
             {
-                if (filled > b.Protected) Protect(b, filled);
+                if (filled <= b.Protected) return;
+                if (b.Closing || mustBeFlat.ContainsKey(Key(b.Account, b.Instrument)))
+                {
+                    // being flattened: never protect again, close exactly what filled
+                    int more = filled - b.Protected;
+                    b.Protected = filled;
+                    CloseExactly(b, more, "entry " + b.ClientId + " filled " + more + " while flattening");
+                }
+                else Protect(b, filled);
+                return;
             }
-            else if (state == OrderState.Rejected)
+            if (error != ErrorCode.NoError)
+                FenrirLog.Alert(role + " " + b.ClientId + ": " + error + " (" + state + ")");
+            if (b.Closing) return;
+            if (state == OrderState.Rejected)
             {
                 // a position is never left without its stop
                 FenrirLog.Alert(role + " rejected for " + b.ClientId + ": flattening " + b.Instrument.FullName + " on " + b.Account.Name);
-                FlattenInstruments(b.Account, new[] { b.Instrument });
+                RequestFlat(b.Account, b.Instrument, false);
+            }
+            else if (role == "stop" && state == OrderState.Cancelled && !Filled(b.TargetOrder) && Held(b.Account, b.Instrument) != 0)
+            {
+                FenrirLog.Alert("stop cancelled for " + b.ClientId + " while the position is held: flattening " + b.Instrument.FullName + " on " + b.Account.Name);
+                RequestFlat(b.Account, b.Instrument, false);
             }
         }
 
@@ -432,6 +517,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         // placed on the first fill, resized on later ones.
         private void Protect(Working b, int filled)
         {
+            int open = filled - b.Protected;
             try
             {
                 if (b.StopOrder == null)
@@ -444,45 +530,126 @@ namespace NinjaTrader.NinjaScript.AddOns
                         TimeInForce.Gtc, filled, b.Target, 0, oco, OrderName(b.ClientId, 'T'), NinjaTrader.Core.Globals.MaxDate, null);
                     b.Account.Submit(new[] { b.StopOrder, b.TargetOrder });
                 }
-                else if (!Order.IsTerminalState(b.StopOrder.OrderState) && !Order.IsTerminalState(b.TargetOrder.OrderState))
+                else if (Live(b.StopOrder) && Live(b.TargetOrder))
                 {
                     // Account.Change reads QuantityChanged; setting Quantity does nothing
                     b.StopOrder.QuantityChanged = filled;
                     b.TargetOrder.QuantityChanged = filled;
                     b.Account.Change(new[] { b.StopOrder, b.TargetOrder });
+                    b.ResizedAt = DateTime.UtcNow;
                 }
                 else
                 {
-                    FenrirLog.Alert("entry " + b.ClientId + " filled more after its stop or target closed: flattening " + b.Instrument.FullName);
-                    FlattenInstruments(b.Account, new[] { b.Instrument });
+                    b.Protected = filled;
+                    CloseExactly(b, open, "entry " + b.ClientId + " filled " + open + " more after its stop or target closed");
+                    return;
                 }
                 b.Protected = filled;
             }
             catch (Exception e)
             {
-                FenrirLog.Alert("could not protect " + b.ClientId + " (" + e.Message + "): flattening " + b.Instrument.FullName);
-                FlattenInstruments(b.Account, new[] { b.Instrument });
+                b.Protected = filled;
+                FenrirLog.Alert("could not protect " + b.ClientId + " (" + e.Message + ")");
+                CloseExactly(b, open, "unprotected fill of " + b.ClientId);
             }
         }
 
-        // NinjaTrader's Flatten cancels the instrument's working orders and closes its position. Sent
-        // again while that close is still in flight it might close twice, so Fenrir flattens one
-        // account and instrument at most once per 5 s.
-        private bool FlattenInstruments(Account a, IEnumerable<Instrument> instruments)
+        // A market exit for exactly qty: whatever else is working, it cannot close more than that.
+        // If even that fails, the instrument is flattened.
+        private void CloseExactly(Working b, int qty, string why)
         {
-            DateTime now = DateTime.UtcNow;
-            List<Instrument> due = new List<Instrument>();
-            foreach (Instrument i in instruments)
+            if (qty <= 0) return;
+            b.Closed += qty;
+            FenrirLog.Alert(why + ": closing " + qty + " " + b.Instrument.FullName + " on " + b.Account.Name + " at market");
+            try
             {
-                string key = a.Name + "|" + i.FullName;
-                DateTime last;
-                if (lastFlatten.TryGetValue(key, out last) && now - last < FlattenQuiet) continue;
-                lastFlatten[key] = now;
-                due.Add(i);
+                Order exit = b.Account.CreateOrder(b.Instrument, b.Long ? OrderAction.Sell : OrderAction.BuyToCover,
+                    OrderType.Market, OrderEntry.Automated, TimeInForce.Day, qty, 0, 0, string.Empty, "Fenrir close",
+                    NinjaTrader.Core.Globals.MaxDate, null);
+                b.Account.Submit(new[] { exit });
             }
-            if (due.Count == 0) return false;
-            a.Flatten(due);
-            return true;
+            catch (Exception e)
+            {
+                FenrirLog.Alert("market exit failed (" + e.Message + "): flattening " + b.Instrument.FullName);
+                RequestFlat(b.Account, b.Instrument, false);
+            }
+        }
+
+        // Flattens the account's instrument now and keeps at it, every sweep, until NinjaTrader shows
+        // it flat; brackets working there stop being protected and their later fills are closed.
+        // True when this starts a new request. Throws if NinjaTrader refuses the first attempt (the
+        // sweep still retries).
+        private bool RequestFlat(Account a, Instrument i, bool everything)
+        {
+            foreach (Working b in brackets.Values)
+                if (b.Account == a && b.Instrument.FullName == i.FullName) b.Closing = true;
+            string key = Key(a, i);
+            FlatRequest r;
+            bool added = !mustBeFlat.TryGetValue(key, out r);
+            if (added)
+            {
+                r = new FlatRequest { Account = a, Instrument = i };
+                mustBeFlat[key] = r;
+            }
+            r.Everything |= everything;
+            if (Advance(r) && added) mustBeFlat.Remove(key);
+            return added;
+        }
+
+        // One step toward flat; true once there is no position and nothing left to cancel.
+        // NinjaTrader's Flatten cancels the instrument's working orders and closes its position. It is
+        // never sent while a close is already working there (a market order on the reducing side that
+        // is not a Fenrir entry) or in the grace after the last one, so a close in flight is never
+        // sent twice.
+        private bool Advance(FlatRequest r)
+        {
+            int held = Held(r.Account, r.Instrument);
+            List<Order> working = Snapshot(r.Account.Orders)
+                .Where(o => o.Instrument.FullName == r.Instrument.FullName && !Order.IsTerminalState(o.OrderState)).ToList();
+            bool closing = held != 0 && working.Any(o => o.OrderType == OrderType.Market && Role(o.Name) != "entry"
+                && (held > 0) == (o.OrderAction == OrderAction.Sell || o.OrderAction == OrderAction.SellShort));
+            bool leftovers = working.Any(o => Live(o) && (r.Everything || ClientId(o.Name) != null));
+            if (held == 0 && !leftovers) return true;
+            if (closing || DateTime.UtcNow < r.GraceUntil) return false;
+            r.Tries++;
+            if (r.Tries == 5 || r.Tries % 30 == 0)
+                FenrirLog.Alert(r.Instrument.FullName + " on " + r.Account.Name + " still not flat after " + r.Tries + " flatten attempts");
+            try
+            {
+                r.Account.Flatten(new[] { r.Instrument });
+            }
+            catch (Exception)
+            {
+                r.GraceUntil = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Min(r.Tries, 30)); // no retry storm
+                throw;
+            }
+            r.GraceUntil = DateTime.UtcNow + CloseGrace;
+            return false;
+        }
+
+        // signed position on one instrument
+        private static int Held(Account a, Instrument i)
+        {
+            Position p = Snapshot(a.Positions).FirstOrDefault(x => x.Instrument.FullName == i.FullName);
+            if (p == null) return 0;
+            return p.MarketPosition == MarketPosition.Long ? p.Quantity : p.MarketPosition == MarketPosition.Short ? -p.Quantity : 0;
+        }
+
+        // working and not already on its way out
+        private static bool Live(Order o)
+        {
+            return !Order.IsTerminalState(o.OrderState) && o.OrderState != OrderState.CancelPending
+                && o.OrderState != OrderState.CancelSubmitted;
+        }
+
+        private static bool Filled(Order o)
+        {
+            return o != null && (o.OrderState == OrderState.Filled || o.OrderState == OrderState.PartFilled);
+        }
+
+        private static string Key(Account a, Instrument i)
+        {
+            return a.Name + "|" + i.FullName;
         }
 
         private static Dictionary<string, object> Ack(bool accepted, bool duplicate, string error)

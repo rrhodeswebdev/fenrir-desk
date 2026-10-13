@@ -36,6 +36,8 @@ Copy `addon\fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.
 
 Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the last 7 days, so a request Fenrir retries after a NinjaTrader restart is still answered `duplicate` instead of placed twice. Leave it alone.
 
+Don't recompile (F5) or restart NinjaTrader while Fenrir has an entry filling: the add-on keeps its brackets in memory, so a recompile in that second leaves the rest of that fill without its stop until Fenrir reconciles.
+
 Restart NinjaTrader. **New → NinjaScript Output** shows `Fenrir: listening on port 8123`.
 
 ## 3. Allow the port (PowerShell as Administrator)

@@ -82,14 +82,24 @@ def test_compose_overrides_not_writable(name):
 
 
 @pytest.mark.parametrize(
-    "path", [".claude/settings.json", ".git/config", ".git/commondir", ".git/hooks/pre-commit"]
+    "path",
+    [
+        ".claude/settings.json",
+        ".git/config",
+        ".git/commondir",
+        ".git/hooks/pre-commit",
+        "Dockerfile.dockerignore",
+        ".dockerignore",
+    ],
 )
 def test_host_read_paths_not_writable(path):
     with pytest.raises(OSError):
         (APP / path).write_text("x\n")
 
 
-@pytest.mark.parametrize("name", [".git", ".claude", ".env", "compose.yaml"])
+@pytest.mark.parametrize(
+    "name", [".git", ".claude", ".env", "compose.yaml", "Dockerfile.dockerignore"]
+)
 def test_mount_points_cannot_be_renamed(name):
     with pytest.raises(OSError):
         (APP / name).rename(APP / f"{name}.moved")

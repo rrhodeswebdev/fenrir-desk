@@ -186,3 +186,26 @@ def test_as_user_takes_env_and_ids_from_passwd(monkeypatch):
         "SHELL": "/bin/zsh",
     }
     assert kwargs == {"user": 1000, "group": 1001, "extra_groups": []}
+
+
+def test_nested_git_lists_every_git_but_the_root_ones(tmp_path):
+    (tmp_path / ".git" / "sub" / ".git").mkdir(parents=True)  # the read-only repo .git
+    (tmp_path / ".claude" / "worktrees" / "w").mkdir(parents=True)  # read-only too
+    (tmp_path / ".claude" / "worktrees" / "w" / ".git").write_text("gitdir: x\n")
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / ".git").write_text("gitdir: ../data/x\n")  # a gitfile
+    (tmp_path / "web" / "a" / ".git" / "inner" / ".git").mkdir(parents=True)  # not descended
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / ".git").symlink_to(tmp_path / "strategies")  # never followed
+    (tmp_path / "data" / "link").symlink_to(tmp_path / "web")
+    assert isolation.nested_git(tmp_path) == ["data/.git", "strategies/.git", "web/a/.git"]
+    assert isolation.nested_git(tmp_path / "strategies") == []
+
+
+def test_nested_git_only_in_the_image(tmp_path, monkeypatch):
+    (tmp_path / "x" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(isolation, "APP_ROOT", tmp_path)
+    monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
+    assert isolation.nested_git_in_image() == []
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    assert isolation.nested_git_in_image() == ["x/.git"]

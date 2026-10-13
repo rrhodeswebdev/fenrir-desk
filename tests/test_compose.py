@@ -27,11 +27,21 @@ OVERRIDES = (
 )
 
 
+HOST_READ = (
+    ".git",
+    ".claude",
+    "compose.yaml",
+    "Dockerfile",
+    ".dockerignore",
+    "Dockerfile.dockerignore",
+)
+
+
 def test_host_read_files_mounted_read_only_over_the_repo():
     volumes = SVC["volumes"]
     assert ".:/app" in volumes
     # .git whole (#185): a writable .git/commondir redirects the host git's config and hooks
-    for path in (".git", ".claude", "compose.yaml", "Dockerfile", ".dockerignore"):
+    for path in HOST_READ:
         assert f"./{path}:/app/{path}:ro" in volumes
     assert not [v for v in volumes if v.startswith("./.git/")]
 
@@ -76,6 +86,13 @@ def test_web_build_gets_brand_assets():
     assert re.search(r"^COPY assets/brand/ assets/brand/$", DOCKERFILE, re.M)
     ignore = (ROOT / ".dockerignore").read_text().split()
     assert "!assets/brand" in ignore
+
+
+def test_buildkit_ignore_file_is_the_same_allowlist():
+    # BuildKit prefers Dockerfile.dockerignore; an empty or different one would widen the context
+    legacy = (ROOT / ".dockerignore").read_bytes()
+    assert (ROOT / "Dockerfile.dockerignore").read_bytes() == legacy
+    assert legacy.splitlines()[2] == b"*"
 
 
 def test_image_isolation_env():

@@ -7,6 +7,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from fenrir.rules.loader import list_accounts
+from fenrir.server import isolation
 from fenrir.server.app import create_app
 from fenrir.server.auth import SESSION_COOKIE
 from fenrir.settings import Settings, parse_env_text
@@ -59,6 +60,7 @@ def test_get_masks_secrets_and_reads_the_file(env):
         "holdout_months": 6,
         "safety_margin_pct": 80.0,
         "stale_seconds": 180,
+        "nested_git": [],
     }
     assert LSE not in r.text and TOKEN not in r.text
 
@@ -66,6 +68,7 @@ def test_get_masks_secrets_and_reads_the_file(env):
 def test_masks_sent_back_leave_secrets_unchanged(env):
     client, env_file, _ = env
     page = client.get("/api/settings").json()
+    del page["nested_git"]  # reported, not a setting
     r = client.put("/api/settings", json=page | {"stale_seconds": 30}, headers=WRITE)
     assert r.status_code == 200 and r.json()["stale_seconds"] == 30
     assert LSE not in r.text and TOKEN not in r.text
@@ -151,6 +154,19 @@ def test_a_symlinked_env_file_is_replaced_not_written_through(env, tmp_path):
     assert client.put("/api/settings", json={"stale_seconds": 30}, headers=WRITE).status_code == 200
     assert target.read_text() == "untouched\n"
     assert not env_file.is_symlink()
+
+
+def test_settings_report_a_nested_git_in_the_image(env, tmp_path, monkeypatch):
+    client, _, _ = env
+    (tmp_path / "app" / "strategies").mkdir(parents=True)
+    (tmp_path / "app" / "strategies" / ".git").write_text("gitdir: ../data/x\n")
+    monkeypatch.setattr(isolation, "APP_ROOT", tmp_path / "app")
+    assert client.get("/api/settings").json()["nested_git"] == []  # natively: not checked
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    assert client.get("/api/settings").json()["nested_git"] == ["strategies/.git"]
+    r = client.put("/api/settings", json={"stale_seconds": 30}, headers=WRITE)
+    assert r.json()["nested_git"] == ["strategies/.git"]
+    assert client.put("/api/settings", json={"nested_git": []}, headers=WRITE).status_code == 422
 
 
 def test_accounts_default_for_every_rules_account(env):

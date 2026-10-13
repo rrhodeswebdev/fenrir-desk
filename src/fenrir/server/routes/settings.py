@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
 from fenrir.rules.loader import list_accounts
+from fenrir.server.isolation import nested_git_in_image
 from fenrir.settings import (
     env_file_path,
     mask_secret,
@@ -111,9 +112,11 @@ def _read_env(path: Path | None) -> str:
 
 def _settings_view(text: str) -> dict:
     try:
-        return view(parse_env_text(text))
+        shown = view(parse_env_text(text))
     except ValueError as e:  # a bad value typed into the file by hand: name it
         raise HTTPException(status_code=500, detail=f"{_env_file()}: {e}") from e
+    # shortcut: async PUT walks /app on the event loop; fine for a repo, thread it if it grows
+    return {**shown, "nested_git": nested_git_in_image()}
 
 
 @router.get("")

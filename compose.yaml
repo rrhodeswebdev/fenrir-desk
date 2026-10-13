@@ -15,6 +15,8 @@ services:
       - ./compose.yaml:/app/compose.yaml:ro
       - ./Dockerfile:/app/Dockerfile:ro
       - ./.dockerignore:/app/.dockerignore:ro
+      # BuildKit reads this instead of .dockerignore when it exists, even empty
+      - ./Dockerfile.dockerignore:/app/Dockerfile.dockerignore:ro
       # the host's docker compose reads these from the project dir; Docker creates them empty
       - ./docker/empty:/app/.env:ro
       - ./docker/empty:/app/compose.override.yaml:ro

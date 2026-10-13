@@ -19,8 +19,10 @@ export type Settings = {
   holdout_months: number
   safety_margin_pct: number
   stale_seconds: number
+  /** In Docker: `.git` entries the terminal planted below the repo root (#184). */
+  nested_git: string[]
 }
-type Key = keyof Settings
+type Key = Exclude<keyof Settings, 'nested_git'>
 /** `GET /api/settings/accounts`: account id → the user's own choices. */
 export type Choices = Record<string, { eval_price: number; dll_on: boolean }>
 
@@ -259,6 +261,11 @@ function SettingsPage() {
           <h2 id="settings-env" className="mb-4 text-ink">
             Secrets and limits
           </h2>
+          {settings.data?.nested_git.length ? (
+            <p role="alert" className="mb-6 max-w-[72ch] border border-ember p-4 text-ember">
+              The terminal left a .git in the repo: {settings.data.nested_git.join(', ')}. Git, a git-aware prompt or an editor on this machine would run its config there. Delete it before running git; from the repo root, <code>find . -name .git -not -path ./.git</code> must print nothing.
+            </p>
+          ) : null}
           {settings.data ? <SettingsForm server={settings.data} /> : state(settings)}
         </section>
         <section aria-labelledby="settings-accounts">

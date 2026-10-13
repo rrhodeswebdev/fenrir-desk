@@ -18,7 +18,7 @@ from uvicorn.protocols.utils import ClientDisconnected
 
 from fenrir.server import ptyproc
 from fenrir.server.auth import check_ws
-from fenrir.server.isolation import as_user, isolation_problems
+from fenrir.server.isolation import NESTED_GIT, as_user, isolation_problems, nested_git_in_image
 from fenrir.server.terminal import Input, Resize, child_env, parse_message, shell_argv
 
 log = logging.getLogger(__name__)
@@ -100,6 +100,8 @@ async def terminal_ws(ws: WebSocket) -> None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:  # a second cancel must not skip killing the shell
             await pty.close()
+            if nested := await asyncio.to_thread(nested_git_in_image):
+                log.warning(NESTED_GIT, ", ".join(nested))
         for e in results:  # a send to a gone client raises; anything else is a bug
             if isinstance(e, Exception) and not isinstance(e, GONE):
                 log.error("terminal session failed", exc_info=e)

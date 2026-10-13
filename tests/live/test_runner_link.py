@@ -1,7 +1,7 @@
 """22.3: link loss, reconciliation with NinjaTrader, resolve and the restart replay."""
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, bar, make_rules
@@ -431,3 +431,39 @@ def test_replay_books_every_journalled_fill_whatever_the_last_read():
     s = replace(ready(sim(), at("09:30")), read_at=at("09:40").ts)
     r = core.replay(s, [("fill", fill(1, 20000.0, at("09:31").ts))])
     assert r.position.qty == 1 and r.read_at == s.read_at
+
+
+def test_a_fill_buffered_over_the_day_roll_still_rolls_the_day():
+    """A fill NinjaTrader's book already holds is not booked, but it still closes the last day."""
+    s = ready(sim(), at("15:00"))
+    read = at("09:31", D2).ts
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), (), read)
+    s, effects = core.on_fill(s, fill(1, 20000.0, read - timedelta(seconds=1)))
+    assert s.acct.day == D2 and s.position == core.FLAT and "fill" in kinds(effects)
+
+
+def test_a_fill_buffered_during_the_read_still_counts_toward_the_fill_flatten_ids():
+    """Live and a replay of the same journalled fills give the fill Flatten the same id."""
+    s = ready(sim(), at("09:30"))
+    read = at("09:31").ts
+    book = [order("stop", "sell", 1, 19990.0), order("target", "sell", 1, 20020.0, oid="o2")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, [held(1)], book, read)
+    rows = [
+        fill(1, 20000.0, read - timedelta(seconds=1)),
+        fill(-2, 20005.0, read + timedelta(seconds=1)),
+    ]
+    for f in rows:  # the entry, already in the book; then a reversal with no known stop
+        s, effects = core.on_fill(s, f)
+    [flatten] = sends(effects)
+    expected = core.client_id("Sim101", datetime.fromisoformat(rows[1]["ts"]), "f2", Flatten())
+    assert flatten.client_id == expected
+    r = core.replay(core.start(sim(), at("09:30").ts)[0], [("fill", f) for f in rows])
+    assert r.exiting == expected and len(r.fills) == len(s.fills) == 2
+
+
+def test_a_buffered_qty_0_fill_is_not_counted_as_a_replay_never_counts_it():
+    s = ready(sim(), at("09:30"))
+    read = at("09:31").ts
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), (), read)
+    s, effects = core.on_fill(s, fill(0, 20000.0, read - timedelta(seconds=1)))
+    assert s.fills == () and kinds(effects) == ["fill", "alert"]

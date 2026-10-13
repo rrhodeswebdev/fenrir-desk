@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 from starlette.concurrency import run_in_threadpool
 
 from fenrir.backtest.cache import list_reports
@@ -49,14 +49,14 @@ class ArmBody(BaseModel):
     contract: str
     mode: Mode
     phase: Phase
-    confirm: bool = False
+    confirm: StrictBool = False  # only true confirms a live arm: no "yes" or 1
     # NinjaTrader balances at phase start and the peak so far (DEC-4a), pinned on `armed`
     start_balance: float | None = Field(None, gt=0)
     peak_balance: float | None = Field(None, gt=0)
     # a live confirm echoes these from the needs_confirmation summary (what the user saw)
     strategy_hash: str | None = None
     rules_hash: str | None = None
-    dll_on: bool | None = None
+    dll_on: StrictBool | None = None
 
     @model_validator(mode="after")
     def _balances(self) -> "ArmBody":

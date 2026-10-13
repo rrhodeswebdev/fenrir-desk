@@ -218,6 +218,66 @@ namespace NinjaTrader.NinjaScript.AddOns
             return Ack(true, false, null);
         }
 
+        public Dictionary<string, object> Flatten(Dictionary<string, object> body)
+        {
+            return Call(() =>
+            {
+                string cid;
+                Account account;
+                Dictionary<string, object> refused = Check(body, true, out cid, out account);
+                if (refused != null) return refused;
+                Claim(cid);
+                FlattenAccount(account, false);
+                return Ack(true, false, null);
+            });
+        }
+
+        public Dictionary<string, object> Cancel(Dictionary<string, object> body)
+        {
+            return Call(() =>
+            {
+                string cid;
+                Account account;
+                Dictionary<string, object> refused = Check(body, true, out cid, out account);
+                if (refused != null) return refused;
+                string orderId = Str(body, "order_id");
+                Order order = Snapshot(account.Orders)
+                    .FirstOrDefault(o => o.OrderId == orderId && !Order.IsTerminalState(o.OrderState));
+                if (string.IsNullOrEmpty(orderId) || order == null) return Ack(false, false, "unknown order");
+                Claim(cid);
+                account.Cancel(new[] { order });
+                return Ack(true, false, null);
+            });
+        }
+
+        public Dictionary<string, object> FlattenAll(Dictionary<string, object> body)
+        {
+            return Call(() =>
+            {
+                string cid;
+                Account unused;
+                Dictionary<string, object> refused = Check(body, false, out cid, out unused);
+                if (refused != null) return refused;
+                Claim(cid);
+                foreach (Account a in Managed()) FlattenAccount(a, true);
+                return Ack(true, false, null);
+            });
+        }
+
+        // Closes whatever position is open now (nothing when flat) and cancels Fenrir's working orders
+        // (entry, stop, target), or with everything every working order, on those instruments.
+        // NinjaTrader's Flatten works per instrument and also cancels other working orders there.
+        private bool FlattenAccount(Account a, bool everything)
+        {
+            Dictionary<string, Instrument> instruments = new Dictionary<string, Instrument>();
+            foreach (Position p in Snapshot(a.Positions))
+                if (p.MarketPosition != MarketPosition.Flat) instruments[p.Instrument.FullName] = p.Instrument;
+            foreach (Order o in Snapshot(a.Orders))
+                if (!Order.IsTerminalState(o.OrderState) && (everything || ClientId(o.Name) != null))
+                    instruments[o.Instrument.FullName] = o.Instrument;
+            return instruments.Count > 0 && FlattenInstruments(a, instruments.Values);
+        }
+
         // Checks every POST shares. An unmanaged account is refused before the id is recorded, so a
         // retry after fixing managed_accounts is not a false duplicate.
         private Dictionary<string, object> Check(Dictionary<string, object> body, bool named, out string cid, out Account account)

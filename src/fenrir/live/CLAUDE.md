@@ -9,5 +9,5 @@ Runs armed strategies on live bars: decides per bar, checks limits, journals eve
 - Fills book the account like the backtest (`attempt._open`/`_close`/`_mark`); `test_live_fills_book_like_the_backtest` pins it. Dry runs never emit a `Send`.
 - Halts and pauses that must survive a restart are journalled as `"halt"` rows, which `start` restores; anything that lifts one in place (e.g. `resolve`) journals a row `start` understands, or the next restart brings it back.
 - Never add a CLI command that arms or disarms, and never write the `armed` table outside `arming.py` (SPEC: arming is user-only; the hub disarms only through `arming.delete_armed`, on the user's kill switch).
-- Not here: arm/disarm endpoints (server, plan 23); the add-on client (`src/fenrir/bridge/`); rule math (`src/fenrir/rules/`).
+- Not here: arm/disarm endpoints (`src/fenrir/server/routes/arming.py`); the add-on client (`src/fenrir/bridge/`); rule math (`src/fenrir/rules/`).
 - Tests: `tests/live/` (shared helpers in `tests/live/live_helpers.py`, imported by name).

@@ -26,6 +26,26 @@ def test_write_and_read_back(conn):
     )
 
 
+def test_a_new_db_appears_with_its_tables(tmp_path, monkeypatch):
+    """#179: a reader that sees the file never sees it without tables (first arm vs journal)."""
+    path = tmp_path / "private" / "fenrir.db"
+    seen = []
+    link = journal.os.link
+
+    def check(src, dst):
+        with sqlite3.connect(src) as c:
+            seen.append({r[0] for r in c.execute("SELECT name FROM sqlite_master")})
+        assert not path.exists()
+        link(src, dst)
+
+    monkeypatch.setattr(journal.os, "link", check)
+    journal.open_db(path).close()
+    assert {"journal", "armed"} <= seen[0]
+    assert [p.name for p in path.parent.iterdir()] == ["fenrir.db"]  # no temp file left
+    journal.open_db(path).close()  # an existing db is opened in place
+    assert len(seen) == 1
+
+
 def test_unknown_kind_is_rejected(conn):
     with pytest.raises(ValueError, match="kind"):
         journal.write(conn, datetime.now(UTC), "Sim101", "chatter", {})

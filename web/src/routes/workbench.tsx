@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query'
+import { queryOptions, useQuery } from '@tanstack/react-query'
 import { Link, createRoute } from '@tanstack/react-router'
 import { FitAddon } from '@xterm/addon-fit'
 import { Terminal } from '@xterm/xterm'
@@ -84,16 +84,19 @@ export type Latest = CompareRow & { created_at: string }
 export const latestPollMs = ({ error }: { error: unknown }): number | false =>
   error instanceof ApiError && error.status === 401 ? false : 3000
 
+// limit=1: the server reads only the newest-written report; the next poll is the retry
+export const latestQuery = queryOptions({
+  queryKey: ['backtests', 'results', { limit: 1 }],
+  queryFn: () => apiFetch<Latest[]>('/api/backtests/results?limit=1'),
+  refetchInterval: (query) => latestPollMs(query.state),
+  retry: false,
+})
+
 // as on Compare: hold-out muted, any microscalp flag Ember
 const flagged = (p: Latest['periods']['holdout'], i: number): boolean => i === FIGURES.length - 1 && (p?.microscalp_flags ?? 0) > 0
 
 function LatestReport() {
-  // shortcut: each poll reads every cached report on the server; add a newest-only endpoint if results/ grows large.
-  const q = useQuery({
-    queryKey: ['backtests', 'results'],
-    queryFn: () => apiFetch<Latest[]>('/api/backtests/results'),
-    refetchInterval: (query) => latestPollMs(query.state),
-  })
+  const q = useQuery(latestQuery)
   const latest = q.data?.[0]
   const error = pageError(q.error)
   return (

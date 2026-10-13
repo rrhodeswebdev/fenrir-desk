@@ -360,6 +360,22 @@ def test_a_corrupt_report_is_500_naming_the_file(settings):
         assert "corrupt cached report, delete it" in r.json()["detail"]
 
 
+def test_results_limit_reads_only_the_newest_written(settings):
+    old, new = ({**report(s, "a"), "key": k * 64} for s, k in (("old", "a"), ("new", "b")))
+    _write_reports(settings, old, new)
+    results = settings.data_dir / "results"
+    (results / f"{'c' * 64}.json").write_text("{")  # corrupt and oldest: never read
+    for k, ns in (("c", 1), ("a", 2), ("b", 3)):
+        os.utime(results / f"{k * 64}.json", ns=(ns, ns))
+    client = _app(settings)[1]
+    rows = client.get("/api/backtests/results?limit=1", headers=COOKIE).json()
+    assert [r["strategy"] for r in rows] == ["new"]
+    for bad in ("0", "101", "x"):
+        r = client.get(f"/api/backtests/results?limit={bad}", headers=COOKIE)
+        assert r.status_code == 422
+    assert client.get("/api/backtests/results", headers=COOKIE).status_code == 500  # reads all
+
+
 @pytest.mark.parametrize("kind", ["symlink", "fifo"])
 def test_a_planted_report_is_500_naming_it_without_leaking_or_hanging(settings, kind):
     # data/results is terminal-writable and the root server reads it (DEC-1)
@@ -370,7 +386,7 @@ def test_a_planted_report_is_500_naming_it_without_leaking_or_hanging(settings, 
     planted.parent.mkdir()
     planted.symlink_to(secret) if kind == "symlink" else os.mkfifo(planted)
     client = _app(settings)[1]
-    for path in ("results", f"results/{'b' * 64}", "compare?view=account"):
+    for path in ("results", "results?limit=1", f"results/{'b' * 64}", "compare?view=account"):
         r = client.get(f"/api/backtests/{path}", headers=COOKIE)
         assert r.status_code == 500 and f"{planted} is " in r.json()["detail"]
         assert "secret-0001" not in r.text

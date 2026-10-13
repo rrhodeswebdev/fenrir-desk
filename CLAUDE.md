@@ -100,6 +100,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `src/fenrir/data/` | LSE history pull, Parquet store, front-month bar loading, live bar building. Only `lse.py` knows LSE. |
 | `src/fenrir/backtest/` | Fill model, single-attempt fold, attempts across days, report JSON, grid expansion and result cache. |
 | `src/fenrir/bridge/` | Python side of the NinjaTrader add-on: instrument names, add-on client, reconciliation. |
+| `addon/` | NinjaTrader 8 add-on (C# NinjaScript): accounts, positions, orders and fills of the managed accounts over HTTP + WebSocket, 16:40 ET auto-flatten. |
 | `src/fenrir/live/` | Live runner: pure per-bar core (pre-trade check, safety margin, day roll, stale pause), SQLite trade journal and armed table (`<private_dir>/fenrir.db`), `LiveHub` shell run by the server lifespan with one step child per account, posting orders to the NinjaTrader add-on. |
 | `src/fenrir/server/` | FastAPI shell and its state: `create_app` (Host guard, launch link, SPA), session-cookie/Origin/CSRF auth, pure backtest-job state; PTY and routes arrive in plans 13–16. |
 | `src/fenrir/server/routes/` | One FastAPI router per `/api` area (`rules.py`, `data.py`: coverage, rollover, pull; `live.py`: runner status and journal; `arming.py`: arm and disarm, UI-only), registered in `create_app`. |

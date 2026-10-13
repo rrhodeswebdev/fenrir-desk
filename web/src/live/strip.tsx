@@ -54,20 +54,22 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
 export function SystemStrip({ status, failed }: { status: LiveStatus | undefined; failed: boolean }) {
   const now = useNow()
   const bar = status?.lse.last_bar_ts ?? null
+  const beat = status?.nt.last_heartbeat ?? null
   const alarm = status && alarmName(status.accounts)
   return (
     <>
       <Fact label="New York">
         <span className="font-display text-[20px] leading-none font-medium tracking-[0.04em]">{nyTime(now)}</span>
       </Fact>
-      <div role="group" aria-label="Connections" className="flex items-center gap-6 max-md:flex-wrap max-md:gap-4">
+      <div role="group" aria-label="Connections" className="flex flex-wrap items-center gap-x-6 gap-y-4 max-md:gap-4">
+        {/* A dash alone while the status is unknown; with it, a dash and what has not arrived yet. */}
         <Fact label="LSE feed">
           <span className="value">{bar ? nyTime(Date.parse(bar)) : '—'}</span>
           {status && <span className="label">{age(bar, now) ?? 'no bar yet'}</span>}
         </Fact>
         <Fact label="NinjaTrader">
-          <span className="value">{age(status?.nt.last_heartbeat ?? null, now) ?? '—'}</span>
-          <span className="label">heartbeat</span>
+          <span className="value">{age(beat, now) ?? '—'}</span>
+          {status && <span className="label">{beat ? 'heartbeat' : 'no heartbeat yet'}</span>}
         </Fact>
         <Fact label="Feed · Broker · Drift">
           {status ? (
@@ -108,7 +110,7 @@ export function KillSwitch({ status, pending, onKill }: { status: LiveStatus | u
             ))}
           </ul>
         ) : (
-          <p className="text-ember">The status did not load, so the counts are unknown. The kill switch still flattens and disarms everything.</p>
+          <p className="text-ember">The status cannot be read right now, so the counts are unknown. The kill switch still flattens and disarms everything.</p>
         )}
         <AlertDialogFooter className="mt-2">
           <AlertDialogAction variant="destructive" onClick={onKill}>

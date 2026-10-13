@@ -8,8 +8,7 @@ import type { LiveStatus } from '@/live/model'
 import { routeTree } from '@/router'
 import { statusPollMs } from './live'
 
-async function render(s?: LiveStatus) {
-  const client = new QueryClient()
+async function render(s?: LiveStatus, client = new QueryClient()) {
   if (s) client.setQueryData(['live', 'status'], s)
   const router = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/live'] }) })
   await router.load()
@@ -35,7 +34,7 @@ describe('live page', () => {
   it('names no account when none is in alarm, and says when nothing is armed', async () => {
     const html = await render(status({ accounts: [] }))
     expect(html).not.toContain('text-red')
-    expect(html).toContain('aria-label="Feed normal, broker idle, drift normal"')
+    expect(html).toContain('aria-label="Feed idle, broker idle, drift normal"')
     expect(html).toContain('No account is armed.')
   })
 
@@ -45,6 +44,18 @@ describe('live page', () => {
     const button = html.match(/<button[^>]*>Kill all<\/button>/)?.[0]
     expect(button).toBeDefined()
     expect(button).not.toContain('disabled=""')
+  })
+
+  it('never shows the last status as current once a read failed (500 or 401)', async () => {
+    for (const error of [new ApiError(500, 'boom'), new ApiError(401, '')]) {
+      const client = new QueryClient()
+      client.setQueryData(['live', 'status'], status({ accounts: [account({ account: 'LFE 0911', halted: true, halt_kind: 'reconcile' })] }))
+      client.getQueryCache().find({ queryKey: ['live', 'status'] })!.setState({ status: 'error', error })
+      const html = await render(undefined, client)
+      expect(html).toContain('Status unavailable')
+      expect(html).not.toContain('aria-label="Feed')
+      expect(html).not.toContain('Book · LFE 0911')
+    }
   })
 
   it('polls every 2 s through errors, but not after a 401', () => {

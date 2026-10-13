@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { type MutationState, useMutation, useMutationState, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createRoute } from '@tanstack/react-router'
 import { ApiError, apiFetch } from '@/api'
 import { Page } from '@/components/page'
-import { errorText, pageError } from '@/errorText'
-import { type KillResult, type LiveStatus, killText } from '@/live/model'
+import { pageError } from '@/errorText'
+import { KILL_TIMEOUT_MS, type KillResult, type LiveStatus, killErrorText, killText, nyTime } from '@/live/model'
 import { KillSwitch, SystemStrip } from '@/live/strip'
 import { rootRoute } from './root'
 
@@ -17,6 +17,10 @@ export const liveRoute = createRoute({
 export const statusPollMs = ({ error }: { error: unknown }): number | false =>
   error instanceof ApiError && error.status === 401 ? false : 2000
 
+// The kill lives in the mutation cache under this key, so leaving the page and coming back mid-kill
+// still shows it running (Kill all disabled) and then its answer.
+const killKey = ['live', 'kill']
+
 function LivePage() {
   const queryClient = useQueryClient()
   const status = useQuery({
@@ -26,40 +30,53 @@ function LivePage() {
     retry: false,
   })
   const kill = useMutation({
-    mutationFn: () => apiFetch<KillResult>('/api/live/kill', { method: 'POST' }),
+    mutationKey: killKey,
+    mutationFn: () => apiFetch<KillResult>('/api/live/kill', { method: 'POST', signal: AbortSignal.timeout(KILL_TIMEOUT_MS) }),
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['live'] }),
   })
-  // A failed refetch keeps the last status on screen, so the strip goes on showing it with the error below.
+  const last = useMutationState<MutationState<KillResult>>({ filters: { mutationKey: killKey } }).at(-1)
+  // When the last read failed the hub's state is unknown: never show the previous status as current.
+  const fresh = status.isError ? undefined : status.data
   const statusError = pageError(status.error)
   return (
     <Page
       title="Live"
       strip={
         <>
-          <SystemStrip status={status.data} failed={status.isError} />
-          <KillSwitch status={status.data} pending={kill.isPending} onKill={() => kill.mutate()} />
+          <SystemStrip status={fresh} failed={status.isError} />
+          <KillSwitch status={fresh} pending={last?.status === 'pending'} onKill={() => kill.mutate()} />
         </>
       }
     >
       <div className="grid gap-4">
-        {kill.isPending && <p role="status">Kill switch running: flattening, cancelling and disarming all…</p>}
-        {kill.data && (
-          <p role={kill.data.ok ? 'status' : 'alert'} className={kill.data.ok ? 'text-ink-2' : 'text-red'}>
-            {killText(kill.data)}
-          </p>
-        )}
-        {kill.error && (
-          <p role="alert" className="text-red">
-            Kill switch request failed ({errorText(kill.error)}). It may not have run: check NinjaTrader and press it again.
-          </p>
-        )}
+        {last && <KillLine run={last} />}
         {statusError && (
           <p role="alert" className="text-red">
             Status: {statusError}
           </p>
         )}
-        {status.data?.accounts.length === 0 && <p className="text-ink-3">No account is armed.</p>}
+        {fresh?.accounts.length === 0 && <p className="text-ink-3">No account is armed.</p>}
       </div>
     </Page>
+  )
+}
+
+/** The last kill: running, its answer, or its request error, stamped with the New York time it was pressed. */
+function KillLine({ run }: { run: MutationState<KillResult> }) {
+  const alarm = run.status === 'error' || (run.status === 'success' && !run.data?.ok)
+  const text =
+    run.status === 'pending'
+      ? 'Kill switch running: flattening, cancelling and disarming all…'
+      : run.status === 'error'
+        ? killErrorText(run.error)
+        : run.data
+          ? killText(run.data)
+          : null
+  if (text === null) return null
+  return (
+    <p role={alarm ? 'alert' : 'status'} className={alarm ? 'text-red' : 'text-ink-2'}>
+      <span className="mr-3 font-medium tracking-value">{nyTime(run.submittedAt)}</span>
+      {text}
+    </p>
   )
 }

@@ -1,6 +1,7 @@
 // Pure state for the Live page: the `GET /api/live/status` shape, the code-strip rules and the
 // most severe account (docs/contracts.md "Code strips", DESIGN.md "Code Strip").
 import type { Tone } from '@/components/state-text'
+import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
 export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach'
@@ -57,7 +58,9 @@ export type Cell = { name: string; state: Tone }
 /** Feed · Broker · Drift, shared by every account. Stale and drift pauses light these, never an account. */
 export function systemStrip(s: LiveStatus): Cell[] {
   const kinds = s.accounts.map((a) => a.halt_kind)
-  const feed: Tone = !s.lse.connected ? 'alarm' : kinds.includes('stale') ? 'caution' : 'normal'
+  // With nothing armed nothing reads the feed (as Broker): unlit, not an alarm to learn to ignore.
+  const feed: Tone =
+    s.accounts.length === 0 ? 'idle' : !s.lse.connected ? 'alarm' : kinds.includes('stale') ? 'caution' : 'normal'
   // A missed heartbeat reaches us as nt.connected false. Dry runs never use the broker.
   const broker: Tone = s.accounts.every((a) => a.mode === 'dry') ? 'idle' : s.nt.connected ? 'normal' : 'alarm'
   const drift: Tone = s.drift.ok ? 'normal' : 'caution'
@@ -134,18 +137,28 @@ export function age(ts: string | null, now: number): string | null {
   return `${Math.floor(s / 86400)}d`
 }
 
-/** The kill dialog's counts: armed accounts and the positions their runners hold. */
+/** The kill dialog's counts: armed accounts and the positions their runners hold. Dry-run positions are
+ * paper (NinjaTrader never had them, the flatten does not touch them), so they are counted apart. */
 export function killCounts(accounts: AccountStatus[]): string[] {
-  const open = accounts.filter((a) => (a.position?.qty ?? 0) !== 0).length
+  const holding = accounts.filter((a) => (a.position?.qty ?? 0) !== 0)
+  const open = holding.filter((a) => a.mode !== 'dry').length
+  const paper = holding.length - open
   const n = accounts.length
-  return [
-    `${n} ${n === 1 ? 'account' : 'accounts'} armed`,
-    open === 0 ? 'No open position' : `${open} open ${open === 1 ? 'position' : 'positions'}`,
-  ]
+  const positions = open === 0 ? 'No open position' : `${open} open ${open === 1 ? 'position' : 'positions'}`
+  return [`${n} ${n === 1 ? 'account' : 'accounts'} armed`, paper ? `${positions} · ${paper} paper (dry run)` : positions]
 }
 
 /** The kill switch's answer as text. `ok: false` is an alarm: some of it may have run already. */
 export const killText = (r: KillResult): string =>
   r.ok
     ? 'Kill switch ran: flattened and cancelled all, every account disarmed.'
-    : `Kill switch failed: ${r.error ?? 'no details'}. Accounts may already be disarmed or halted; check NinjaTrader for open positions and working orders.`
+    : `Kill switch failed: ${(r.error ?? 'no details').replace(/[.\s]+$/, '')}. Accounts may already be disarmed or halted; check NinjaTrader for open positions and working orders.`
+
+/** How long the page waits for the kill's answer: the hub lock (up to about 60 s) plus a hung post (about 25 s). */
+export const KILL_TIMEOUT_MS = 90_000
+
+/** The kill request failed (no answer in time, a refused or non-200 request): it may not have run. */
+export const killErrorText = (e: unknown): string =>
+  e instanceof DOMException && e.name === 'TimeoutError'
+    ? `Kill switch got no answer in ${KILL_TIMEOUT_MS / 1000} s. It may not have run: check NinjaTrader and press it again.`
+    : `Kill switch request failed (${errorText(e)}). It may not have run: check NinjaTrader and press it again.`

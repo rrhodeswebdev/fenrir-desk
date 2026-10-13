@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
+import { ApiError } from '@/api'
 import { account, status } from './fixtures'
 import {
   type LiveStatus,
+  KILL_TIMEOUT_MS,
   age,
   alarmName,
+  killErrorText,
   killCounts,
   killText,
   mostSevere,
@@ -30,6 +33,13 @@ describe('system strip', () => {
     expect(states(status({ accounts: [account(), stale] }))[0]).toBe('caution')
     // a lost feed outranks the pause it causes
     expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [stale] }))[0]).toBe('alarm')
+    // a dry run steps on live bars too
+    expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [account({ mode: 'dry' })] }))[0]).toBe('alarm')
+  })
+
+  it('Feed: idle with nothing armed, as nothing reads it', () => {
+    expect(states(status({ lse: { connected: false, last_bar_ts: null }, accounts: [] }))[0]).toBe('idle')
+    expect(states(status({ accounts: [] }))[0]).toBe('idle')
   })
 
   it('Broker: alarm when NinjaTrader is not connected, idle while every account is a dry run', () => {
@@ -143,10 +153,30 @@ describe('kill switch', () => {
     expect(killCounts([])).toEqual(['0 accounts armed', 'No open position'])
   })
 
+  it('counts dry-run positions apart, as paper: the flatten never touches them', () => {
+    const paper = account({ mode: 'dry', position: { qty: 1, entry: 1, stop: 0, target: 2 } })
+    const real = account({ mode: 'sim', position: { qty: -2, entry: 1, stop: 2, target: 0 } })
+    expect(killCounts([paper])).toEqual(['1 account armed', 'No open position · 1 paper (dry run)'])
+    expect(killCounts([real, paper, paper])).toEqual(['3 accounts armed', '1 open position · 2 paper (dry run)'])
+  })
+
   it('reads a failure as such, warning that part of it may have run', () => {
     expect(killText({ ok: true, error: null })).toMatch(/^Kill switch ran/)
     const text = killText({ ok: false, error: 'flatten all failed: ConnectError' })
     expect(text).toMatch(/^Kill switch failed: flatten all failed: ConnectError\./)
     expect(text).toContain('may already be disarmed or halted')
+    // the server's own full stop is not doubled
+    expect(killText({ ok: false, error: 'disarm failed: database is locked.' })).toMatch(/^Kill switch failed: disarm failed: database is locked\. Accounts/)
+  })
+
+  it('reads a failed request as "may not have run", a timeout as no answer', () => {
+    expect(killErrorText(new ApiError(502, 'Bad Gateway'))).toBe(
+      'Kill switch request failed (502: Bad Gateway). It may not have run: check NinjaTrader and press it again.',
+    )
+    expect(killErrorText(new TypeError('Failed to fetch'))).toMatch(/^Kill switch request failed \(Failed to fetch\)\. It may not have run/)
+    expect(killErrorText(new DOMException('signal timed out', 'TimeoutError'))).toBe(
+      'Kill switch got no answer in 90 s. It may not have run: check NinjaTrader and press it again.',
+    )
+    expect(KILL_TIMEOUT_MS).toBe(90_000)
   })
 })

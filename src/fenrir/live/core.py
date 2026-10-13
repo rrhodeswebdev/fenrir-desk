@@ -1107,9 +1107,10 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     elif s.setup.armed.mode != "dry" and (
         phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
     ):
-        # NinjaTrader's balance at the close (DEC-4a); a balance at or below 0 then is no close
-        # (#220): its last figures above 0 may be hours old
-        if s.nt and not s.no_balance:
+        # NinjaTrader's balance at the close (DEC-4a); during a balance at or below 0 (#220), its
+        # last one above 0, so the floor is never looser than from those figures, though they
+        # may be hours old: that close is not taken (below)
+        if s.nt:
             raised = _raised(s.setup, acct, s.nt.balance)
             equity = raised.balance + raised.open_pnl
             base = s.setup.start.phase_start
@@ -1131,10 +1132,14 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 acct = _raised(s.setup, acct, base + acct.balance)
             else:
                 acct = raised
+        if s.nt and not s.no_balance:
             out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
         elif s.setup.start:  # none yet, lost with the link, or 0: this close is never taken
             s, more = halt(s, NO_CLOSE)
             out += more
+            # the floor still trails the app's own closing balance, as under the gap, so an open
+            # loss held over the close still breaches; no "peak" row: a restart asks again
+            acct = _raised(s.setup, acct, s.setup.start.phase_start + acct.balance)
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40

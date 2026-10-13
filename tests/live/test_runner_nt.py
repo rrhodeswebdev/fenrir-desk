@@ -547,14 +547,47 @@ def test_a_lost_link_clears_the_figures_condition():
 
 def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():
     """#220 review: a balance at or below 0 at the session close is no close. The last figures
-    above 0 may be hours old, so the roll raises nothing from them and halts with "confirm
-    balances", as with no figures at all."""
-    s = running(sim(), account(50_400.0))
+    above 0 may be hours old, so the roll journals no "peak" row and halts with "confirm
+    balances", as with no figures at all. Its floor is never looser than main's, which raised it
+    from those last figures (51,000 here: above the app's own balance, so they set it)."""
+    s = running(sim(), account(51_000.0))
     s, _ = core.on_account(s, account(0.0), T.ts)
     s, effects = core.on_bar(s, at("09:30", D2))
     assert s.halted == core.NO_CLOSE and peaks(effects) == []
-    assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0)
+    assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
     assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}  # still 0
+
+
+@pytest.mark.parametrize("lost", ["zero", "lost link"])
+def test_an_open_loss_held_over_a_close_taken_from_no_figures_still_breaches(lost):
+    """#220 review (round 3, P5): a long held unverified over the close at -1,500 open, the app
+    and NinjaTrader at 52,200; then NinjaTrader reports a zero (or the link drops again) before
+    the reconcile. The roll takes no close, but raises the floor from the app's own closing
+    balance (200, as the gap branch does) with no "peak" row, so the loss running to equity 100
+    breaches and is flattened, as on main; before, the floor stayed at the app's -1,300."""
+    s, close = held_over_the_close(2200.0, 1500.0, 52_200.0, -1500.0)
+    if lost == "zero":
+        s, _ = core.on_account(s, account(0.0), T.ts)
+    else:
+        s, _ = core.on_disconnect(s, "stream closed")
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    assert s.halted == core.NO_CLOSE and peaks(effects) == [] and sends(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    low = close - 30.0  # equity 100
+    s, effects = core.on_bar(s, bar("09:31", close, close, low, low, D2))
+    assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
+    assert sends(effects) == [Flatten]
+
+
+def test_a_zero_at_the_roll_replaces_a_day_halt_with_confirm_balances():
+    """#220 review (round 3, mutant D): under a safety day halt (lifted by this very roll), a
+    zero at the close is still no close: the new day must not trade on it."""
+    s = running(sim(daily_loss=1000.0), account(today=-850.0))
+    assert s.halt_kind == "safety" and s.halt_day is not None
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert (s.halted, s.halt_kind, s.halt_day) == (core.NO_CLOSE, None, None)
+    assert peaks(effects) == []
 
 
 def test_a_zero_balance_is_listed_after_warming_up():

@@ -1085,7 +1085,12 @@ async def test_a_tick_reconcile_takes_its_time_at_the_read(
     assert hub.states["Sim101"].position.qty == 1
 
 
-async def test_start_follows_the_addon_stream(hub, armed):
+async def test_start_follows_the_addon_stream(hub, armed, monkeypatch):
+    async def no_feed(settings, contracts, **kw):  # not this test's subject: no LSE (#79)
+        await asyncio.sleep(3600)
+        yield
+
+    monkeypatch.setattr(service, "stream_bars", no_feed)
     hub.start()
     await until(lambda: hub.nt_connected)
 

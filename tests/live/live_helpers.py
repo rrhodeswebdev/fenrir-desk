@@ -17,7 +17,7 @@ from fenrir.core.instruments import (
     load_instruments,
     read_instruments,
 )
-from fenrir.data.store import SERIES, write_bars
+from fenrir.data.store import SERIES, expected_days, write_bars
 from fenrir.live import core
 from fenrir.live.arming import Armed
 from fenrir.live.core import DayStart, Setup, Start
@@ -129,5 +129,8 @@ def stored(data_dir: Path) -> None:
             day += timedelta(days=1)
         for (series, c), rows in bars.items():
             write_bars(built, series, c, rows)
+        # the CME calendar's first build takes ~2 s; done here, never in a warm-up's thread
+        # while a test's fake add-on answers with 0.2 s timeouts
+        expected_days(STORED[0], STORED[0] + timedelta(days=7))
         _store.append(built)
     shutil.copytree(_store[0] / "bars", data_dir / "bars", dirs_exist_ok=True)

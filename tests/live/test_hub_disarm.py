@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
-from live_helpers import ARMED_AT, pinned, reconciled
+from live_helpers import ARMED_AT, pinned, reconciled, stored
 
 from fenrir.bridge.client import Ack, AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, running
@@ -78,7 +78,9 @@ def flatten_failed(error: str) -> str:
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    s = Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    stored(s.data_dir)  # warm-up (#79) needs the store up to the last trading day
+    return s
 
 
 @pytest.fixture
@@ -496,6 +498,8 @@ async def test_a_kept_row_waiting_for_ninjatrader_shows_the_reason_and_loads_not
         assert reasons["Sim102"].startswith("waiting for NinjaTrader")
         await hub.handle_stream(account("Sim101"))
         assert hub.states["Sim101"].halted == why and hub.children == {}
+        [acc] = [a for a in hub.status()["accounts"] if a["account"] == "Sim101"]
+        assert acc["conditions"] == [{"kind": None, "reason": why}]  # no strategy: not warming
         assert [r.payload for r in rows(conn, "halt")] == [
             {"reason": why, "kind": None, "until": None}
         ]

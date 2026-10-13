@@ -6,6 +6,7 @@ import lse
 import pytest
 
 from fenrir.core.bars import Bar
+from fenrir.core.sessions import NY
 from fenrir.data.live import (
     LAG_GRACE,
     MAX_AHEAD,
@@ -22,9 +23,9 @@ def utc(h: int, m: int, s: float = 0) -> datetime:
     return datetime(2026, 10, 8, h, m, tzinfo=UTC) + timedelta(seconds=s)
 
 
-def collect(source, clock, poll: float = 0.01) -> list[Bar]:
+def collect(source, clock, poll: float = 0.01, on_live=None) -> list[Bar]:
     async def go():
-        return [b async for b in _bars_from(source, lambda: clock[0], poll=poll)]
+        return [b async for b in _bars_from(source, lambda: clock[0], poll=poll, on_live=on_live)]
 
     return asyncio.run(go())
 
@@ -138,6 +139,153 @@ def test_bars_from_reports_dropped_ticks_when_the_stream_ends(caplog):
     assert warnings == ["live ticks dropped in the last minute: 2 ahead of the clock"]
 
 
+# --- _bars_from: replayed history (#79) ---
+
+
+def replayed(ts: datetime, price: float, contract: str = "NQZ26") -> Tick:
+    return Tick(ts, price, 1, contract, replay=True)
+
+
+def test_replayed_ticks_build_bars_by_tick_time_not_the_wall_clock():
+    clock = [utc(15, 0)]  # the replay runs long after its minutes ended
+
+    async def source():
+        yield replayed(utc(14, 30, 5), 100.0)
+        await asyncio.sleep(0.05)  # a pause mid-replay closes nothing on the wall clock
+        yield replayed(utc(14, 30, 50), 102.0)
+        yield replayed(utc(14, 31, 10), 101.0)  # a new minute closes the last
+        yield replayed(utc(14, 32, 1), 99.0)
+
+    assert collect(source(), clock) == [
+        Bar(utc(14, 30), 100.0, 102.0, 100.0, 102.0, 2, "NQZ26"),
+        Bar(utc(14, 31), 101.0, 101.0, 101.0, 101.0, 1, "NQZ26"),
+    ]  # 14:32 is still open when the stream ends: never a partial bar
+
+
+def test_the_first_live_tick_takes_over_the_replayed_minute():
+    clock = [utc(14, 31, 20)]
+    live: list[str] = []
+
+    async def source():
+        yield replayed(utc(14, 30, 5), 100.0)
+        yield replayed(utc(14, 31, 2), 101.0)  # the minute the replay ends in
+        yield Tick(utc(14, 31, 20), 103.0, 2, "NQZ26")  # live: continues the 14:31 bar
+        clock[0] = utc(14, 32) + LAG_GRACE
+
+    assert collect(source(), clock, on_live=live.append) == [
+        Bar(utc(14, 30), 100.0, 100.0, 100.0, 100.0, 1, "NQZ26"),
+        Bar(utc(14, 31), 101.0, 103.0, 101.0, 103.0, 3, "NQZ26"),
+    ]
+    assert live == ["NQZ26"]  # each live tick, never a replayed one
+
+
+def test_a_replayed_minute_before_the_first_live_tick_is_closed_by_it():
+    clock = [utc(14, 33, 1)]
+
+    async def source():
+        yield replayed(utc(14, 30, 5), 100.0)
+        yield Tick(utc(14, 33, 1), 103.0, 1, "NQZ26")
+        clock[0] = utc(14, 34) + LAG_GRACE
+
+    assert collect(source(), clock) == [
+        Bar(utc(14, 30), 100.0, 100.0, 100.0, 100.0, 1, "NQZ26"),
+        Bar(utc(14, 33), 103.0, 103.0, 103.0, 103.0, 1, "NQZ26"),
+    ]
+
+
+def test_a_replay_after_a_reconnect_fills_the_gap_and_repeats_no_bar():
+    # the SDK resubscribes with the same `start`: the day replays again from the open
+    clock = [utc(14, 30, 5)]
+
+    async def source():
+        yield Tick(utc(14, 30, 5), 100.0, 1, "NQZ26")
+        clock[0] = utc(14, 31) + LAG_GRACE
+        await asyncio.sleep(0.05)  # 14:30 closes on the wall clock; then the link drops
+        clock[0] = utc(14, 34, 30)
+        for ts, price in ((utc(14, 30, 5), 100.0), (utc(14, 32, 9), 102.0), (utc(14, 33, 9), 99.0)):
+            yield replayed(ts, price)  # 14:30 again, then the minutes the drop missed
+        yield Tick(utc(14, 34, 30), 104.0, 1, "NQZ26")
+        clock[0] = utc(14, 35) + LAG_GRACE
+
+    assert [(b.ts, b.close) for b in collect(source(), clock)] == [
+        (utc(14, 30), 100.0),
+        (utc(14, 32), 102.0),
+        (utc(14, 33), 99.0),
+        (utc(14, 34), 104.0),
+    ]
+
+
+def test_a_reconnect_mid_replay_counts_the_open_replayed_minute_once():
+    # review of #224: the SDK replays the same start again; the minute still open must restart
+    clock = [utc(14, 33)]
+
+    async def source():
+        for ts in (utc(14, 30, 5), utc(14, 31, 5), utc(14, 31, 30)):  # the link drops in 14:31
+            yield replayed(ts, 100.0)
+        for ts in (utc(14, 30, 5), utc(14, 31, 5), utc(14, 31, 30), utc(14, 32, 5)):
+            yield replayed(ts, 100.0)
+        yield Tick(utc(14, 33), 101.0, 1, "NQZ26")
+
+    assert [(b.ts, b.volume) for b in collect(source(), clock)] == [
+        (utc(14, 30), 1),
+        (utc(14, 31), 2),
+        (utc(14, 32), 1),
+    ]
+
+
+def test_a_reconnect_while_one_series_replays_counts_its_open_minute_once():
+    # ES's replayed minute is still open while NQ is live; the reconnect replays ES again
+    clock = [utc(14, 31, 10)]
+
+    async def source():
+        for ts in (utc(14, 30, 50), utc(14, 31, 5)):
+            yield replayed(ts, 6000.0, "ESZ26")  # ES: still replaying, 14:31 open
+        yield Tick(utc(14, 31, 10), 20000.0, 1, "NQZ26")  # NQ: live
+        for ts in (utc(14, 30, 50), utc(14, 31, 5), utc(14, 32, 1)):
+            yield replayed(ts, 6000.0, "ESZ26")  # the reconnect: ES again from the start
+
+    bars = collect(source(), clock)
+    es = [(b.ts, b.volume) for b in bars if b.contract == "ESZ26"]
+    assert es == [(utc(14, 30), 1), (utc(14, 31), 1)]
+
+
+def test_replayed_trades_that_share_a_timestamp_all_count():
+    # in the gate recording ~8-14% of trades share their predecessor's timestamp: no restart
+    clock = [utc(14, 33)]
+
+    async def source():
+        for ts in (utc(14, 30, 5), utc(14, 30, 5), utc(14, 30, 5), utc(14, 31, 1), utc(14, 31, 1)):
+            yield replayed(ts, 100.0)
+        yield Tick(utc(14, 32, 1), 101.0, 1, "NQZ26")
+
+    assert [(b.ts, b.volume) for b in collect(source(), clock)][:2] == [
+        (utc(14, 30), 3),
+        (utc(14, 31), 2),
+    ]
+
+
+def test_a_restart_of_one_symbols_replay_keeps_the_others_open_minute():
+    # each symbol replays on its own subscription; the second pass may replay NQ before ES
+    clock = [utc(14, 31, 20)]
+    es = [(utc(14, 30, 50), 6000.0, "ESZ26"), (utc(14, 31, 5), 6000.0, "ESZ26")]
+    nq = [(utc(14, 30, 55), 20000.0, "NQZ26"), (utc(14, 31, 6), 20000.0, "NQZ26")]
+
+    async def source():
+        for ts, price, c in es + nq + nq + es:  # ES then NQ; the link drops; NQ then ES again
+            yield replayed(ts, price, c)
+        yield Tick(utc(14, 31, 20), 20000.0, 1, "NQZ26")
+        yield Tick(utc(14, 31, 20), 6000.0, 1, "ESZ26")
+        clock[0] = utc(14, 32) + LAG_GRACE
+
+    bars = collect(source(), clock)
+    assert sorted((b.contract, b.ts, b.volume) for b in bars) == [
+        ("ESZ26", utc(14, 30), 1),
+        ("ESZ26", utc(14, 31), 2),
+        ("NQZ26", utc(14, 30), 1),
+        ("NQZ26", utc(14, 31), 2),
+    ]
+
+
 # --- stream_ticks: the real SDK Tick through a fake client ---
 
 
@@ -159,8 +307,8 @@ class FakeLSE:
             self.errors.append(callback)
         return self
 
-    async def stream_async(self, symbols, reconnect=True):
-        self.calls.append(("stream", list(symbols), reconnect))
+    async def stream_async(self, symbols, reconnect=True, start=None):
+        self.calls.append(("stream", list(symbols), reconnect, start))
         try:
             for t in self.ticks:
                 yield t
@@ -201,9 +349,9 @@ async def take(gen) -> tuple[list, Exception | None]:
     return got, None
 
 
-def test_stream_ticks_drops_replay_quotes_and_bad_ticks_and_snaps_price(fake_lse):
+def test_stream_ticks_keeps_replayed_ticks_drops_quotes_and_bad_ticks_and_snaps_price(fake_lse):
     fake_lse.ticks = [
-        sdk_tick("NQ.F", 30770.0, 1.0, replay=True),  # replayed history
+        sdk_tick("NQ.F", 30770.0, 1.0, replay=True),  # replayed history (#79): kept, flagged
         sdk_tick("NQ.F", 30770.0, None),  # quote: no volume
         sdk_tick("ES.F", 7851.5, 0.0),  # quote: zero volume
         sdk_tick("ES.F", 7851.5, 1.0, ts=None),  # no time
@@ -218,11 +366,19 @@ def test_stream_ticks_drops_replay_quotes_and_bad_ticks_and_snaps_price(fake_lse
     ]
     got, _ = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26", "NQZ26"])))
     assert got == [
+        Tick(datetime(2026, 10, 13, 14, 23, 20, 389780, tzinfo=UTC), 30770.0, 1, "NQZ26", True),
         Tick(datetime(2026, 10, 13, 14, 23, 20, 440000, tzinfo=UTC), 30770.0, 4, "NQZ26"),
         Tick(datetime(2026, 10, 13, 14, 23, 21, tzinfo=UTC), 7851.75, 2, "ESZ26"),
     ]
     assert all(t.ts.tzinfo is UTC for t in got)
-    assert fake_lse.calls == [("init", "k"), ("stream", ["ES.F", "NQ.F"], True)]
+    assert fake_lse.calls == [("init", "k"), ("stream", ["ES.F", "NQ.F"], True, None)]
+
+
+def test_stream_ticks_replays_from_start(fake_lse):
+    # #79: LSE replays up to 24 h of ticks from `start` (naive UTC, as candles), then goes live
+    start = datetime(2026, 10, 12, 18, 0, tzinfo=NY)
+    asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["NQZ26"], start=start)))
+    assert fake_lse.calls[1] == ("stream", ["NQ.F"], True, "2026-10-12T22:00:00")
 
 
 def test_stream_ticks_refuses_an_empty_key_and_never_uses_the_sdk_env_var(fake_lse, monkeypatch):
@@ -272,7 +428,7 @@ def test_stream_bars_builds_front_month_bars_from_lse_ticks(fake_lse, monkeypatc
         sdk_tick("ES.F", 7851.500000000001, 1.0, ts="2026-10-08T14:30:01Z"),
         sdk_tick("NQ.F", 30770.1, 2.0, ts="2026-10-08T14:30:02Z"),
         sdk_tick("ES.F", 7852.0, 3.0, ts="2026-10-08T14:30:50Z"),
-        sdk_tick("ES.F", 7852.25, 1.0, ts="2026-10-08T14:31:00Z", replay=True),
+        sdk_tick("ES.F", 7852.25, 1.0, ts="2026-10-08T14:31:00Z", replay=True),  # still open
     ]
     fake_lse.after = lambda: clock.__setitem__(0, utc(14, 31) + LAG_GRACE)
     fake_lse.hang = True

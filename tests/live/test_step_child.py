@@ -6,7 +6,7 @@ from backtest_helpers import NQ, bar
 
 from fenrir.core.actions import Bracket, Cancel, Flatten
 from fenrir.live.service import parse_reply
-from fenrir.live.step_child import ctx_json, parse_ctx
+from fenrir.live.step_child import ctx_json, ctx_lines, parse_ctx
 from fenrir.rules.state import AccountView
 from fenrir.strategy import FLAT, Ctx
 
@@ -21,6 +21,19 @@ def test_ctx_survives_the_pipe():
         NQ,
     )
     assert parse_ctx(json.loads(json.dumps(ctx_json(c)))) == c
+
+
+def test_ctx_lines_are_the_ctx_requests_with_each_bar_encoded_once():
+    # a warm-up (#79) sends a day of contexts whose windows share up to 500 bars
+    bars = tuple(bar("09:30", 1.0, 2.0, 0.5, 1.0 + i / 4) for i in range(4))
+    bars = tuple(replace(b, ts=b.ts.replace(minute=30 + i)) for i, b in enumerate(bars))
+    view = AccountView("evaluation", 2000.0, None, -12.5, 3000.0)
+    ctxs = [Ctx(bars[i].ts, bars[: i + 1], FLAT, view, NQ) for i in range(4)]
+    lines = list(ctx_lines(ctxs))
+    assert all(line.endswith(b"\n") and line.count(b"\n") == 1 for line in lines)
+    assert [json.loads(line) for line in lines] == [
+        json.loads(json.dumps({"ctx": ctx_json(c)})) for c in ctxs
+    ]
 
 
 def test_parses_each_action():

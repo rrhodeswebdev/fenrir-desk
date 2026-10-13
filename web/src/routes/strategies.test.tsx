@@ -18,6 +18,8 @@ import {
   armErrorText,
   armedAt,
   confirmBody,
+  disarmResultText,
+  disarmText,
   needsConfirmation,
   refusal,
   targets,
@@ -128,6 +130,22 @@ describe('arming helpers', () => {
 
   it('shows armed_at to the minute in UTC', () => {
     expect(armedAt(armed.armed_at)).toBe('2026-10-13 14:05 UTC')
+  })
+
+  it('says a sim or live disarm flattens the position first, and a dry run has nothing to flatten (#223)', () => {
+    for (const mode of ['sim', 'live'] as const) {
+      expect(disarmText(mode)).toMatch(/^NinjaTrader flattens this account first: its open position is closed at market and its working orders cancelled\./)
+      expect(disarmText(mode)).toContain('If the flatten fails, the account stays armed and halted')
+    }
+    expect(disarmText('dry')).not.toContain('flattens')
+    expect(disarmText('dry')).toContain('nothing to flatten')
+  })
+
+  it('puts a disarm that did not happen in words', () => {
+    expect(disarmResultText('LFE0507', { ok: true, error: null })).toBeNull()
+    expect(disarmResultText('LFE0507', { ok: false, error: null })).toBe('LFE0507 was not armed: nothing was disarmed.')
+    const failed = 'disarm failed: flatten failed: refused; the position may still be open: check NinjaTrader; still armed, halted until disarmed'
+    expect(disarmResultText('LFE0507', { ok: false, error: failed })).toBe(`LFE0507: ${failed}.`)
   })
 })
 

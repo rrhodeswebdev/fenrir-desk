@@ -62,6 +62,42 @@ def check(
     return reasons
 
 
+# the only read-write mounts in /app (compose.yaml): the rest of the repo is read-only
+RW_DIRS = ("data", "rules", "strategies")
+
+
+def nested_git(root: Path, dirs: Sequence[str] = RW_DIRS) -> list[str]:
+    """Every `.git` entry, in any case, in `root/<dir>` for each of `dirs`, relative to `root` and
+    sorted, plus `<path> (unreadable)` for a directory the walk could not list. The host's git
+    uses the nearest `.git` above its cwd, so one the terminal plants runs its config on the host
+    (#184). Never follows a symlink."""
+    found = []
+
+    def unreadable(e: OSError) -> None:
+        if not isinstance(e, FileNotFoundError):  # gone mid-walk, or a dir that is not there
+            found.append(f"{Path(e.filename).relative_to(root)} (unreadable)")
+
+    for d in dirs:
+        for top, subdirs, files in os.walk(root / d, onerror=unreadable):
+            here = Path(top)
+            # any case: a case-insensitive host (macOS) git finds .GIT as its .git
+            found += [str((here / n).relative_to(root)) for n in (*subdirs, *files) if _git(n)]
+            subdirs[:] = [s for s in subdirs if not _git(s)]
+    return sorted(found)
+
+
+def _git(name: str) -> bool:
+    return name.casefold() == ".git"
+
+
+NESTED_GIT = "nested .git the terminal can write (your git there would run its config): %s"
+
+
+def nested_git_in_image() -> list[str]:
+    """`nested_git(/app)` in the image; `[]` natively, where the terminal is the user anyway."""
+    return nested_git(APP_ROOT) if os.environ.get("FENRIR_BIND_ALL") == "1" else []
+
+
 def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:
     """(env overlay, `Popen` kwargs) that run a child as `user` from its passwd entry, with none
     of the server's groups; `({}, {})` for None (the server's own user). KeyError: no such user."""

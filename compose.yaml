@@ -1,0 +1,26 @@
+services:
+  fenrir:
+    build: .
+    ports:
+      # Loopback only, never "8000:8000": the app includes a shell. Both loopbacks, since
+      # localhost is ::1 first on macOS and an unbound [::1]:8000 could catch the launch link.
+      - "127.0.0.1:8000:8000"
+      - "[::1]:8000:8000"
+    volumes:
+      # The repo is read-only: the host's git, docker compose and Claude Code read files here
+      # unreviewed, and a case-insensitive host defeats per-file read-only overlays (#185).
+      # Only the directories the app and the terminal write are read-write.
+      - .:/app:ro
+      - ./data:/app/data
+      - ./rules:/app/rules
+      - ./strategies:/app/strategies
+      - fenrir-private:/var/lib/fenrir
+      - claude-config:/home/claude/.claude-config
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  fenrir-private:
+  claude-config:

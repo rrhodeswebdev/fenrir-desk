@@ -12,7 +12,7 @@ const settings: Settings = {
   holdout_months: 12,
   safety_margin_pct: 80,
   stale_seconds: 90,
-  repo_env_secrets: false,
+  nested_git: [],
 }
 const choices: Choices = {
   'lucid-direct-50k': { eval_price: 0, dll_on: true },
@@ -51,7 +51,7 @@ describe('settings page', () => {
     expect(input(html, 'Stale threshold')).toContain('value="90"')
     expect(html).toContain('<span class="text-ink-3">% of the daily loss limit or of the drawdown room at session start</span>')
     expect(html.match(/<button[^>]*type="submit"[^>]*disabled=""[^>]*>Save<\/button>/g)).toHaveLength(2)
-    expect(html).not.toContain('repo .env')
+    expect(html).not.toContain('role="alert"')
   })
 
   it('lists each account with its price and daily loss limit switch, described by the dll_on help', async () => {
@@ -64,9 +64,9 @@ describe('settings page', () => {
     expect(DLL_HELP).toContain('re-run the backtest and re-arm the account')
   })
 
-  it('warns about a repo .env with secrets and offers the import', async () => {
-    const html = await render({ ...settings, repo_env_secrets: true })
-    expect(html).toContain('The repo .env holds secrets.')
-    expect(html).toMatch(/<button[^>]*type="button"[^>]*>Import into the secrets file<\/button>/)
+  it('warns about a .git the terminal left in the repo', async () => {
+    const html = await render({ ...settings, nested_git: ['strategies/.git'] })
+    expect(html).toMatch(/<p role="alert"[^>]*>The terminal left a .git in the repo: <!-- -->strategies\/.git/)
+    expect(html).toContain('find data rules strategies -iname .git')
   })
 })

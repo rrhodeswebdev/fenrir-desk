@@ -15,7 +15,7 @@ import uvicorn
 
 from fenrir.server.app import create_app
 from fenrir.server.auth import VITE_PORT
-from fenrir.server.isolation import isolation_problems
+from fenrir.server.isolation import NESTED_GIT, isolation_problems, nested_git_in_image
 from fenrir.settings import load_settings
 
 MIN_KEY_LEN = 32
@@ -111,6 +111,8 @@ def serve(
         _fail("FENRIR_BIND_ALL=1 outside an isolated image: " + "; ".join(problems))
     for problem in problems:
         typer.echo(f"warning: not isolated, terminal and strategies disabled: {problem}", err=True)
+    if nested := nested_git_in_image():
+        typer.echo("warning: " + NESTED_GIT % ", ".join(nested), err=True)
     static = static_dir if (static_dir / "index.html").is_file() else None
     if static is None:
         typer.echo(

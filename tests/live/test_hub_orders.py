@@ -757,6 +757,65 @@ async def test_kill_journals_the_disarm_routes_halt_row(hub, conn, armed, fake):
     assert row.payload == {"reason": "disarmed", "kind": None, "until": None}
 
 
+async def test_kill_journals_the_halt_rows_before_it_disarms(hub, conn, armed, fake, monkeypatch):
+    """As the disarm route: an account whose delete then fails, or that is re-armed in between,
+    already has its halt row."""
+    seen, delete = [], arming.delete_armed
+
+    def checking(conn, account):
+        seen.append([r.payload for r in journal.rows(conn, account=account, kind="halt")])
+        delete(conn, account)
+
+    monkeypatch.setattr(service, "delete_armed", checking)
+    await hub.tick(T0)
+    await hub.kill()
+    assert seen == [[service.DISARMED]]
+
+
+@pytest.mark.parametrize("failing", ["delete", "halt row"])
+async def test_a_failed_kill_disarm_halts_an_account_armed_but_not_started_yet(
+    hub, conn, armed, fake, monkeypatch, failing
+):
+    """Armed in the 5 s before the kill, so not running yet: the next tick starts it halted."""
+
+    def locked_delete(conn, account):
+        raise sqlite3.OperationalError("database is locked")
+
+    if failing == "delete":
+        monkeypatch.setattr(service, "delete_armed", locked_delete)
+    else:
+        lock = locked(monkeypatch, "halt")
+    result = await hub.kill()
+    assert result["ok"] is False and "database is locked" in result["error"]
+    if failing == "halt row":
+        lock["on"] = False  # the lock passed; the row stayed armed
+    await hub.tick(T0)
+    assert hub.states["Sim101"].halted is not None
+    await hub.handle_bar(bar(T0))
+    assert [path for path, _ in fake.requests] == ["/flatten-all"]
+    assert rows(conn, "halt")  # so a restart keeps it halted
+    arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(seconds=1)))  # re-armed
+    await hub.tick(T0 + timedelta(seconds=5))
+    assert hub.states["Sim101"].halted is None
+
+
+async def test_kill_without_ninjatrader_reads_running_accounts_when_the_disarm_fails(
+    settings, conn, armed, monkeypatch
+):
+    hub = LiveHub(settings)
+    try:
+        await hub.tick(T0)  # Sim101 running
+
+        def unreadable(conn):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(service, "list_armed", unreadable)
+        result = await hub.kill()
+    finally:
+        await hub.stop()
+    assert result["ok"] is False and "not configured" in result["error"]
+
+
 async def test_kill_counts_a_duplicate_flatten_all_as_done(hub, armed, client, monkeypatch):
     async def duplicate(client_id):
         return Ack(False, True, None)
@@ -797,7 +856,7 @@ async def test_start_follows_the_addon_stream(hub, armed):
 
 
 async def test_a_crashed_stream_follower_marks_the_link_down_and_restarts(
-    hub, conn, armed, client, monkeypatch
+    hub, conn, armed, client, monkeypatch, caplog
 ):
     calls = []
 
@@ -817,4 +876,6 @@ async def test_a_crashed_stream_follower_marks_the_link_down_and_restarts(
         await asyncio.gather(task, return_exceptions=True)
     [alert, *_] = rows(conn, "alert")  # paused as a lost link, with the error
     assert alert.payload["message"].startswith(core.LINK_LOST)
-    assert "stream follower failed: RuntimeError" in alert.payload["message"]
+    # exactly the type: the error text could hold the stream URL's token
+    assert alert.payload["message"] == f"{core.LINK_LOST} (stream follower failed: RuntimeError)"
+    assert "bug in the stream" not in caplog.text

@@ -166,6 +166,8 @@ class LiveHub:
         self.last_bar_ts: datetime | None = None
         self.nt_connected = False  # the add-on stream is up (22.5)
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
+        # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
+        self.killed: tuple[datetime, str] | None = None
         self._secret = secret
         self._timeout = step_timeout
         self._lock = asyncio.Lock()  # a tick and a bar never interleave
@@ -248,9 +250,10 @@ class LiveHub:
     async def kill(self) -> dict[str, Any]:
         """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
         (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
-        stopped), journalled per account as the disarm route does plus an "alert" with the
-        outcome. Under the hub lock, so no bar or fill runs between the two. A disarm that fails
-        (e.g. sqlite locked) halts every running account in memory instead. `ok` is false, with
+        stopped), each journalled as the disarm route does (its "halt" row before the delete),
+        plus an "alert" with the outcome. Under the hub lock, so no bar or fill runs between the
+        two. A disarm that fails (e.g. sqlite locked) halts every running account in memory
+        instead, and `killed` halts a row armed by then when a tick starts it. `ok` is false, with
         the errors, when `/flatten-all` did not land, when NinjaTrader is not configured while a
         sim or live account was armed, or when the disarm failed."""
         async with self._lock:
@@ -265,26 +268,30 @@ class LiveHub:
                     flat = f"{type(e).__name__}: {e}"
             armed: Sequence[Armed] = ()
             disarm = None
+            at = _now()
             try:
                 conn = self._db()
                 armed = list_armed(conn) if conn else ()
+                for a in armed:  # first, as the disarm route: a failed delete leaves it halted
+                    journal.write(conn, _now(), a.account, "halt", DISARMED)
                 for a in armed:
                     delete_armed(conn, a.account)
                 await self._sync(_now())
             except Exception as e:
                 log.exception("kill switch: disarm failed")
                 disarm = f"disarm failed: {type(e).__name__}: {e}"
-                for account in list(self.states):  # still armed: no new entries until disarmed
+                # still armed: no new entries until disarmed, also for a row not started yet
+                self.killed = (at, f"kill switch: {disarm}")
+                for account in list(self.states):
                     s = self.states[account]
                     with contextlib.suppress(Exception):  # its halt row is queued and retried
-                        await self._apply(account, *core.halt(s, f"kill switch: {disarm}"))
+                        await self._apply(account, *core.halt(s, self.killed[1]))
             if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
                 flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
             if disarm is None:
                 done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
                 try:
                     for a in armed:
-                        journal.write(conn, _now(), a.account, "halt", DISARMED)
                         alert = {"message": f"kill switch: disarmed; {done}"}
                         journal.write(conn, _now(), a.account, "alert", alert)
                 except Exception:  # disarmed and flattened all the same: report that, not this
@@ -545,6 +552,9 @@ class LiveHub:
                 await self._spawn(a)
             except Exception as e:  # isolation refusal, load error, timeout
                 s, out = core.halt(s, f"cannot load the strategy: {e}")
+        if self.killed and a.armed_at <= self.killed[0]:  # the kill could not disarm it
+            s, more = core.halt(s, self.killed[1])
+            out = (*out, *more)
         await self._apply(a.account, s, out)
 
     async def _spawn(self, a: Armed) -> None:

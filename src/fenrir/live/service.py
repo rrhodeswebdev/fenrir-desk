@@ -422,8 +422,17 @@ class LiveHub:
                     log.warning("disarm %s: flatten before the lock failed: %s", account, first)
         async with self._lock:
             try:
-                if (a := self._armed(account)) is None:
-                    return {"ok": False, "error": None}
+                a = self._armed(account)
+            except Exception as e:  # before the flatten under the lock: none may have gone out
+                log.exception("disarm %s: cannot read the armed accounts", account)
+                return await self._keep(
+                    account,
+                    f"cannot read the armed accounts: {_error(e)}; not flattened under the lock: "
+                    "the position may still be open: check NinjaTrader",
+                )
+            if a is None:
+                return {"ok": False, "error": None}
+            try:
                 if a.mode != "dry" and (error := await self._flatten(account)):
                     return await self._keep(
                         account,
@@ -433,6 +442,7 @@ class LiveHub:
                 now = _now()
                 if not arming.disarm(self.conn, account, now):
                     return {"ok": False, "error": None}
+                self.held.pop(account, None)
             except Exception as e:
                 log.exception("disarm %s failed", account)
                 return await self._keep(account, _error(e))
@@ -469,31 +479,39 @@ class LiveHub:
 
     async def _keep(self, account: str, cause: str) -> dict[str, Any]:
         """A disarm that could not finish (call under the lock): the row stays armed and the
-        account is halted, with an alert; journalled, so a row not running yet starts halted
-        and a restart keeps it so. When sqlite refuses that row too, `held` halts the row when
-        it starts instead (as the kill's `killed`), and the error says so."""
+        account is halted, with an alert; journalled, so a restart keeps it halted. A row not
+        running yet is also `held` in memory (as the kill's `killed`), so it shows the reason
+        while it waits and starts halted without loading its strategy, even when sqlite refuses
+        its halt row; the error says when the halt row was not journalled."""
         why = f"disarm failed: {cause}; still armed, halted until disarmed"
         alert = Log("alert", {"message": why})
-        error = why
+        halt = {"reason": why, "kind": None, "until": None}  # as core.halt journals
+        written = False  # the halt row
         try:
             if (s := self.states.get(account)) is not None:
                 s, out = core.halt(s, why)
-                await self._apply(account, s, (*out, alert))  # halted in memory even if refused
-            else:  # waiting for NinjaTrader, broken, or armed since the last sync
-                halt = {"reason": why, "kind": None, "until": None}  # as core.halt journals
                 try:
-                    journal.write(self.conn, _now(), account, "halt", halt)
-                except Exception as e:
-                    self.held[account] = (_now(), why)
-                    error = (
-                        f"{why}; halt held in memory, not journalled (a restart before it"
-                        f" starts lifts it): {_error(e)}"
-                    )
-                    raise
+                    await self._apply(account, s, (*out, alert))  # halted in memory if refused
+                finally:
+                    written = Log("halt", halt) not in self.unwritten.get(account, ())
+            else:  # waiting for NinjaTrader, broken, or armed since the last sync
+                self.held[account] = (_now(), why)
+                journal.write(self.conn, _now(), account, "halt", halt)
+                written = True
                 journal.write(self.conn, _now(), account, alert.kind, alert.payload)
-        except Exception:
-            log.exception("disarm %s failed; its halt not journalled", account)
-        return {"ok": False, "error": error}
+        except Exception as e:
+            if written:
+                log.exception("disarm %s failed; its alert not journalled", account)
+            else:
+                log.exception("disarm %s failed; its halt not journalled", account)
+                held = (
+                    "halt held in memory, not journalled yet (retried each tick; a restart"
+                    " before then lifts it)"
+                    if s is not None
+                    else "halt held in memory, not journalled (a restart before it starts lifts it)"
+                )
+                return {"ok": False, "error": f"{why}; {held}: {_error(e)}"}
+        return {"ok": False, "error": why}
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:

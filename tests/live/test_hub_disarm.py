@@ -31,6 +31,10 @@ HELD = {"account": "Sim101", "instrument": "MNQ 12-26", "qty": 1, "avg_price": 2
 BROKER = "no connection to the broker"
 NOT_CONFIGURED = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
 NOT_JOURNALLED = "halt held in memory, not journalled (a restart before it starts lifts it)"
+NOT_JOURNALLED_YET = (
+    "halt held in memory, not journalled yet (retried each tick; a restart before then lifts it)"
+)
+LOCKED = "OperationalError: database is locked"
 
 ALWAYS = """
 from fenrir.core.actions import Bracket
@@ -45,6 +49,23 @@ def step(state, bar, ctx):
 
 def bar(ts: datetime) -> Bar:
     return Bar(ts, 20000.0, 20005.0, 19995.0, 20000.0, 10, "NQZ26")
+
+
+def account(account_id: str = "Sim101") -> dict:
+    """An add-on "account" stream message (absolute $), which starts a waiting sim row."""
+    return {
+        "type": "account",
+        "id": account_id,
+        "name": account_id,
+        "is_sim": True,
+        "balance": 50_300.0,
+        "realized_pnl_today": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+
+
+def _locked(*args):
+    raise sqlite3.OperationalError("database is locked")
 
 
 def kept(cause: str) -> str:
@@ -345,7 +366,7 @@ async def test_a_double_fault_still_starts_a_row_that_is_not_running_yet_halted(
     """The flatten failed and sqlite refused the halt row too (e.g. locked): the halt is held in
     memory, as the kill's `killed`, so the row still starts halted (journalled then), and the
     answer says the halt was not journalled. It halts only that arming: a re-arm starts free."""
-    flatten, write = client.flatten, journal.write
+    write = journal.write
 
     def locked(*args):
         raise sqlite3.OperationalError("database is locked")
@@ -366,8 +387,7 @@ async def test_a_double_fault_still_starts_a_row_that_is_not_running_yet_halted(
         assert [r.payload for r in rows(conn, "halt")] == [
             {"reason": why, "kind": None, "until": None}
         ]
-        monkeypatch.setattr(client, "flatten", flatten)
-        assert await hub.disarm("Sim101") == {"ok": True, "error": None}
+        assert (await hub.kill())["ok"]  # disarmed by the kill, which leaves `held` as it is
         clock["t"] = T0 + timedelta(minutes=1)
         arming.insert_armed(conn, replace(armed, armed_at=clock["t"]))
         await hub.tick(clock["t"])
@@ -409,3 +429,77 @@ async def test_disarm_names_a_failed_runner_stop_as_such(hub, conn, armed, fake,
     assert await hub.disarm("Sim101") == {"ok": False, "error": why}
     assert arming.list_armed(conn) == ()
     assert hub.states["Sim101"].halted == why
+
+
+async def test_a_failed_read_under_the_lock_says_the_position_may_still_be_open(
+    hub, conn, armed, fake, monkeypatch
+):
+    """`armed` unreadable (both reads, so nothing was flattened): kept and halted, and the answer
+    warns that the position may still be open, never that the flatten landed."""
+    await hub.tick(T0)
+    monkeypatch.setattr(service, "list_armed", _locked)
+    why = kept(
+        f"cannot read the armed accounts: {LOCKED}; not flattened under the lock: the position"
+        " may still be open: check NinjaTrader"
+    )
+    assert await hub.disarm("Sim101") == {"ok": False, "error": why}
+    assert posts(fake) == []
+    assert hub.states["Sim101"].halted == why
+
+
+async def test_a_running_rows_double_fault_says_its_halt_row_is_not_journalled_yet(
+    hub, conn, armed, client, monkeypatch
+):
+    """Halted in memory and its halt row queued: the answer says it is not journalled yet, and
+    the next tick writes it."""
+    await hub.tick(T0)
+    monkeypatch.setattr(client, "flatten", _unreachable)
+    write = journal.write
+    monkeypatch.setattr(journal, "write", _locked)
+    why = flatten_failed("ConnectError: add-on unreachable")
+    assert await hub.disarm("Sim101") == {
+        "ok": False,
+        "error": f"{why}; {NOT_JOURNALLED_YET}: {LOCKED}",
+    }
+    assert hub.states["Sim101"].halted == why
+    monkeypatch.setattr(journal, "write", write)
+    await hub.tick(T0 + timedelta(seconds=5))
+    assert [r.payload for r in rows(conn, "halt")] == [{"reason": why, "kind": None, "until": None}]
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["halt journalled", "double fault"])
+async def test_a_kept_row_waiting_for_ninjatrader_shows_the_reason_and_loads_nothing(
+    settings, conn, armed, client, monkeypatch, refused
+):
+    """A sim row waiting for NinjaTrader's account message, whose flatten failed (and, in the
+    double fault, whose halt row sqlite refused): `held` shows the disarm reason while it waits,
+    and on the message it starts halted without loading its strategy, as the kill's `killed`.
+    Armed at the marker's own time, it is still held. Another account starts free."""
+    balances = {"start_balance": 50_000.0, "peak_balance": 50_500.0}
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(conn, replace(armed, armed_at=T0, **balances))
+    arming.insert_armed(conn, replace(armed, account="Sim102", **balances))
+    monkeypatch.setattr(client, "flatten", _unreachable)
+    hub = LiveHub(settings, addon=client)
+    try:
+        await hub.tick(T0)
+        assert hub.states == {} and set(hub.waiting) == {"Sim101", "Sim102"}
+        why = flatten_failed("ConnectError: add-on unreachable")
+        write = journal.write
+        if refused:
+            monkeypatch.setattr(journal, "write", _locked)
+        error = f"{why}; {NOT_JOURNALLED}: {LOCKED}" if refused else why
+        assert await hub.disarm("Sim101") == {"ok": False, "error": error}
+        monkeypatch.setattr(journal, "write", write)
+        reasons = {a["account"]: a["halt_reason"] for a in hub.status()["accounts"]}
+        assert reasons["Sim101"] == why
+        assert reasons["Sim102"].startswith("waiting for NinjaTrader")
+        await hub.handle_stream(account("Sim101"))
+        assert hub.states["Sim101"].halted == why and hub.children == {}
+        assert [r.payload for r in rows(conn, "halt")] == [
+            {"reason": why, "kind": None, "until": None}
+        ]
+        await hub.handle_stream(account("Sim102"))
+        assert hub.states["Sim102"].halted is None and set(hub.children) == {"Sim102"}
+    finally:
+        await hub.stop()

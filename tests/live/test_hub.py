@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from live_helpers import ARMED_AT, RULES, pinned
+from live_helpers import ARMED_AT, RULES, pinned, stored
 
 from fenrir.core.bars import Bar
 from fenrir.data.live import FeedStopped
@@ -37,7 +37,9 @@ def bar(ts: datetime, contract: str = "NQZ26") -> Bar:
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    s = Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    stored(s.data_dir)  # warm-up (#79) needs the store up to the last trading day
+    return s
 
 
 @pytest.fixture
@@ -374,7 +376,7 @@ async def test_a_halted_account_whose_front_month_fails_logs_it_once(
         for minute in range(3):
             await hub.handle_bar(bar(T0 + timedelta(minutes=minute)))
         assert hub.states["Sim101"].halted.startswith("live runner error: ValueError: no NQ")
-        assert kinds(conn) == ["halt"]
+        assert kinds(conn) == ["alert", "halt"]  # the alert: no warm-up without a front month
         failed = [r for r in caplog.records if "failed on a bar" in r.getMessage()]
         assert len(failed) == 1 and failed[0].exc_info is not None
     finally:
@@ -401,7 +403,7 @@ async def test_each_account_keeps_the_instruments_it_started_with(
         assert kinds(conn) == ["bar", "action", "halt", "bar", "rejection", "bar", "rejection"]
         assert first.halted == "instruments.yaml changed since arming; re-arm"
         assert second.halted.startswith("live runner error: ValueError: no NQ contract")
-        assert kinds(conn, "Sim102") == ["halt"]
+        assert kinds(conn, "Sim102") == ["alert", "halt"]  # alert: cannot warm up (#79)
     finally:
         await hub.stop()
 
@@ -459,7 +461,7 @@ async def test_run_bars_feeds_the_hub_and_connects_on_the_first_bar(hub, conn, a
     arming.insert_armed(conn, armed)
     subscribed, go, fed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    async def fake_stream(settings, contracts, on_auth=None):
+    async def fake_stream(settings, contracts, **kw):
         assert {c[:2] for c in contracts} == {"ES", "NQ"}
         subscribed.set()
         await go.wait()
@@ -488,7 +490,7 @@ async def test_run_bars_closes_the_old_stream_before_the_next_day_subscribes(
     seen: list[list[bool]] = []
     second = asyncio.Event()
 
-    async def fake_stream(settings, contracts, on_auth=None):
+    async def fake_stream(settings, contracts, **kw):
         seen.append(list(closed))
         if len(seen) > 1:
             second.set()
@@ -526,7 +528,7 @@ async def test_run_bars_backs_off_after_feed_stopped_and_resets_on_a_bar(hub, mo
     script = ["stop"] * 4 + ["bar"] + ["stop"] * 2 + ["hang"]
     done = asyncio.Event()
 
-    async def fake_stream(settings, contracts, on_auth=None):
+    async def fake_stream(settings, contracts, **kw):
         step = script.pop(0)
         if step == "stop":
             raise FeedStopped("LSE stream stopped: Max 1 concurrent websocket connection(s)")
@@ -549,7 +551,7 @@ async def test_run_bars_ends_on_a_permanent_feed_stop(hub, monkeypatch, caplog):
     monkeypatch.setattr(service, "TICK_EVERY", 0)
     calls = []
 
-    async def fake_stream(settings, contracts, on_auth=None):
+    async def fake_stream(settings, contracts, **kw):
         calls.append(contracts)
         raise FeedStopped("FENRIR_LSE_API_KEY is not set", permanent=True)
         yield  # an async generator, like stream_bars

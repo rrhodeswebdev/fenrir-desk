@@ -100,6 +100,19 @@ def test_load_bars_filters_by_trading_day(tmp_path):
     assert load_bars(tmp_path, INST, "NQ", day, day) == ()
 
 
+def test_load_bars_over_a_few_days_reads_only_their_front_months(tmp_path):
+    # #79: live warm-up loads the last few days; a full series is ~13 s and ~2.2 GB
+    roll_fixture(tmp_path)
+    old = tmp_path / "bars" / "NQ" / "1m" / "NQU25.parquet"
+    old.write_text("not parquet")  # an earlier contract's file is never opened
+    day = date(2025, 12, 17)
+    assert [b.close for b in load_bars(tmp_path, INST, "NQ", day, day)] == [14.0, 15.0]
+    day = date(2025, 12, 10)
+    assert [b.close for b in load_bars(tmp_path, INST, "NQ", day - timedelta(days=7), day)] == [1.0]
+    with pytest.raises(pl.exceptions.ComputeError):
+        load_bars(tmp_path, INST, "NQ")  # the full series still reads every file
+
+
 def test_load_bars_empty_dir(tmp_path):
     assert load_bars(tmp_path, INST, "NQ") == ()
 

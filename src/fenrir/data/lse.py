@@ -72,14 +72,19 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
 
 
 async def stream_ticks(
-    settings: Settings, contracts: Sequence[str], *, on_auth: Callable[[], None] | None = None
+    settings: Settings,
+    contracts: Sequence[str],
+    *,
+    on_auth: Callable[[], None] | None = None,
+    start: datetime | None = None,
 ) -> AsyncGenerator[Tick, None]:
     """Live trades for our front-month `contracts`, from LSE's continuous `ES.F`/`NQ.F`
     (docs/data-gate.md Item 3). The SDK reconnects after a drop and stops only on an error it
     deems fatal (any error before auth), which raises `FeedStopped` with the server's last
     error message; an empty key raises a permanent `FeedStopped` before any connection.
     `on_auth` is called each time the socket authenticates (the first connect and each SDK
-    reconnect), before any tick on it."""
+    reconnect), before any tick on it. With `start`, every (re)subscription first replays the
+    trades since then (LSE: at most 24 h), flagged `replay` (#79)."""
     from lse import LSE, LSEError
 
     ours = {lse_symbol(c): c for c in contracts}
@@ -96,14 +101,16 @@ async def stream_ticks(
     if on_auth is not None:
         client.on("authenticated", on_auth)
     try:
-        async with aclosing(client.stream_async(list(ours), reconnect=True)) as ticks:
+        replay_from = start and _utc(start)
+        async with aclosing(
+            client.stream_async(list(ours), reconnect=True, start=replay_from)
+        ) as ticks:
             async for t in ticks:
                 ts, contract, price = t.datetime, ours.get(t.symbol), t.price
-                # replayed history, quotes (no volume), untimed or naive ticks and bad prices
-                # are not trades (a missing price arrives as 0.0)
+                # quotes (no volume), untimed or naive ticks and bad prices are not trades (a
+                # missing price arrives as 0.0)
                 if (
-                    t.replay
-                    or ts is None
+                    ts is None
                     or ts.tzinfo is None
                     or not t.volume
                     or contract is None
@@ -113,7 +120,11 @@ async def stream_ticks(
                 ):
                     continue
                 yield Tick(
-                    ts.astimezone(UTC), round(price / TICK) * TICK, round(t.volume), contract
+                    ts.astimezone(UTC),
+                    round(price / TICK) * TICK,
+                    round(t.volume),
+                    contract,
+                    bool(t.replay),
                 )
     except LSEError as e:  # lse-data 0.14 only raises it from REST calls; kept for later versions
         raise FeedStopped(f"LSE stream failed: {e}") from e

@@ -5,8 +5,9 @@ import type { Tone } from '@/components/state-text'
 import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
-export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach'
-/** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …). */
+export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach' | 'warming'
+/** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …).
+ * `warming` (#79) is no halt: the account waits for today's bars or the bar store, with `halted` false. */
 export type Condition = { kind: HaltKind | null; reason: string }
 
 type Limits = {
@@ -65,9 +66,9 @@ export type Cell = { name: string; state: Tone }
 /** Whether the account is under a condition of this kind, whatever else holds it. */
 const has = (a: AccountStatus, kind: HaltKind | null): boolean => a.conditions.some((c) => c.kind === kind)
 
-/** Feed · Broker · Drift, shared by every account. Stale and drift pauses light these, never an account. */
+/** Feed · Broker · Drift, shared by every account. Stale, warming-up and drift pauses light these, never an account. */
 export function systemStrip(s: LiveStatus): Cell[] {
-  const stale = s.accounts.some((a) => has(a, 'stale')) // under a halt too
+  const stale = s.accounts.some((a) => has(a, 'stale') || has(a, 'warming')) // under a halt too
   // With nothing armed nothing reads the feed (as Broker): unlit, not an alarm to learn to ignore.
   const feed: Tone = s.accounts.length === 0 ? 'idle' : !s.lse.connected ? 'alarm' : stale ? 'caution' : 'normal'
   // A missed heartbeat reaches us as nt.connected false. Dry runs never use the broker.
@@ -217,13 +218,20 @@ export function focusOf(
 /** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only, under a halt too. */
 export const canResolve = (a: AccountStatus): boolean => has(a, 'reconcile') || has(a, 'drift')
 
-/** The colour of an account's alert line and sleeve outline: its need, or caution for a stale or drift pause
- * (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
+/** The colour of an account's alert line and sleeve outline: its need, or caution for a stale, drift or warming-up
+ * pause (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
 export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
-  return need(a)?.state ?? (a.halted ? 'caution' : null)
+  return need(a)?.state ?? (a.halted || has(a, 'warming') ? 'caution' : null)
 }
 
-const conditionTone: Record<HaltKind, 'caution' | 'alarm'> = { reconcile: 'alarm', breach: 'alarm', safety: 'caution', stale: 'caution', drift: 'caution' }
+const conditionTone: Record<HaltKind, 'caution' | 'alarm'> = {
+  reconcile: 'alarm',
+  breach: 'alarm',
+  safety: 'caution',
+  stale: 'caution',
+  drift: 'caution',
+  warming: 'caution',
+}
 
 /** The focus field's lines: every condition's reason in its own tone (a halt no cell names is an alarm), else the
  * brief unreconciled pause's reason, plain. */

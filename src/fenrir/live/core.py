@@ -6,7 +6,8 @@ process (DEC-1) unless `runs_step` is false (a roll-window bar), then passes the
 `Send`s for the shell to post to the add-on; the add-on's fills come back through `on_fill`, and a
 failed post through `send_failed`. Sim and live take no new entries until NinjaTrader's book is
 reconciled (`on_reconcile`), on start and after every lost link (`on_disconnect`); after a
-restart `replay` rebuilds today's book from the journal.
+restart `replay` rebuilds today's book from the journal. No account takes an entry until it is
+warmed up (#79): `warm_up` gives the contexts `step` replays today with, `warmed` the result.
 """
 
 import hashlib
@@ -42,6 +43,8 @@ from fenrir.rules.state import (
     at_or_below,
 )
 from fenrir.strategy import FLAT, Ctx, Position
+
+LIVE_KEYS = frozenset({"mode", "sent", "client_id", "reason"})  # an "action" row's, not step's
 
 # shortcut: fixed band for LSE-close-vs-entry-fill drift; make it a setting if sim shows otherwise
 DRIFT_TICKS = 4
@@ -149,6 +152,8 @@ class RunnerState:
     held: tuple[Position, float] | None = None  # position and balance before this bar's exit
     nt: NtAccount | None = None  # for the stricter-of checks (DEC-4b); never for dry runs
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
+    # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
+    warming: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +344,8 @@ def runs_step(bar: Bar) -> bool:
 
 def on_bar(s: RunnerState, bar: Bar) -> Step:
     """Roll the day, mark and risk-check the bar; a roll-window bar (`runs_step` False) is
-    journalled here and never joins `bars`, as the shell then skips `step` and `decide`."""
+    journalled here and never joins `bars`, as the shell then skips `step` and `decide`; so is a
+    bar while warming up (#79), marked `warming`."""
     s, out = _roll_day(s, bar.ts)  # journals its own "peak" row
     was = s
     # backtest calling order: the entry fill, then the Mark of the position held, then the exit
@@ -365,7 +371,11 @@ def on_bar(s: RunnerState, bar: Bar) -> Step:
     out += more
     s, more = _exit(s, bar)
     out += more + _peaked(was, s, bar.ts)
-    return s, out if runs_step(bar) else (*out, Log("bar", {**asdict(bar), "actions": 0}))
+    if runs_step(bar) and not s.warming:
+        return s, out
+    # a bar step never sees: journalled here; while warming up it is marked, never compared
+    warming = {"warming": True} if s.warming else {}
+    return s, (*out, Log("bar", {**asdict(bar), "actions": 0, **warming}))
 
 
 def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
@@ -582,15 +592,7 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
         r = replace(r, acct=replace(s.acct, balance=s.acct.day_start_balance, traded_today=False))
     close = math.nan  # the last "bar" row's close: a Bracket was checked at it
     for kind, p in rows:
-        if kind == "bar":
-            close = p["close"]
-        elif kind == "action" and p["sent"] and p["type"] == "Bracket":
-            b = Bracket(p["side"], p["qty"], p["stop"], p["target"])
-            r = replace(r, working=Working(p["client_id"], b, close))
-        elif kind == "action" and p["sent"] and p["type"] == "Flatten":
-            r = replace(r, exiting=p["client_id"])
-        elif kind == "fill":
-            r, _ = on_fill(r, p)
+        r, close = _replayed(r, kind, p, close)
     # NinjaTrader's balance at the restart holds every fill, also those made while the runner was
     # down and never journalled: never loosen it. Without day_start it already holds today's.
     booked, a = r.acct.balance, s.acct
@@ -614,6 +616,124 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
         held=None,
         read_at=s.read_at,
     )
+
+
+def _replayed(
+    r: RunnerState, kind: str, p: Mapping[str, Any], close: float
+) -> tuple[RunnerState, float]:
+    """One journal row booked again: a sent order is in flight, a fill moves the position;
+    `close` is the last "bar" row's, the close a Bracket was checked at."""
+    if kind == "bar":
+        return r, p["close"]
+    if kind == "action" and p["sent"] and p["type"] == "Bracket":
+        b = Bracket(p["side"], p["qty"], p["stop"], p["target"])
+        return replace(r, working=Working(p["client_id"], b, close)), close
+    if kind == "action" and p["sent"] and p["type"] == "Flatten":
+        return replace(r, exiting=p["client_id"]), close
+    if kind == "fill":
+        return on_fill(r, p)[0], close
+    return r, close
+
+
+def warm_up(
+    s: RunnerState,
+    history: Sequence[Bar],
+    bars: Sequence[Bar],
+    rows: Sequence[tuple[datetime, str, Mapping[str, Any]]],
+) -> tuple[tuple[Ctx, ...], tuple[Bar, ...]]:
+    """DEC-4e: the `Ctx` `step` sees at each of today's `bars` (closed, oldest first) when today
+    is replayed with its actions suppressed, and the window after the last of them. The window
+    is `history` (the bar store's bars before today) then today's bars, the last WINDOW, with no
+    roll-window bar, as the backtest. Position and account come from today's journal `rows`
+    (write time, kind, payload; in journal order) as `replay` books them, from today's open, and
+    every bar marked as live: before a bar, the rows journalled ahead of its own "bar" row (live
+    booked them before it reached step), or, for a bar with none, the rows written before it
+    closed."""
+    a = s.acct
+    r = replace(
+        s,
+        acct=replace(a, balance=a.day_start_balance, traded_today=False, position=0, open_pnl=0.0),
+        position=FLAT,
+        bars=tuple(history)[-WINDOW:],
+        working=None,
+        exiting=None,
+        held=None,
+        read_at=None,
+        fills=(),
+        opened=None,
+        warming=None,
+    )
+    # live order: the rows journalled ahead of a bar's own "bar" row were booked before it
+    # reached step (a fill in the feed's grace, or while the hub lock was held); a bar with no
+    # row (before arming, while down) takes the rows written before it closed
+    marks: dict[datetime, int] = {}
+    for i, (_, kind, p) in enumerate(rows):
+        if kind == "bar":
+            marks.setdefault(_at(p), i)
+    close, done, ctxs = math.nan, 0, []
+    for b in bars:
+        upto = marks.get(b.ts)
+        if upto is None:
+            upto = done
+            while upto < len(rows) and rows[upto][0] < b.ts + MINUTE:
+                upto += 1
+        for _, kind, p in rows[done:upto]:
+            r, close = _replayed(r, kind, p, close)
+        done = max(done, upto)
+        r, _ = on_bar(r, b)
+        if runs_step(b):
+            ctxs.append(ctx(r))
+    return tuple(ctxs), r.bars
+
+
+def warmed(
+    s: RunnerState,
+    window: Sequence[Bar],
+    replayed: Sequence[tuple[datetime, Sequence[Action]]],
+    rows: Sequence[tuple[datetime, str, Mapping[str, Any]]],
+) -> Step:
+    """Warm-up done: `window` (from `warm_up`) is `Ctx.bars`, and entries wait no longer. Each
+    replayed bar's actions (`step`'s, in order) are compared with the ones journalled for it
+    live; the first that differ halt the account, open-ended ("warm-up diverged"). A bar with
+    none journalled (before arming, while down or warming up) is not compared."""
+    s = replace(s, bars=tuple(window), warming=None)
+    live = _decisions(rows)
+    for ts, actions in replayed:
+        got = [_payload(a) for a in actions]
+        want = live.get(ts, got)
+        if want != got:
+            return halt(
+                s, f"warm-up diverged at {ts.isoformat()}: journalled {want}, replayed {got}"
+            )
+    return s, ()
+
+
+def _at(p: Mapping[str, Any]) -> datetime:
+    """A "bar" row's bar open (journalled as str)."""
+    return datetime.fromisoformat(str(p["ts"]))
+
+
+def _decisions(
+    rows: Sequence[tuple[datetime, str, Mapping[str, Any]]],
+) -> dict[datetime, list[dict[str, Any]]]:
+    """Step's actions per bar as journalled live: after each "bar" row stepped live (not one
+    journalled while warming up), as many "action" / "rejection" rows as its `actions` count,
+    each as the strategy returned it."""
+    out: dict[datetime, list[dict[str, Any]]] = {}
+    ts, left = None, 0
+    for _, kind, p in rows:
+        if kind == "bar":
+            ts, left = _at(p), 0
+            if not p.get("warming"):
+                out[ts], left = [], p["actions"]
+        elif kind in ("action", "rejection") and left:
+            out[ts].append(
+                dict(p["action"])
+                if kind == "rejection"
+                else {k: v for k, v in p.items() if k not in LIVE_KEYS}
+            )
+            left -= 1
+    return out
 
 
 def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:
@@ -724,12 +844,14 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause and a drift pause. The brief unreconciled pause is not one (only `halt_reason`)."""
+    pause, a drift pause and warming up (#79; not a halt: `halted` stays false for it alone). The
+    brief unreconciled pause is not one (only `halt_reason`)."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),
         ("stale", s.stale),
         ("drift", s.drift),
+        ("warming", s.warming),
     )
     return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
 
@@ -748,8 +870,8 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "contract": a.contract,
         "halted": bool(s.halted or s.mismatch or s.stale or s.drift),
         "halt_kind": s.halt_kind if s.halted else pause,
-        # the brief unreconciled pause shows only here
-        "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.unreconciled,
+        # the unreconciled and warming-up pauses show only here
+        "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.warming or s.unreconciled,
         "conditions": conditions(s),  # each one; halt_kind and halt_reason show the first
     }
     if not s.started:
@@ -1078,7 +1200,7 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"side must be long or short, got {a.side!r}"
     if s.halted:
         return f"halted: {s.halted}"
-    if paused := s.mismatch or s.unreconciled or s.stale or s.drift:
+    if paused := s.mismatch or s.unreconciled or s.stale or s.drift or s.warming:
         return f"paused: {paused}"
     if old:  # a late or replayed bar: never trade at its old close
         return old

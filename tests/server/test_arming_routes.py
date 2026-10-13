@@ -52,6 +52,7 @@ class FakeAddon:
     def __init__(self, down: bool = False, malformed: bool = False):
         self.down = down
         self.malformed = malformed
+        self.refuse: str | None = None  # a /flatten refusal's error, e.g. "unmanaged_account"
         self.flattened: list[str] = []
 
     async def accounts(self):
@@ -65,7 +66,7 @@ class FakeAddon:
         if self.down:
             raise httpx.ConnectError("NinjaTrader is down")
         self.flattened.append(account)
-        return Ack(True, False, None)
+        return Ack(False, False, self.refuse) if self.refuse else Ack(True, False, None)
 
 
 @pytest.fixture
@@ -392,6 +393,57 @@ def test_a_disarm_whose_flatten_fails_keeps_the_row_and_says_the_position_may_be
     assert res.status_code == 200 and res.json()["ok"] is False
     assert "the position may still be open" in res.json()["error"]
     assert [a["account"] for a in armed(client)] == ["SIM1"]
+
+
+def _alerts(settings, account="SIM1"):
+    with closing(journal.open_ro(settings.private_dir / "fenrir.db")) as conn:
+        return [r.payload["message"] for r in journal.rows(conn, account, kind="alert")]
+
+
+def test_disarm_without_flatten_disarms_only_an_account_the_addon_does_not_manage(
+    client, settings, path
+):
+    """#230: the add-on refuses the flatten as unmanaged_account; the plain disarm keeps the
+    row and says `unmanaged`, and only the confirmed `flatten: false` then disarms it."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    client.app.state.live.addon.refuse = "unmanaged_account"
+    res = client.post("/api/arming/disarm", json={"account": "SIM1"}).json()
+    assert res["ok"] is False and res["unmanaged"] is True
+    assert [a["account"] for a in armed(client)] == ["SIM1"]
+    res = client.post("/api/arming/disarm", json={"account": "SIM1", "flatten": False})
+    assert res.json() == {"ok": True, "error": None}
+    assert armed(client) == []
+    assert _alerts(settings)[-1].startswith("disarmed without its flatten: the NinjaTrader add-on")
+
+
+def test_disarm_without_flatten_still_flattens_a_managed_account(client, settings, path):
+    """#230: never a way to skip a managed account's flatten: it lands, so it is flattened."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    res = client.post("/api/arming/disarm", json={"account": "SIM1", "flatten": False})
+    assert res.json() == {"ok": True, "error": None}
+    assert client.app.state.live.addon.flattened == ["SIM1", "SIM1"]
+    assert _alerts(settings) == ["disarmed; flattened, working orders cancelled"]
+
+
+@pytest.mark.parametrize("refuse", ["unknown account", "refused by the broker"])
+def test_disarm_without_flatten_keeps_an_account_refused_for_another_reason(
+    client, settings, path, refuse
+):
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    client.app.state.live.addon.refuse = refuse
+    res = client.post("/api/arming/disarm", json={"account": "SIM1", "flatten": False}).json()
+    assert res["ok"] is False and "unmanaged" not in res
+    assert res["error"].startswith(f"disarm failed: flatten failed: {refuse};")
+    assert [a["account"] for a in armed(client)] == ["SIM1"]
+
+
+@pytest.mark.parametrize("flatten", ["false", 0, None, "no"])
+def test_disarm_takes_flatten_only_as_a_strict_boolean(client, flatten):
+    res = client.post("/api/arming/disarm", json={"account": "SIM1", "flatten": flatten})
+    assert res.status_code == 422
 
 
 def test_a_failed_disarm_journals_no_disarmed_row_and_keeps_the_row(client, settings, path):

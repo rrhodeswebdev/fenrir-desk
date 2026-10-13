@@ -3,7 +3,8 @@
 UI-only: no CLI counterpart, and the terminal never has the session. Every rule is in
 `fenrir.live.arming.decide`; this gathers its inputs and writes its answer. The strategy file is
 hashed, never executed (DEC-1). The hub picks up an arm on its next tick; a disarm goes through
-the hub (`LiveHub.disarm`), which flattens a sim or live account first (#223).
+the hub (`LiveHub.disarm`), which flattens a sim or live account first (#223), skipping that
+flatten only on the user's confirmation for an account the add-on no longer manages (#230).
 """
 
 import hashlib
@@ -71,6 +72,9 @@ class ArmBody(BaseModel):
 class DisarmBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     account: str
+    # false: the user's confirmed disarm without flatten, taken only for an account whose flatten
+    # the add-on refuses as unmanaged_account (#230); no "false" or 0
+    flatten: StrictBool = True
 
 
 def _now() -> datetime:
@@ -189,4 +193,4 @@ def _arm(
 async def disarm(body: DisarmBody, request: Request) -> dict[str, Any]:
     # async, on the hub's loop: a sim or live account is flattened first, then disarmed under
     # the hub's lock (#223); the hub opens no fenrir.db that does not exist
-    return await request.app.state.live.disarm(body.account)
+    return await request.app.state.live.disarm(body.account, flatten=body.flatten)

@@ -29,7 +29,13 @@ from fenrir.bridge.names import nt_instrument
 from fenrir.bridge.reconcile import NtOrder, NtPosition
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
-from fenrir.core.instruments import Instruments, front_month, load_instruments, spec
+from fenrir.core.instruments import (
+    Instruments,
+    front_month,
+    load_instruments,
+    read_instruments,
+    spec,
+)
 from fenrir.core.sessions import trading_day
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
@@ -38,7 +44,7 @@ from fenrir.live.arming import Armed, delete_armed, list_armed
 from fenrir.live.core import Log, RunnerState, Send, Setup
 from fenrir.live.step_child import ctx_json
 from fenrir.rules.account import with_dll
-from fenrir.rules.loader import load_account
+from fenrir.rules.loader import read_account
 from fenrir.server import terminal
 from fenrir.server.isolation import as_user
 from fenrir.server.jobs_runner import strategy_user
@@ -516,17 +522,22 @@ class LiveHub:
 
     async def _start(self, a: Armed, now: datetime) -> None:
         try:
-            self.instruments = load_instruments()
+            # hashed from the very bytes in use: core.start halts on a change since arming
+            self.instruments, instruments_hash = read_instruments()
             choice = load_account_choices(self.settings.data_dir).get(
                 a.rules_account, AccountChoice()
             )
-            rules = with_dll(load_account(a.rules_account, self.settings.rules_dir), choice.dll_on)
+            rules, rules_hash = read_account(a.rules_account, self.settings.rules_dir)
             setup = Setup(
                 a,
                 _hash(a.strategy_path),
-                rules,
+                # the DLL choice armed with: core.start halts when accounts.yaml's differs
+                with_dll(rules, bool(a.dll_on)),
                 spec(self.instruments, a.contract),
                 self.settings.safety_margin_pct,
+                rules_hash=rules_hash,
+                instruments_hash=instruments_hash,
+                dll_on=choice.dll_on,
             )
         except Exception as e:  # a bad rules id, contract or file: report once, run the rest
             error = f"{type(e).__name__}: {e}"

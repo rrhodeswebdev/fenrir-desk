@@ -1,10 +1,11 @@
 import asyncio
+import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from live_helpers import ARMED_AT
+from live_helpers import ARMED_AT, RULES, pinned
 
 from fenrir.core.bars import Bar
 from fenrir.live import arming, core, journal, service
@@ -53,8 +54,17 @@ def strategy(tmp_path, source: str = ALWAYS, name: str = "always"):
 @pytest.fixture
 def armed(tmp_path) -> Armed:
     path = strategy(tmp_path)
-    return Armed(
-        "Sim101", str(path), file_hash(path), "lucid-flex-50k", "MNQ", "dry", "evaluation", ARMED_AT
+    return pinned(
+        Armed(
+            "Sim101",
+            str(path),
+            file_hash(path),
+            "lucid-flex-50k",
+            "MNQ",
+            "dry",
+            "evaluation",
+            ARMED_AT,
+        )
     )
 
 
@@ -213,6 +223,52 @@ async def test_a_row_after_the_close_is_no_proof_of_a_roll(hub, conn, armed, mon
     clock["t"] = after + timedelta(minutes=5)
     await hub.tick(clock["t"])
     assert got[0].halted.startswith("confirm balances: ")
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (None, None),
+        ("dll_on", "dll_on changed since arming (armed off, accounts.yaml now on); re-arm"),
+        ("rules", "rules file changed since arming; re-arm"),
+        ("instruments", "instruments.yaml changed since arming; re-arm"),
+    ],
+)
+async def test_a_start_with_inputs_other_than_the_pinned_halts(
+    settings, conn, armed, tmp_path, monkeypatch, change, reason
+):
+    """#91, DEC-4d: after a Settings change and a restart the account halts, never trading an
+    untested DLL choice, rules file or instruments.yaml; its strategy never runs."""
+    rules = tmp_path / "rules"
+    shutil.copytree(RULES / "lucid", rules / "lucid")
+    shutil.copy("instruments.yaml", tmp_path / "instruments.yaml")
+    monkeypatch.chdir(tmp_path)  # the hub reads ./instruments.yaml
+    edited = {
+        "dll_on": settings.data_dir / "accounts.yaml",
+        "rules": rules / "lucid" / "flex-50k.yaml",
+        "instruments": tmp_path / "instruments.yaml",
+    }
+    if change == "dll_on":
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        edited[change].write_text("lucid-flex-50k: {dll_on: true}\n")
+    elif change is not None:
+        with edited[change].open("a") as f:
+            f.write("\n# edited after arming\n")
+    arming.insert_armed(conn, armed)
+    hub = LiveHub(replace(settings, rules_dir=rules))
+    try:
+        await hub.tick(T0)
+        [acc] = hub.status()["accounts"]
+        assert acc["halt_reason"] == reason
+        if reason is None:
+            assert hub.children and kinds(conn) == []
+        else:
+            assert acc["halted"] is True and acc["balance"] is None
+            assert hub.children == {}  # the strategy never runs
+            [row] = journal.rows(conn, account="Sim101")
+            assert (row.kind, row.payload["reason"]) == ("halt", reason)
+    finally:
+        await hub.stop()
 
 
 async def test_file_edited_while_armed_halts_on_next_bar(hub, conn, armed):

@@ -2,7 +2,8 @@
 
 UI-only: no CLI counterpart, and the terminal never has the session. Every rule is in
 `fenrir.live.arming.decide`; this gathers its inputs and writes its answer. The strategy file is
-hashed, never executed (DEC-1). The hub picks up a change to `armed` on its next tick.
+hashed, never executed (DEC-1). The hub picks up an arm on its next tick; a disarm goes through
+the hub (`LiveHub.disarm`), which flattens a sim or live account first (#223).
 """
 
 import hashlib

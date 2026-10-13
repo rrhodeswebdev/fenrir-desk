@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, NQ, bar, make_rules, rules_data, scripted
-from live_helpers import decide_now, make_setup
+from live_helpers import decide_now, make_setup, reconciled
 
 from fenrir.backtest.attempt import run_attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
@@ -20,7 +20,7 @@ LONG = Bracket("long", 1, 19990.0, 20020.0)  # stop-out: (10 + 1 tick) x $20 = $
 
 def run(setup, b=BAR, state=None):
     """Start (unless given a state), feed one bar; return the state before decide."""
-    s = state or core.start(setup, b.ts)[0]
+    s = state or reconciled(core.start(setup, b.ts)[0])
     return core.on_bar(s, b)[0]
 
 

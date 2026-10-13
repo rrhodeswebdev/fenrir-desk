@@ -195,12 +195,12 @@ One Python file in `strategies/` exporting `MARKET`, `PARAMS`, `init(params) -> 
 - **Stricter of (DEC-4b):** drawdown remaining and today's P&L are computed from the app's own state and from NinjaTrader's balance and P&L against the same floor; the smaller distance wins. The Live page shows NinjaTrader's absolute balance and every distance in dollars.
 - **Pinned inputs (DEC-4d):** arming stores the account's `dll_on` and the hashes of its rules file and `instruments.yaml`; if `accounts.yaml` disagrees on `dll_on`, or either file's hash changes, the runner halts the account until it is re-armed (like a changed strategy file).
 - **Warm-up (DEC-4e):** on start or restart, `Ctx.bars` fills from the Parquet store plus today's live bars, and `init` + `step` replay today's session with actions suppressed; at each replayed bar `ctx.position` and `ctx.account` come from today's journalled fills. A replayed action that differs from the journalled one for that bar halts the account ("warm-up diverged"). Live decisions start at the next closed bar.
-- **Reconciliation:** on start and every reconnect. Any mismatch halts the account until the user resolves it. NinjaTrader is the source of truth for positions.
+- **Reconciliation:** on start and every reconnect; sim and live take no new entries until it matches. Any mismatch pauses new entries until the user resolves it (Resolve re-checks NinjaTrader and also clears a drift pause, never a halt or breach). NinjaTrader is the source of truth for positions: the runner takes its position and the stop and target covering it. A position with no covering stop (a manual trade, or a manual add the OCO was not resized for) is also flattened at once, with an alert: fail-safe, since an unprotected position cannot wait for the user. While unreconciled, a position still held at flat-by or the day close pauses for reconcile instead of breaching: its exit fill may have been missed while the link was down. After a restart, today's journalled orders and fills rebuild the position and P&L before reconciling.
 - **Failure handling:**
 
 | Situation | Behavior |
 |---|---|
-| App, container or link lost | No new entries; open positions keep broker-side stop and target. |
+| App, container or link lost | No new entries until reconciled (one alert per outage); open positions keep broker-side stop and target. |
 | Heartbeat lost with a position | Keep the bracket (default) or flatten: the add-on's `flatten_on_disconnect_seconds`, since Python cannot act once the link is down. (`FENRIR_HEARTBEAT_POLICY` is retired.) |
 | No LSE bar for N seconds in session, or LSE drifts from fills | Pause new entries and alert. |
 | 16:40 America/New_York | Add-on flattens and cancels its managed accounts on its own, Python connected or not. |

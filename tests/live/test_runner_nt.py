@@ -5,7 +5,7 @@ from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, bar, make_rules, rules_data
-from live_helpers import decide_now, make_setup
+from live_helpers import decide_now, make_setup, reconciled
 
 from fenrir.core.actions import Bracket
 from fenrir.live import core
@@ -44,7 +44,7 @@ def account(balance=50_000.0, today=0.0, unrealized=0.0, is_sim=True):
 
 def running(setup, *messages, b=T):
     """Started, given NinjaTrader's `messages`, then fed bar `b`."""
-    s = core.start(setup, b.ts)[0]
+    s = reconciled(core.start(setup, b.ts)[0])
     for m in messages:
         s = core.on_account(s, m, b.ts)[0]
     return core.on_bar(s, b)[0]

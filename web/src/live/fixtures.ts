@@ -125,6 +125,7 @@ export const row = (account: string, ts: string, kind: JournalRow['kind'], paylo
 export function deskJournal(): Record<string, JournalRow[]> {
   return {
     'LFE 0507': [
+      row('LFE 0507', '2026-10-12T22:00:00+00:00', 'day_start', { day: '2026-10-13', balance: 51200, peak: 51412, ts: '2026-10-12T22:00:00+00:00' }),
       row('LFE 0507', '2026-10-13T13:30:00+00:00', 'alert', { message: 'session open' }),
       row('LFE 0507', '2026-10-13T18:11:00+00:00', 'action', { type: 'Bracket', side: 'long', qty: 2, stop: 25402.25, target: 25432.25, mode: 'live', sent: true, client_id: 'c1' }),
       row('LFE 0507', '2026-10-13T18:12:00+00:00', 'fill', { type: 'fill', qty: 2, instrument: 'MNQ 12-26', price: 25412.25 }),

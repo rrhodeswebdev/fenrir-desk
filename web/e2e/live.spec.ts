@@ -173,20 +173,21 @@ test("the journal tape shows today's events, MISMATCH in Red, and links to the f
   await expect(tape.locator('li[data-kind="REJECT"]').getByText('REJECT')).toHaveCSS('color', 'rgb(143, 160, 178)')
   await expect(tape.locator('li[data-kind="BAR"]')).toHaveCount(0) // bars only in the full journal
   await expect(rows).toHaveCount(7)
-  // one read for every account (disarmed ones too), today's trading day in New York, bars and peaks left on the server
+  // one read for every account (disarmed ones too), today's trading day in New York, bars, peaks and opens left on the server
   const q = calls.journal[0]!
   expect(q.get('account')).toBeNull()
   expect(q.get('day')).toMatch(/^\d{4}-\d{2}-\d{2}$/)
-  expect(q.getAll('skip')).toEqual(['bar', 'peak'])
+  expect(q.getAll('skip')).toEqual(['bar', 'peak', 'day_start'])
 
   await tape.getByRole('link', { name: 'Full journal' }).click()
   await expect(page).toHaveURL(/\/live\/journal$/)
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Journal')
   // bars stay on the server until asked for
-  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(8)
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(9)
+  await expect(page.locator('li[data-kind="OPEN"]')).toContainText('LFE 0507 · open $51,200 · peak $51,412')
   expect(calls.journal.at(-1)?.getAll('skip')).toEqual(['bar'])
   await page.getByRole('button', { name: 'Show bars' }).click()
-  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(9)
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(10)
   await expect(page.getByRole('button', { name: 'Hide bars' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('li[data-kind="BAR"]')).toContainText('LFE 0507 · MNQZ26 C 25,418.50 · hold')
   expect(calls.journal.at(-1)?.getAll('skip')).toEqual([])

@@ -326,7 +326,7 @@ export function journalState(j: { rows: JournalRow[]; error: string | null; load
 /** The latest of today's events across every account, ending with the Full journal link. `alone` when no sleeves
  * stand beside it (nothing armed, or the status unreadable). */
 export function JournalTape({ day, alone }: { day: string; alone?: boolean }) {
-  const j = useJournal(day, ['bar', 'peak'])
+  const j = useJournal(day, ['bar', 'peak', 'day_start'])
   const rows = tape(j.rows)
   return (
     <section

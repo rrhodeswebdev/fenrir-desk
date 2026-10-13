@@ -1,9 +1,12 @@
 """22.4: the hub posts the core's Sends to the add-on (the fake), journals failed sends, replays
 journalled fills on a restart. 22.5: it follows the add-on's event stream (reconcile, lost link,
-account figures, fills), resolves and kills. The hub cannot start sim yet (23.3 stores the start
-figures), so `figures` supplies them, and reconciles with a flat book as on `connected`."""
+account figures, fills), resolves and kills. The armed rows here carry no balances, so the hub
+starts them at once instead of waiting for NinjaTrader's first account message (#211, in
+test_hub_start.py); `figures` supplies the start figures and reconciles with a flat book as on
+`connected`."""
 
 import asyncio
+import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -11,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from live_helpers import ARMED_AT, fill, pinned, reconciled
+from live_helpers import ARMED_AT, RULES, fill, pinned, reconciled
 
 from fenrir.bridge.client import Ack, AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
@@ -340,6 +343,32 @@ async def test_only_this_accounts_instrument_reaches_on_fill(hub, conn, armed):
     assert hub.states["Sim101"].position.qty == 0
 
 
+async def test_a_fill_is_matched_on_its_accounts_own_instruments(
+    settings, client, conn, armed, tmp_path, monkeypatch
+):
+    """#211 (folded from #208): Sim101 books its fill on the instruments.yaml it started with,
+    after accounts started on an edited one before and after it (its own pin halts it)."""
+    shutil.copytree(RULES / "lucid", tmp_path / "rules" / "lucid")
+    p = tmp_path / "instruments.yaml"
+    shutil.copy("instruments.yaml", p)
+    original = p.read_text()
+    edited = original.replace("last_year: 2030", "last_year: 2025")  # no NQ contract today
+    monkeypatch.chdir(tmp_path)  # the hub reads ./instruments.yaml
+    hub = LiveHub(replace(settings, rules_dir=tmp_path / "rules"), addon=client)
+    try:
+        arming.delete_armed(conn, "Sim101")
+        for account, text in (("Sim100", edited), ("Sim101", original), ("Sim102", edited)):
+            p.write_text(text)
+            arming.insert_armed(conn, pinned(replace(armed, account=account)))
+            await hub.tick(T0)
+        assert hub.states["Sim101"].halted == "instruments.yaml changed since arming; re-arm"
+        await hub.handle_fill(FOREIGN)  # MNQ 12-26: Sim101's front month on its own calendar
+        assert [r.kind for r in journal.rows(conn, account="Sim101", kind="fill")] == ["fill"]
+        assert hub.states["Sim101"].position.qty == 1
+    finally:
+        await hub.stop()
+
+
 async def test_dry_runs_take_no_fills(hub, conn, armed):
     arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
     await hub.tick(T0)
@@ -435,12 +464,14 @@ async def test_refused_peak_rows_and_every_restored_row_after_them_are_retried(
     """Rows after the first refused one are not tried; the restored kinds among them are kept."""
     on_bar = core.on_bar
     peak = {"peak": 50_100.0, "ts": T0.isoformat()}
+    opened = {"day": "2026-10-12", "balance": 50_000.0, "peak": 50_100.0, "ts": T0.isoformat()}
     breach = {"reason": "breach max_drawdown: x", "kind": "breach", "until": None}
 
     def fake_on_bar(s, b):
         s, out = on_bar(s, b)
         s = replace(s, halted=breach["reason"], halt_kind="breach")
-        return s, (*out, core.Log("peak", peak), core.Log("halt", breach))
+        restored = (core.Log("peak", peak), core.Log("day_start", opened), core.Log("halt", breach))
+        return s, (*out, *restored)
 
     monkeypatch.setattr(core, "on_bar", fake_on_bar)
     await hub.tick(T0)
@@ -449,7 +480,8 @@ async def test_refused_peak_rows_and_every_restored_row_after_them_are_retried(
     assert kinds(conn) == []  # the halt after the refused peak is not tried yet
     switch["on"] = False
     await hub.tick(T0 + timedelta(seconds=5))
-    assert [r.payload for r in rows(conn) if r.kind in ("peak", "halt")][:2] == [peak, breach]
+    restored = [r.payload for r in rows(conn) if r.kind in ("peak", "day_start", "halt")]
+    assert restored[:3] == [peak, opened, breach]
 
 
 async def test_stop_tries_once_to_flush_queued_rows(hub, conn, armed, monkeypatch):

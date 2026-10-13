@@ -14,7 +14,7 @@ from typing import Any
 
 from fenrir.core.sessions import NY
 
-KINDS = frozenset({"bar", "action", "rejection", "fill", "alert", "halt", "peak"})
+KINDS = frozenset({"bar", "action", "rejection", "fill", "alert", "halt", "peak", "day_start"})
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS journal (

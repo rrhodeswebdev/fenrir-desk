@@ -8,7 +8,7 @@ export type JournalRow = {
   id: number
   ts: string
   account: string
-  kind: 'bar' | 'action' | 'rejection' | 'fill' | 'alert' | 'halt' | 'peak'
+  kind: 'bar' | 'action' | 'rejection' | 'fill' | 'alert' | 'halt' | 'peak' | 'day_start'
   payload: Record<string, unknown>
 }
 
@@ -25,9 +25,11 @@ export const journalPollMs = ({ error }: { error: unknown }): number | false =>
 export const merge = (lists: JournalRow[][]): JournalRow[] =>
   lists.flat().sort((x, y) => (x.ts < y.ts ? 1 : x.ts > y.ts ? -1 : y.id - x.id))
 
-/** The tape: the latest events, without the per-minute `bar` rows and the `peak` bookkeeping (the full journal has them). */
+/** The tape: the latest events, without the per-minute `bar` rows and the `peak` and `day_start` bookkeeping (the full
+ * journal has them). */
 export const TAPE_ROWS = 12
-export const tape = (rows: JournalRow[]): JournalRow[] => rows.filter((r) => r.kind !== 'bar' && r.kind !== 'peak').slice(0, TAPE_ROWS)
+const BOOKKEEPING: JournalRow['kind'][] = ['bar', 'peak', 'day_start']
+export const tape = (rows: JournalRow[]): JournalRow[] => rows.filter((r) => !BOOKKEEPING.includes(r.kind)).slice(0, TAPE_ROWS)
 
 export type Line = { key: string; time: string; kind: string; tone: Tone; text: string }
 
@@ -80,6 +82,10 @@ export function journalLine(r: JournalRow): Line {
       break
     case 'peak':
       text = `peak ${typeof p.peak === 'number' ? usd(p.peak) : '—'}`
+      break
+    case 'day_start': // today's opening balance and the drawdown peak it opened with (#211)
+      kind = 'OPEN'
+      text = join(`open ${typeof p.balance === 'number' ? usd(p.balance) : '—'}`, typeof p.peak === 'number' && `peak ${usd(p.peak)}`)
       break
     default:
       text = JSON.stringify(p)

@@ -12,10 +12,11 @@ describe('trading day', () => {
 })
 
 describe('tape', () => {
-  it('merges every account newest first and leaves bars and peaks to the full journal', () => {
+  it('merges every account newest first and leaves bars, peaks and opens to the full journal', () => {
     const all = merge(Object.values(deskJournal()))
-    expect(all).toHaveLength(9)
+    expect(all).toHaveLength(10)
     expect(all[0]?.kind).toBe('peak') // 18:31:00, the later id first
+    expect(all.at(-1)?.kind).toBe('day_start') // the open, 18:00 New York the evening before
     const t = tape(all)
     expect(t.map((r) => r.kind)).toEqual(['halt', 'fill', 'action', 'halt', 'fill', 'rejection', 'alert'])
     const many = Array.from({ length: 30 }, (_, i) => row('A', `2026-10-13T15:${String(i).padStart(2, '0')}:00+00:00`, 'alert', { message: 'x' }))
@@ -70,5 +71,10 @@ describe('journal line', () => {
     )
     expect(line('fill', { qty: -2, instrument: 'MNQ 12-26', price: 25301.75 }).text).toBe('LFE 0911 · Sell 2 MNQ 12-26 @ 25,301.75')
     expect(line('peak', { peak: 51412 }).text).toBe('LFE 0911 · peak $51,412')
+    expect(line('day_start', { day: '2026-10-13', balance: 50300.5, peak: 50800, ts: '' })).toMatchObject({
+      kind: 'OPEN',
+      tone: 'idle',
+      text: 'LFE 0911 · open $50,300.50 · peak $50,800',
+    })
   })
 })

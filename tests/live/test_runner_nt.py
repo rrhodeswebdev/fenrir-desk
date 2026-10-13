@@ -42,9 +42,9 @@ def account(balance=50_000.0, today=0.0, unrealized=0.0, is_sim=True):
     }
 
 
-def running(setup, *messages, b=T):
-    """Started, given NinjaTrader's `messages`, then fed bar `b`."""
-    s = reconciled(core.start(setup, b.ts)[0])
+def running(setup, *messages, b=T, state=None):
+    """Started (or `state`), given NinjaTrader's `messages`, then fed bar `b`."""
+    s = reconciled(state or core.start(setup, b.ts)[0])
     for m in messages:
         s = core.on_account(s, m, b.ts)[0]
     return core.on_bar(s, b)[0]
@@ -321,3 +321,158 @@ def test_a_second_outage_drops_the_figures_too():
     assert effects == () and s.nt is None  # one alert per outage, but never stale figures
     s, effects = core.on_bar(s, at("09:30", D2))
     assert s.halted.startswith("confirm balances: ") and peaks(effects) == []
+
+
+# #211: today's open (day_start) comes from the journal, else from NinjaTrader's figures at start
+
+
+def first_start(balance=50_300.0, realized=0.0, opens=(), now=T.ts):
+    """A sim start from the first account message (`balance`, `realized` today), with no
+    day_start given and the journalled opens since arming."""
+    setup = replace(sim(), start=replace(START, balance=balance, realized_today=realized))
+    return core.start(replace(setup, day_start=None), now, opens=opens)
+
+
+def opened(day, balance, peak=50_000.0):
+    """A "day_start" payload journalled for trading day `day`."""
+    return {"day": day.isoformat(), "balance": balance, "peak": peak, "ts": iso(T.ts)}
+
+
+@pytest.mark.parametrize("realized", [0.0, -800.0, -1000.0])
+def test_without_a_journalled_open_ninjatraders_own_open_opens_the_day(realized):
+    """The open is NinjaTrader's balance less its realized loss today, so a morning loss counts
+    once in the stricter-of equity (DEC-4b), not twice: the room and the safety margin are right."""
+    yesterday = opened(D1 - timedelta(days=1), 1.0)
+    balance = 50_000.0 + realized
+    s, effects = first_start(balance, realized, opens=[yesterday])
+    assert s.setup.day_start == DayStart(50_000.0, 50_000.0)
+    assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (realized, 0.0, 0.0)
+    assert s.acct.traded_today is (realized != 0.0)
+    note, row = effects
+    assert note.kind == "alert" and "realized loss today, 50000.00" in note.payload["message"]
+    assert row == Log("day_start", opened(D1, 50_000.0))
+    s = running(s.setup, account(balance, today=realized), state=s)
+    st = core.account_status(s)
+    assert (st["today_pnl"], st["limits"]["drawdown_remaining"]) == (realized, 2000.0 + realized)
+    assert s.halted is None  # L=1000 left the safety margin's room: no false halt
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "action", "send"]  # today's open is known
+
+
+def test_a_morning_gain_opens_the_day_at_the_balance_and_stays_in_it():
+    """A realized gain gives no extra daily room (stricter than the firm by the gain, and
+    whatever time NinjaTrader resets its realized P&L), and a replay never cuts it from the
+    balance: no journalled fill holds it (review of #217 at 33bd517)."""
+    s, effects = first_start(50_500.0, 500.0)
+    assert s.setup.day_start == DayStart(50_500.0, 50_000.0)
+    assert kinds(effects) == ["alert", "day_start"]
+    s = core.replay(s, [])
+    assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (500.0, 500.0, 500.0)
+    s = running(s.setup, account(50_500.0, today=500.0), state=s)
+    st = core.account_status(s)
+    assert (st["balance"], st["today_pnl"], st["limits"]["drawdown_remaining"]) == (
+        500.0,
+        0.0,
+        2500.0,
+    )
+
+
+def test_a_journalled_open_for_today_is_todays_open_and_journals_nothing():
+    early, today = opened(D1, 50_100.0), opened(D1, 50_300.0, peak=50_400.0)
+    s, effects = first_start(
+        49_900.0, -100.0, opens=[opened(D1 - timedelta(days=1), 1.0), early, today]
+    )
+    assert effects == () and s.setup.day_start == DayStart(50_300.0, 50_400.0)  # the latest
+    assert (s.acct.balance, s.acct.day_start_balance) == (-100.0, 300.0)
+    assert (s.session_start, s.session_floor) == (300.0, -1600.0)  # the open's floor, peak +400
+    assert core.account_status(s)["today_pnl"] == -400.0  # not 0: the restart is mid-day
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        make_setup(make_rules(), start=replace(START, realized_today=0.0)),  # dry: fresh
+        replace(sim(), start=replace(START, realized_today=0.0)),  # day_start given
+        replace(sim(), day_start=None),  # no NinjaTrader realized P&L today: no open known
+    ],
+)
+def test_no_open_is_derived_without_the_figures_or_the_need(setup):
+    s, effects = core.start(setup, T.ts)
+    assert s.setup.day_start == (None if setup.armed.mode == "dry" else setup.day_start)
+    assert effects == ()
+
+
+def test_a_refused_start_journals_no_open():
+    setup = replace(sim(), start=replace(START, realized_today=0.0), day_start=None)
+    s, effects = core.start(replace(setup, rules_hash="edited"), T.ts)
+    assert kinds(effects) == ["halt"] and not s.started
+
+
+def test_replayed_fills_count_once_against_ninjatraders_open():
+    """No open journalled (its row lost), today's +$200 trade journalled: a gain opens the day at
+    NinjaTrader's balance, which holds that trade, so the replay never books it twice (the open
+    fails closed: the gain gives no extra daily room)."""
+    b, rows = T, []
+    s, effects = decide_now(running(sim()), [LONG])
+    rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    for f in (
+        {**fill_at(b.ts + timedelta(seconds=61), 1), "client_id": s.working.client_id},
+        {**fill_at(at("09:32").ts, -1), "price": 20010.0},
+    ):
+        s, effects = core.on_fill(s, f)
+        rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    booked = s.acct.balance
+    r, _ = first_start(50_000.0 + booked, booked, now=at("09:40").ts)
+    r = core.replay(r, rows)
+    assert booked == 200.0 and (r.acct.balance, r.acct.day_start_balance) == (booked, booked)
+
+
+def test_a_first_balance_at_or_below_the_liquidation_level_cannot_start():
+    """Never a breach from a figure at start (NinjaTrader's figures never raise one): halted
+    "confirm balances" until re-armed, with no figures and no open journalled."""
+    s, effects = first_start(48_000.0, -2000.0)  # the pins' floor: 50,000 - 2,000
+    assert kinds(effects) == ["halt"] and not s.started and s.halt_kind is None
+    assert s.halted == (
+        "confirm balances: NinjaTrader's balance 48000.00 is at or below the liquidation level"
+        " 48000.00 from the armed balances; re-arm with the confirmed balances"
+    )
+    s, effects = core.on_bar(core.on_account(s, account(48_000.0), T.ts)[0], T)
+    assert s.halt_kind is None and "halt" not in kinds(effects)  # never a breach
+    assert core.account_status(s)["balance"] is None
+    assert (s.setup.start, s.setup.day_start, s.nt) == (None, None, None)
+    s, effects = core.on_bar(s, at("09:30", D2))  # a roll: nothing to raise or open
+    assert not {"peak", "day_start", "halt"} & set(kinds(effects))
+    assert first_start(48_000.01, -1999.99)[0].started
+
+
+def test_every_sim_roll_journals_the_new_days_open_and_a_restart_takes_it():
+    s = running(sim(), account(balance=50_400.0))
+    nxt = at("09:30", D2)
+    s, effects = core.on_bar(s, nxt)
+    [row] = [e.payload for e in effects if isinstance(e, Log) and e.kind == "day_start"]
+    assert row == {"day": D2.isoformat(), "balance": 50_000.0, "peak": 50_400.0, "ts": iso(nxt.ts)}
+    r, out = first_start(49_800.0, -200.0, opens=[row], now=at("11:00", D2).ts)
+    assert out == () and (r.session_start, r.session_floor) == (s.session_start, s.session_floor)
+    assert r.acct.day_start_balance == s.acct.day_start_balance
+    dry = make_setup(make_rules(), start=START)
+    assert "day_start" not in kinds(core.on_bar(running(dry), nxt)[1])
+
+
+def test_a_roll_that_breaches_journals_no_open():
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))  # held over the close
+    s, effects = core.on_bar(core.on_account(s, account(), T.ts)[0], at("09:30", D2))
+    assert s.halt_kind == "breach" and "day_start" not in kinds(effects)
+
+
+@pytest.mark.parametrize("balance", [0.0, -5.0])
+def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
+    """NinjaTrader before its account data loads (e.g. after it restarts) reports 0: the last
+    figures stand, so no false safety-margin halt (review of #217, NB2)."""
+    s = running(sim(), account(50_400.0))
+    s2, effects = core.on_account(s, account(balance), T.ts)
+    assert effects == () and s2.nt == s.nt == core.NtAccount(50_400.0, 0.0, 0.0)
+    s2, effects = core.on_bar(s2, at("09:31"))
+    assert s2.halted is None and "halt" not in kinds(effects)
+    halted, _ = core.on_account(s, account(balance, is_sim=False), T.ts)
+    assert halted.halted.startswith("mode mismatch: ")  # the mode is still checked

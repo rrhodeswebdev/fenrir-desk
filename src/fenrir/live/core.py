@@ -53,6 +53,10 @@ NO_CLOSE = (
     "confirm balances: no NinjaTrader balance at the end-of-day session close;"
     " re-arm with the confirmed peak balance"
 )
+CONFIRM_LIQUIDATED = (
+    "confirm balances: NinjaTrader's balance {balance:.2f} is at or below the liquidation level"
+    " {level:.2f} from the armed balances; re-arm with the confirmed balances"
+)
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -64,11 +68,15 @@ class Start:
     phase_start: float  # balance when the current phase began (armed.start_balance)
     peak: float  # highest end-of-day balance (end_of_day) or intraday equity (intraday) so far
     balance: float  # balance now
+    # NinjaTrader's realized P&L today, from the same account message as `balance`: with no open
+    # journalled for today, `start` opens the day at `balance - min(realized_today, 0)` (#211)
+    realized_today: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class DayStart:
-    """NinjaTrader figures at today's session open, absolute $; 21.5 or the hub supplies them."""
+    """Figures at today's session open, absolute $: `start` takes them from today's journalled
+    "day_start" row (each roll journals one), else from NinjaTrader's figures at start."""
 
     balance: float  # balance at the open
     peak: float  # the drawdown peak at the open (as Start.peak), which fixes the open's floor
@@ -194,14 +202,35 @@ def start(
     now: datetime,
     halts: Sequence[Mapping[str, Any]] = (),
     peaks: Sequence[Mapping[str, Any]] = (),
+    opens: Sequence[Mapping[str, Any]] = (),
 ) -> Step:
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
-    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a)."""
+    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a). `opens`: the
+    "day_start" payloads journalled since then. Without `setup.day_start`, today's open is the
+    last of them for today, so a restart mid-day never opens the day at the balance now; with
+    none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
+    0; a gain stays in the open, so it gives no extra daily room and `replay` never cuts it from
+    the balance), journalled as a "day_start" row with an "alert"; without those figures, none
+    (no brackets)."""
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
+    opened: tuple[Log, ...] = ()
     if begin is not None:
         begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
+        if setup.day_start is None:
+            today = trading_day(now).isoformat()
+            rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
+            if rows:
+                setup = replace(setup, day_start=rows[-1])  # the latest: one per arming and day
+            elif begin.realized_today is not None:  # before today's losses, never above the balance
+                loss = min(begin.realized_today, 0.0)
+                setup = replace(setup, day_start=DayStart(begin.balance - loss, begin.peak))
+                message = (
+                    f"no open journalled for {today}: today's opening balance is NinjaTrader's"
+                    f" balance less its realized loss today, {setup.day_start.balance:.2f}"
+                )
+                opened = (Log("alert", {"message": message}),)
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
     # an intraday peak starts at least at the balance: journal that raise too
@@ -236,6 +265,15 @@ def start(
     if a.mode != "dry" and setup.start is None:
         reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
         return halt(replace(s, started=False), reason)
+    if begin and at_or_below(acct.balance, acct.floor):
+        # a figure at start never raises a breach: it cannot start, with the app's figures fresh
+        level = begin.phase_start + acct.floor
+        fresh = replace(setup, start=None, day_start=None)
+        s = replace(s, setup=fresh, acct=initial_state(setup.rules, a.phase, acct.day))
+        reason = CONFIRM_LIQUIDATED.format(balance=begin.balance, level=level)
+        return halt(replace(s, started=False), reason)
+    if opened:  # so a later restart today opens the day at the same figures
+        out += (*opened, _open_log(acct.day, setup.day_start, now))
     trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
     if begin and trailing == "end_of_day" and _missed_close(a.armed_at, peaks, acct.day):
         s, more = halt(s, CONFIRM_BALANCES)
@@ -387,7 +425,8 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
 def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Step:
     """One add-on `account` message for this account (validated by fenrir.bridge.client); dry
     runs ignore them. A sim/live mismatch halts until disarmed; otherwise the figures feed the
-    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a)."""
+    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a). A
+    balance at or below 0 is not a figure yet: the last figures stand."""
     mode = s.setup.armed.mode
     if mode == "dry":
         return s, ()
@@ -395,6 +434,8 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
         theirs = "sim" if account["is_sim"] else "live"
         return halt(s, f"mode mismatch: armed {mode}, NinjaTrader reports a {theirs} account")
     if s.setup.start is None:  # could not start: no phase start to set its figures against
+        return s, ()
+    if account["balance"] <= 0:  # not a figure yet (NinjaTrader before its account data loads)
         return s, ()
     nt = NtAccount(account["balance"], account["realized_pnl_today"], account["unrealized_pnl"])
     was, s = s, replace(s, nt=nt)
@@ -891,6 +932,9 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         session_start=acct.day_start_balance,
         session_floor=acct.floor,
     )
+    if s.setup.armed.mode != "dry" and (start := s.setup.start) and s.halt_kind != "breach":
+        opens = DayStart(start.phase_start + acct.day_start_balance, start.phase_start + acct.peak)
+        out += (_open_log(day, opens, ts),)  # a restart today opens the day as this roll did
     if s.halt_day is not None and day > s.halt_day:
         out += (Log("alert", {"message": f"halt lifted: {s.halted}"}),)
         s = replace(s, halted=None, halt_kind=None, halt_day=None)
@@ -917,6 +961,15 @@ def _peak_log(setup: Setup, a: AccountState, ts: datetime) -> Log:
     """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
     return Log("peak", {"peak": setup.start.phase_start + a.peak, "ts": stamp})
+
+
+def _open_log(day: date, opens: DayStart, ts: datetime) -> Log:
+    """Trading day `day`'s open as a "day_start" row, which `start` reads back on a restart."""
+    stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
+    return Log(
+        "day_start",
+        {"day": day.isoformat(), "balance": opens.balance, "peak": opens.peak, "ts": stamp},
+    )
 
 
 def _strict(s: RunnerState) -> AccountState:

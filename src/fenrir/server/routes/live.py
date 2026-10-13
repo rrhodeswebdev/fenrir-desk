@@ -25,7 +25,7 @@ async def status(request: Request) -> dict[str, Any]:
     return request.app.state.live.status()
 
 
-Kind = Literal["bar", "action", "rejection", "fill", "alert", "halt", "peak"]
+Kind = Literal["bar", "action", "rejection", "fill", "alert", "halt", "peak", "day_start"]
 
 
 @router.get("/journal")

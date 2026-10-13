@@ -321,3 +321,78 @@ def test_a_second_outage_drops_the_figures_too():
     assert effects == () and s.nt is None  # one alert per outage, but never stale figures
     s, effects = core.on_bar(s, at("09:30", D2))
     assert s.halted.startswith("confirm balances: ") and peaks(effects) == []
+
+
+# #211: today's open (day_start) comes from the journal, else from the balance at start
+
+
+def first_start(balance=50_300.0, opens=(), setup=None, now=T.ts):
+    """A sim start from the first account message (`balance`), with no day_start given, the
+    journalled opens since arming passed, then `open_day` as the hub runs it."""
+    setup = setup or replace(sim(), start=replace(START, balance=balance), day_start=None)
+    s, out = core.start(setup, now, opens=opens)
+    s, more = core.open_day(s, now)
+    return s, out + more
+
+
+def opened(day, balance, peak=50_000.0):
+    """A "day_start" payload journalled for trading day `day`."""
+    return {"day": day.isoformat(), "balance": balance, "peak": peak, "ts": iso(T.ts)}
+
+
+def test_without_a_journalled_open_the_balance_at_start_opens_the_day():
+    s, effects = first_start(50_300.0, opens=[opened(D1 - timedelta(days=1), 1.0)])
+    assert s.setup.day_start == DayStart(50_300.0, 50_000.0)
+    assert (s.acct.balance, s.acct.day_start_balance, s.session_start) == (300.0, 300.0, 300.0)
+    note, row = effects
+    assert (
+        note.kind == "alert"
+        and "NinjaTrader's balance at start, 50300.00" in note.payload["message"]
+    )
+    assert row == Log("day_start", opened(D1, 50_300.0))
+    _, effects = decide_now(core.on_bar(reconciled(s), T)[0], [LONG])
+    assert kinds(effects) == ["bar", "action", "send"]  # today's open is known
+
+
+def test_a_journalled_open_for_today_is_todays_open_and_journals_nothing():
+    today = opened(D1, 50_300.0, peak=50_400.0)
+    s, effects = first_start(49_900.0, opens=[opened(D1 - timedelta(days=1), 1.0), today])
+    assert effects == () and s.setup.day_start == DayStart(50_300.0, 50_400.0)
+    assert (s.acct.balance, s.acct.day_start_balance) == (-100.0, 300.0)
+    assert (s.session_start, s.session_floor) == (300.0, -1600.0)  # the open's floor, peak +400
+    assert core.account_status(s)["today_pnl"] == -400.0  # not 0: the restart is mid-day
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        make_setup(make_rules(), start=START),  # dry runs start fresh
+        sim(),  # day_start given
+        make_setup(make_rules(), mode="sim"),  # no start: cannot start
+        replace(sim(), day_start=None, rules_hash="edited"),  # refused at start
+    ],
+)
+def test_open_day_leaves_alone_what_it_must_not_open(setup):
+    s, _ = core.start(setup, T.ts)
+    assert core.open_day(s, T.ts) == (s, ())
+
+
+def test_every_sim_roll_journals_the_new_days_open_and_a_restart_takes_it():
+    s = running(sim(), account(balance=50_400.0))
+    nxt = at("09:30", D2)
+    s, effects = core.on_bar(s, nxt)
+    [row] = [e.payload for e in effects if isinstance(e, Log) and e.kind == "day_start"]
+    assert row == {"day": D2.isoformat(), "balance": 50_000.0, "peak": 50_400.0, "ts": iso(nxt.ts)}
+    later = at("11:00", D2).ts
+    r, out = first_start(49_800.0, opens=[row], now=later)
+    assert out == () and (r.session_start, r.session_floor) == (s.session_start, s.session_floor)
+    assert r.acct.day_start_balance == s.acct.day_start_balance
+    dry = make_setup(make_rules(), start=START)
+    assert "day_start" not in kinds(core.on_bar(running(dry), nxt)[1])
+
+
+def test_a_roll_that_breaches_journals_no_open():
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))  # held over the close
+    s, effects = core.on_bar(core.on_account(s, account(), T.ts)[0], at("09:30", D2))
+    assert s.halt_kind == "breach" and "day_start" not in kinds(effects)

@@ -68,7 +68,8 @@ class Start:
 
 @dataclass(frozen=True, slots=True)
 class DayStart:
-    """NinjaTrader figures at today's session open, absolute $; 21.5 or the hub supplies them."""
+    """Figures at today's session open, absolute $: `start` takes them from today's journalled
+    "day_start" row (each roll journals one), else `open_day` from the balance at start."""
 
     balance: float  # balance at the open
     peak: float  # the drawdown peak at the open (as Start.peak), which fixes the open's floor
@@ -194,14 +195,21 @@ def start(
     now: datetime,
     halts: Sequence[Mapping[str, Any]] = (),
     peaks: Sequence[Mapping[str, Any]] = (),
+    opens: Sequence[Mapping[str, Any]] = (),
 ) -> Step:
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
-    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a)."""
+    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a). `opens`: the
+    "day_start" payloads journalled since then; without `setup.day_start`, the last one for
+    today is today's open, so a restart mid-day never opens the day at the balance now."""
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
     if begin is not None:
         begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
+        if setup.day_start is None:
+            today = trading_day(now).isoformat()
+            rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
+            setup = replace(setup, day_start=rows[-1] if rows else None)
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
     # an intraday peak starts at least at the balance: journal that raise too
@@ -241,6 +249,24 @@ def start(
         s, more = halt(s, CONFIRM_BALANCES)
         return s, out + more
     return s, out
+
+
+def open_day(s: RunnerState, now: datetime) -> Step:
+    """After `start` and `replay`: a sim or live runner with no open journalled for today (first
+    start today, or down over the open) opens the day at NinjaTrader's balance at start, with an
+    "alert" saying so and a "day_start" row, so a later restart today opens it at the same figures.
+    Today's P&L before the start then counts only through NinjaTrader's figures (DEC-4b)."""
+    setup = s.setup
+    if setup.armed.mode == "dry" or setup.start is None or setup.day_start or not s.started:
+        return s, ()
+    ps = setup.start.phase_start
+    day = DayStart(ps + s.acct.day_start_balance, ps + s.acct.peak)
+    message = (
+        f"no open journalled for {s.acct.day}: today's opening balance is NinjaTrader's balance"
+        f" at start, {day.balance:.2f}"
+    )
+    s = replace(s, setup=replace(setup, day_start=day))
+    return s, (Log("alert", {"message": message}), _open_log(s, now))
 
 
 def changed_since_arming(setup: Setup) -> str | None:
@@ -877,6 +903,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         session_start=acct.day_start_balance,
         session_floor=acct.floor,
     )
+    if s.setup.armed.mode != "dry" and s.setup.start and s.halt_kind != "breach":
+        out += (_open_log(s, ts),)  # a restart today opens the day as this roll did
     if s.halt_day is not None and day > s.halt_day:
         out += (Log("alert", {"message": f"halt lifted: {s.halted}"}),)
         s = replace(s, halted=None, halt_kind=None, halt_day=None)
@@ -903,6 +931,20 @@ def _peak_log(setup: Setup, a: AccountState, ts: datetime) -> Log:
     """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
     return Log("peak", {"peak": setup.start.phase_start + a.peak, "ts": stamp})
+
+
+def _open_log(s: RunnerState, ts: datetime) -> Log:
+    """Today's open in absolute $ as a "day_start" row, which `start` reads back on a restart."""
+    ps = s.setup.start.phase_start
+    return Log(
+        "day_start",
+        {
+            "day": s.acct.day.isoformat(),
+            "balance": ps + s.acct.day_start_balance,
+            "peak": ps + s.acct.peak,
+            "ts": ts.astimezone(UTC).isoformat(),  # journal.iso's format
+        },
+    )
 
 
 def _strict(s: RunnerState) -> AccountState:

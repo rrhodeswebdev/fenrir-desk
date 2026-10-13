@@ -43,7 +43,7 @@ from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
 from fenrir.live.arming import Armed, delete_armed, list_armed
-from fenrir.live.core import Log, RunnerState, Send, Setup
+from fenrir.live.core import Log, RunnerState, Send, Setup, Start
 from fenrir.live.step_child import ctx_json
 from fenrir.rules.account import with_dll
 from fenrir.rules.loader import RULES_MAX, read_account, rules_path
@@ -62,7 +62,7 @@ STRATEGY_MAX = 1024 * 1024
 INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
-RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
+RESTORED = frozenset({"halt", "peak", "day_start"})  # the kinds core.start reads back
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
@@ -151,6 +151,15 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
+def _waiting(a: Armed) -> dict[str, Any]:
+    """An AccountStatus for a sim or live row waiting for NinjaTrader's first account message."""
+    why = (
+        f"waiting for NinjaTrader: no account message for {a.account} yet;"
+        " nothing is sent until one arrives"
+    )
+    return _cannot_start(a, "") | {"halt_reason": why}
+
+
 class LiveHub:
     """Runs every armed account on live bars. Opens nothing until something is armed:
     `<private_dir>/fenrir.db` is opened once it exists, never created here."""
@@ -172,6 +181,9 @@ class LiveHub:
         self.instruments: dict[str, Instruments] = {}
         self.states: dict[str, RunnerState] = {}
         self.broken: dict[str, tuple[Armed, str]] = {}  # alerted once; retried when the row changes
+        # sim/live rows set up but not started: Start.balance is NinjaTrader's first account message
+        self.waiting: dict[str, tuple[Armed, Setup]] = {}
+        self.failed: dict[str, str] = {}  # the error last logged per account: logged once
         self.unwritten: dict[str, tuple[Log, ...]] = {}  # RESTORED rows sqlite refused; retried
         self.retry: dict[str, Send] = {}  # a Flatten whose post timed out; resent while exiting
         self.drift_ticks: dict[str, float] = {}  # last entry fill's distance from its LSE close
@@ -222,8 +234,13 @@ class LiveHub:
                 # armed or restarted while linked, or its last read failed: reconcile now
                 if self.states[account].unreconciled and self.nt_connected:
                     await self._reconcile(account)
-                s = self.states[account]
-                await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                try:  # DEC-4d on every tick too: an edit is caught while no bars arrive
+                    s, out = self._pinned(self.states[account])
+                except Exception as e:  # e.g. a broken accounts.yaml: halts, as on a bar
+                    await self._failed(account, "a tick", e)
+                    return
+                s, more = core.on_tick(s, now, self.settings.stale_seconds)
+                await self._apply(account, s, out + more)
 
             # e.g. its rows still refused: the others' retries still go out
             await self._each("a tick", one)
@@ -250,7 +267,11 @@ class LiveHub:
                     )
             case "account":
                 async with self._lock:
-                    if (s := self.states.get(msg["id"])) is not None:
+                    if msg["id"] in self.waiting:  # its balance now: the account can start
+                        a, setup = self.waiting.pop(msg["id"])
+                        start = Start(a.start_balance, a.peak_balance, msg["balance"])
+                        await self._run(a, replace(setup, start=start), _now(), msg)
+                    elif (s := self.states.get(msg["id"])) is not None:
                         await self._apply(msg["id"], *core.on_account(s, msg, _now()))
 
     async def resolve(self, account: str) -> bool:
@@ -346,17 +367,25 @@ class LiveHub:
                         return
                     await self._apply(account, *await self._bar(account, s, bar))
                 except Exception as e:  # one account's failure must not stop the others' bar
-                    log.exception("live account %s failed on a bar", account)
-                    await self._kill(account)
-                    error = f"{type(e).__name__}: {e}"
-                    # from the state _apply kept, so a breach it could not journal is not replaced
-                    s = self.states[account]
-                    try:
-                        await self._apply(account, *core.halt(s, f"live runner error: {error}"))
-                    except Exception:  # the journal itself failed: halted in memory, row retried
-                        log.exception("live account %s halted; halt not journalled", account)
+                    await self._failed(account, "a bar", e)
 
             await self._each("a bar", one)
+
+    async def _failed(self, account: str, what: str, e: Exception) -> None:
+        """Halt the account (open-ended, child killed) for an error in its bar or tick; call in
+        the `except`. Logged once per error: a halted account whose front month cannot be found
+        fails the same way on every bar."""
+        error = _error(e)
+        if self.failed.get(account) != error:
+            self.failed[account] = error
+            log.exception("live account %s failed on %s", account, what)
+        await self._kill(account)
+        # from the state _apply kept, so a breach it could not journal is not replaced
+        s = self.states[account]
+        try:
+            await self._apply(account, *core.halt(s, f"live runner error: {error}"))
+        except Exception:  # the journal itself failed: halted in memory, row retried
+            log.exception("live account %s halted; halt not journalled", account)
 
     async def _each(self, what: str, run: Callable[[str], Awaitable[Any]]) -> None:
         """`run(account)` for every running account at once, so one account's slow add-on post
@@ -412,19 +441,22 @@ class LiveHub:
         return nt_instrument(spec.symbol, front_month(instruments, spec.series, trading_day(ts)))
 
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
-        out: tuple[Log, ...] = ()
-        changed = core.changed_since_arming(self._inputs_now(s.setup))
-        if changed:  # DEC-4d: halted while armed, not only at start
-            s, out = core.halt(s, changed)
+        s, out = self._pinned(s)
         s, more = core.on_bar(s, bar)
         if not core.runs_step(bar):  # roll window: on_bar journalled the bar
             return s, out + more
         s, last = await self._step(account, s)
         return s, out + more + last
 
+    def _pinned(self, s: RunnerState) -> core.Step:
+        """DEC-4d: halted while armed, not only at start, when a pinned input is not what the
+        files hold now; a broken accounts.yaml raises (the caller halts the account)."""
+        changed = core.changed_since_arming(self._inputs_now(s.setup))
+        return core.halt(s, changed) if changed else (s, ())
+
     def _inputs_now(self, setup: Setup) -> Setup:
         """`setup` with the pinned inputs as the files hold them now (unreadable: ""); a broken
-        accounts.yaml raises, which halts the account (`handle_bar`)."""
+        accounts.yaml raises, which halts the account (`handle_bar`, `tick`)."""
         a = setup.armed
         return replace(
             setup,
@@ -447,7 +479,8 @@ class LiveHub:
                 "ticks": max(self.drift_ticks.values(), default=None),
             },
             "accounts": [core.account_status(s) for s in self.states.values()]
-            + [_cannot_start(a, error) for a, error in self.broken.values()],
+            + [_cannot_start(a, error) for a, error in self.broken.values()]
+            + [_waiting(a) for a, _ in self.waiting.values()],
         }
 
     async def _apply(self, account: str, s: RunnerState, effects: Sequence[Log | Send]) -> None:
@@ -563,11 +596,15 @@ class LiveHub:
             self.retry.pop(account, None)
             self.drift_ticks.pop(account, None)
             self.instruments.pop(account, None)
+            self.failed.pop(account, None)
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]
+        for account in [x for x, (a, _) in self.waiting.items() if rows.get(x) != a]:
+            del self.waiting[account]
+            self.instruments.pop(account, None)
         for account, a in rows.items():
-            if account not in self.states and account not in self.broken:
+            if account not in self.states | self.broken | self.waiting:
                 await self._start(a, now)
 
     async def _start(self, a: Armed, now: datetime) -> None:
@@ -597,16 +634,37 @@ class LiveHub:
                 self.conn, _now(), a.account, "alert", {"message": f"cannot start: {error}"}
             )
             return
-        halts = journal.rows(self.conn, a.account, kind="halt", since=a.armed_at)
-        peaks = journal.rows(self.conn, a.account, kind="peak", since=a.armed_at)
-        s, out = core.start(setup, now, [r.payload for r in halts], [r.payload for r in peaks])
+        if a.mode != "dry" and None not in (a.start_balance, a.peak_balance):
+            # DEC-4a: Start.balance is NinjaTrader's balance now, from its next account message
+            self.waiting[a.account] = (a, setup)
+            return
+        await self._run(a, setup, now)  # dry, or sim/live without balances: core.start halts
+
+    async def _run(
+        self, a: Armed, setup: Setup, now: datetime, message: Mapping[str, Any] | None = None
+    ) -> None:
+        """Start the account with what it journalled since arming, replay today, open the day
+        (sim/live with no open journalled today) and take NinjaTrader's first `message`."""
+
+        def since(kind: str) -> list[Mapping[str, Any]]:
+            return [
+                r.payload for r in journal.rows(self.conn, a.account, kind=kind, since=a.armed_at)
+            ]
+
+        s, out = core.start(setup, now, since("halt"), since("peak"), since("day_start"))
         today = journal.rows(self.conn, a.account, day=trading_day(now), since=a.armed_at)
         s = core.replay(s, [(r.kind, r.payload) for r in today])
+        s, more = core.open_day(s, now)  # after replay, which keeps NinjaTrader's balance then
+        out += more
+        if message is not None:
+            s, more = core.on_account(s, message, now)
+            out += more
         if s.started:
             try:
                 await self._spawn(a)
             except Exception as e:  # isolation refusal, load error, timeout
-                s, out = core.halt(s, f"cannot load the strategy: {e}")
+                s, more = core.halt(s, f"cannot load the strategy: {e}")
+                out += more  # never instead of the rows before it (an open, a mode mismatch)
         if self.killed and a.armed_at <= self.killed[0]:  # the kill could not disarm it
             s, more = core.halt(s, self.killed[1])
             out = (*out, *more)

@@ -3,6 +3,7 @@ import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from live_helpers import ARMED_AT, RULES, pinned
@@ -186,26 +187,29 @@ async def test_halts_survive_a_restart_until_rearmed(hub, conn, armed):
     assert acc["halted"] is False
 
 
-async def test_start_gets_the_peaks_since_arming(hub, conn, armed, monkeypatch):
+async def test_start_gets_the_peaks_and_opens_since_arming(hub, conn, armed, monkeypatch):
     calls = []
     real = core.start
 
-    def spy(setup, now, halts=(), peaks=()):
-        calls.append(list(peaks))
-        return real(setup, now, halts, peaks)
+    def spy(setup, now, halts=(), peaks=(), opens=()):
+        calls.append((list(peaks), list(opens)))
+        return real(setup, now, halts, peaks, opens)
 
     monkeypatch.setattr(core, "start", spy)
     arming.insert_armed(conn, armed)
     mine = {"peak": 50_200.0, "ts": "2026-10-12T13:01:00+00:00"}
+    day = {"day": "2026-10-12", "balance": 50_100.0, "peak": 50_200.0, "ts": mine["ts"]}
     journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "peak", {"peak": 9e9})  # earlier
+    journal.write(conn, ARMED_AT - timedelta(minutes=1), "Sim101", "day_start", {"day": "x"})
     journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "peak", mine)
+    journal.write(conn, ARMED_AT + timedelta(minutes=1), "Sim101", "day_start", day)
     journal.write(conn, ARMED_AT + timedelta(minutes=2), "Sim101", "alert", {})
     await hub.tick(T0)
-    assert calls == [[mine]]
+    assert calls == [([mine], [day])]
 
 
 async def test_a_row_after_the_close_is_no_proof_of_a_roll(hub, conn, armed, monkeypatch, clock):
-    """The hub cannot start sim yet (23.3): run the real start on a sim setup with what it read."""
+    """Run the real start on a sim setup with what the hub read for this (dry) row."""
     got = []
     real = core.start
 
@@ -310,6 +314,67 @@ async def test_a_pinned_input_edited_while_armed_halts_on_the_next_bar(
         await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
         assert kinds(conn) == ["bar", "action", "halt", "bar", "rejection"]
         assert hub.states["Sim101"].halted == reason
+    finally:
+        await hub.stop()
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("dll_on", "dll_on changed since arming (armed off, accounts.yaml now on); re-arm"),
+        ("rules", "rules file changed since arming; re-arm"),
+        ("instruments", "instruments.yaml changed since arming; re-arm"),
+        ("strategy", "strategy file changed since arming; re-arm"),
+        ("broken", "live runner error: "),
+    ],
+)
+async def test_a_pinned_input_edited_while_no_bars_arrive_halts_on_the_next_tick(
+    own_inputs, conn, armed, tmp_path, change, reason
+):
+    """#211 (folded from #208): the 5 s tick checks the pins too, so an edit halts the account
+    while the bar feed is down; a broken accounts.yaml halts it as on a bar."""
+    arming.insert_armed(conn, pinned(armed, rules_dir=own_inputs.rules_dir))
+    hub = LiveHub(own_inputs)
+    try:
+        await hub.tick(T0)
+        own_inputs.data_dir.mkdir(parents=True, exist_ok=True)
+        edited = {
+            "dll_on": (own_inputs.data_dir / "accounts.yaml", "lucid-flex-50k: {dll_on: true}\n"),
+            "broken": (own_inputs.data_dir / "accounts.yaml", "lucid-flex-50k: [\n"),
+            "rules": (own_inputs.rules_dir / "lucid" / "flex-50k.yaml", None),
+            "instruments": (tmp_path / "instruments.yaml", None),
+            "strategy": (Path(armed.strategy_path), None),
+        }
+        path, text = edited[change]
+        if text is None:
+            with path.open("a") as f:
+                f.write("\n# edited while armed\n")
+        else:
+            path.write_text(text)
+        await hub.tick(T0 + timedelta(seconds=5))
+        assert hub.states["Sim101"].halted.startswith(reason)
+        assert kinds(conn) == ["halt"]
+        await hub.tick(T0 + timedelta(seconds=10))
+        assert kinds(conn) == ["halt"]  # once
+    finally:
+        await hub.stop()
+
+
+async def test_a_halted_account_whose_front_month_fails_logs_it_once(
+    own_inputs, conn, armed, tmp_path, caplog
+):
+    """#211 (folded from #208): the halt is journalled once, and so is the error logged."""
+    p = tmp_path / "instruments.yaml"
+    p.write_text(p.read_text().replace("last_year: 2030", "last_year: 2025"))
+    arming.insert_armed(conn, pinned(armed, rules_dir=own_inputs.rules_dir))
+    hub = LiveHub(own_inputs)
+    try:
+        for minute in range(3):
+            await hub.handle_bar(bar(T0 + timedelta(minutes=minute)))
+        assert hub.states["Sim101"].halted.startswith("live runner error: ValueError: no NQ")
+        assert kinds(conn) == ["halt"]
+        failed = [r for r in caplog.records if "failed on a bar" in r.getMessage()]
+        assert len(failed) == 1 and failed[0].exc_info is not None
     finally:
         await hub.stop()
 

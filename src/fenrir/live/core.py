@@ -61,12 +61,12 @@ CONFIRM_LIQUIDATED = (
     " {level:.2f} from the armed balances and the journalled peaks; re-arm with the confirmed"
     " balances"
 )
-GAP = "confirm balances: a gap at the end-of-day session close"
+GAP = "confirm balances: a gap"  # every balance-gap halt (#219, #222): `_exit` flattens under it
 CONFIRM_GAP = GAP + (
-    ": NinjaTrader's balance {nt:.2f} puts the drawdown floor at {floor:.2f}, at or above the"
-    " app's equity {equity:.2f} (P&L the app never booked: a trade on another instrument, or a"
-    " fill while the server was down); any position is flattened; re-arm with the confirmed"
-    " balances"
+    " {at}: NinjaTrader's {figure} {nt:.2f} puts the drawdown floor at {floor:.2f}, at or above"
+    " the app's equity {equity:.2f} (P&L the app never booked: a trade on another instrument, or"
+    " a fill while the server was down); any position the app holds is flattened, and the whole"
+    " account while NinjaTrader shows open P&L; re-arm with the confirmed balances"
 )
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 NO_BALANCE = (
@@ -237,6 +237,9 @@ def start(
     a = setup.armed
     begin = None if a.mode == "dry" else setup.start
     opened: tuple[Log, ...] = ()
+    replays = (
+        False  # today's open is journalled: `replay` sets the app's balance, not NinjaTrader's
+    )
     if begin is not None:
         begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
         if setup.day_start is None:
@@ -244,6 +247,7 @@ def start(
             rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
             if rows:
                 setup = replace(setup, day_start=rows[-1])  # the latest: one per arming and day
+                replays = True
             elif begin.realized_today is not None:  # before today's losses, never above the balance
                 loss = min(begin.realized_today, 0.0)
                 setup = replace(setup, day_start=DayStart(begin.balance - loss, begin.peak))
@@ -254,6 +258,12 @@ def start(
                 opened = (Log("alert", {"message": message}),)
     day = setup.day_start if begin else None
     acct = start_account(setup.rules, a.phase, trading_day(now), begin, day)
+    if replays and phase_rules(setup.rules, a.phase).max_drawdown.trailing == "intraday":
+        # not NinjaTrader's balance, which may hold P&L the app never saw: the account message
+        # after `replay` checks that (#222); `replay` raises the peak to the app's own balance
+        # there, as a gain booked since the last journalled raise may be in no "peak" row
+        peak = begin.peak - begin.phase_start
+        acct = replace(acct, peak=peak, floor=_floor(setup.rules, a.phase, peak))
     # an intraday peak starts at least at the balance: journal that raise too
     raised = begin is not None and acct.peak > begin.peak - begin.phase_start
     out = (_peak_log(setup, acct, now),) if raised else ()
@@ -417,8 +427,10 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         position=position,
         fills=(*s.fills, ts),
         working=None if mine else w,
-        # an over-close that reversed the position ends that Flatten: the reversal gets its own
-        exiting=None if rest == 0 or flipped else s.exiting,
+        # an over-close that reversed the position ends that Flatten: the reversal gets its own;
+        # so does a fill from flat: a Flatten sent while flat (the gap's account-wide one, #229)
+        # cannot be closing it, and a second `/flatten` never over-closes (review of #231)
+        exiting=None if rest == 0 or flipped or pos.qty == 0 else s.exiting,
         held=s.held or (None if opening else (pos, before)),
     )
     s, more = _event(s, Fill(ts, qty, price, commission, realized))
@@ -465,8 +477,26 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
         return _no_balance(s)
     nt = NtAccount(account["balance"], account["realized_pnl_today"], account["unrealized_pnl"])
     was, s = s, replace(s, nt=nt, no_balance=None)
+    if s.exiting and s.position.qty == 0 and round(nt.unrealized_pnl, 2) == 0:
+        s = replace(s, exiting=None)  # NinjaTrader holds nothing: the gap's flatten is done (#229)
     if phase_rules(s.setup.rules, s.acct.phase).max_drawdown.trailing == "intraday":
-        s = replace(s, acct=_raised(s.setup, s.acct, nt.balance + nt.unrealized_pnl))
+        a, base = s.acct, s.setup.start.phase_start
+        raised = _raised(s.setup, a, nt.balance + nt.unrealized_pnl)
+        equity = a.balance + a.open_pnl
+        # its floor alone breaches the app's figures (NinjaTrader's own equity is the peak it
+        # sets, so always above it): P&L the app never saw is no breach (#222, as at the close:
+        # #219); keep the app's own figures, its peak at least its own balance
+        if at_or_below(equity, raised.floor) and not at_or_below(equity, a.floor):
+            gap = CONFIRM_GAP.format(
+                at="on NinjaTrader's account figures",
+                figure="equity",
+                nt=nt.balance + nt.unrealized_pnl,
+                floor=base + raised.floor,
+                equity=base + equity,
+            )
+            s, out = halt(replace(s, acct=_raised(s.setup, a, base + a.balance)), gap)
+            return s, out + _peaked(was, s, now)
+        s = replace(s, acct=raised)
     return s, _peaked(was, s, now)
 
 
@@ -570,7 +600,8 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
     working entry and the Flatten in flight, and the "fill" rows rebuild the position through
     `on_fill`. The balance is the lower of today's opening balance plus the replayed fills (with
     `day_start`) and NinjaTrader's at the restart; without `day_start` it stays NinjaTrader's,
-    which already holds today's fills. No effects: every row was journalled when it happened.
+    which already holds today's fills; an intraday peak is raised to at least that balance.
+    No effects: every row was journalled when it happened.
     The drift pause stays as `start` restored it from the "halt" rows (a resolve may have lifted
     it), and sim and live stay `unreconciled` until `on_reconcile`."""
     r = replace(s, read_at=None)  # every journalled fill is booked, whatever was read since
@@ -588,6 +619,11 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
         traded = r.acct.traded_today or a.traded_today
         acct = replace(r.acct, balance=min(booked, a.balance), traded_today=traded)
     shift = acct.balance - booked  # the open trade's P&L counts from the balance kept
+    if s.setup.start and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "intraday":
+        # an intraday peak is never below the balance: a gain booked since the last raise (the
+        # next Mark or account message raises it, so no "peak" row may hold it) is P&L the app
+        # saw, and this balance is at most NinjaTrader's (review of #231)
+        acct = _raised(s.setup, acct, s.setup.start.phase_start + acct.balance)
     # an exit's `held` marks its own bar only, which is gone
     return replace(
         r,
@@ -1006,9 +1042,14 @@ def _late(s: RunnerState, bar: Bar) -> str | None:
 def _exit(s: RunnerState, bar: Bar) -> Step:
     """Flatten once while holding past flat-by (the backtest's `_flat_time`), after the daily loss
     limit (its `_dll_exit`), after a breach, under a gap halt (#219: the app cannot trust its
-    figures, so it holds nothing), or with no known stop; the add-on also flattens at 16:40 on
-    its own."""
-    if s.position.qty == 0 or s.exiting:
+    figures, so it holds nothing; flat, while NinjaTrader shows open P&L, which `/flatten` closes
+    account-wide: #229), or with no known stop; the add-on also flattens at 16:40 on its own."""
+    if s.exiting:
+        return s, ()
+    gap = s.halted is not None and s.halted.startswith(GAP)
+    if s.position.qty == 0:
+        if gap and s.nt is not None and round(s.nt.unrealized_pnl, 2) != 0:
+            return _flatten(s, bar.ts, "x", s.halted)
         return s, ()
     if late := _late(s, bar):
         why = f"flat-by {late}"
@@ -1016,7 +1057,7 @@ def _exit(s: RunnerState, bar: Bar) -> Step:
         why = "daily loss limit hit"
     elif s.halt_kind == "breach" and s.halted:
         why = s.halted
-    elif s.halted and s.halted.startswith(GAP):
+    elif gap:
         why = s.halted
     elif s.position.stop is None:  # its flatten failed (send_failed): send it again
         return _stopless(s, bar.ts, "x")
@@ -1045,7 +1086,10 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
-        out += (Log("alert", {"message": f"{reason} (was halted: {s.halted})"}),)
+        # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
+        # account message, then that bar's own Mark breaches: review of #231)
+        own = ", on the app's own figures, not the gap" if s.halted.startswith(GAP) else ""
+        out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 
 
@@ -1074,7 +1118,11 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
             # P&L the app never saw, is no breach (#219); keep the app's own figures
             if at_or_below(equity, raised.floor) and not at_or_below(theirs, raised.floor):
                 gap = CONFIRM_GAP.format(
-                    nt=s.nt.balance, floor=base + raised.floor, equity=base + equity
+                    at="at the end-of-day session close",
+                    figure="balance",
+                    nt=s.nt.balance,
+                    floor=base + raised.floor,
+                    equity=base + equity,
                 )
                 s, more = halt(s, gap)
                 out += more

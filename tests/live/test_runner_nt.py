@@ -201,7 +201,11 @@ def test_every_end_of_day_roll_journals_the_peak_once_ninjatrader_is_known():
 def test_the_ninjatrader_peak_respects_locks_at():
     d = rules_data(trailing="intraday")
     d["evaluation"]["max_drawdown"]["locks_at"] = 2100.0
-    setup = make_setup(AccountRules.model_validate(d), mode="sim", start=START, day_start=OPEN)
+    # the app at 52,500: NinjaTrader's floor stays below it, so the raise is taken (#222)
+    up = replace(START, balance=52_500.0)
+    setup = make_setup(
+        AccountRules.model_validate(d), mode="sim", start=up, day_start=DayStart(52_500.0, 50_000.0)
+    )
     s, _ = core.on_account(core.start(setup, T.ts)[0], account(balance=52_600.0), T.ts)
     assert (s.acct.peak, s.acct.floor) == (2600.0, 100.0)  # min(2600, 2100) - 2000
 
@@ -575,11 +579,11 @@ def test_a_gap_against_an_unverified_open_loss_at_the_roll_halts_not_breaches():
     assert peaks(effects) == [{"peak": 50_000.0, "ts": iso(at("09:30", D2).ts)}]
 
 
-def held_over_the_close(gain, loss, nt_balance, unrealized):
+def held_over_the_close(gain, loss, nt_balance, unrealized, **rules):
     """The app books `gain` in fills, then adopts NinjaTrader's long with a known stop (19,000)
     and marks it `loss` open; the link drops over the close and NinjaTrader reports `nt_balance`
-    and `unrealized`. Returns the state before the roll and the roll bar's close."""
-    s = reconciled(core.start(sim(), T.ts)[0])
+    and `unrealized` (`rules`: `sim`'s). Returns the state after that and the last bar's close."""
+    s = reconciled(core.start(sim(**rules), T.ts)[0])
     s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))
     exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20000.0 + gain / 20}
     s, _ = core.on_fill(s, exit_)
@@ -644,15 +648,15 @@ def test_a_gap_halt_flattens_the_position_and_its_loss_still_breaches():
 )
 def test_ninjatraders_own_open_pnl_decides_a_gap_against_a_flat_app(unrealized, breach):
     """Review of #221, C3: the app flat at 0, NinjaTrader at 52,200 (floor 50,200) holding a loss
-    the app knows nothing of. Above its floor, to the cent, it is the gap's halt and nothing is
-    sent; at or through it, the roll takes the raise and the bar breaches."""
+    the app knows nothing of. Above its floor, to the cent, it is the gap's halt, and the account
+    is flattened once (#229); at or through it, the roll takes the raise and the bar breaches."""
     s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=unrealized))
     s, effects = core.on_bar(s, at("09:30", D2))
     if breach:
         assert s.halt_kind == "breach" and s.acct.floor == 200.0
     else:
         assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
-        assert (s.halt_kind, s.acct.floor, sends(effects)) == (None, -2000.0, [])
+        assert (s.halt_kind, s.acct.floor, sends(effects)) == (None, -2000.0, [Flatten])
 
 
 @pytest.mark.parametrize(("balance", "gap"), [(50_200.004, True), (50_200.01, False)])
@@ -672,3 +676,441 @@ def test_the_apps_equity_against_ninjatraders_floor_is_compared_to_the_cent(bala
         assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
     else:
         assert s.halted is None and s.acct.floor == 200.0
+
+
+def actions(effects):
+    return [e.payload for e in effects if isinstance(e, Log) and e.kind == "action"]
+
+
+# #229: under the gap halt, NinjaTrader's open P&L on a flat app is a position the app does not
+# know of (a manual trade on another instrument): one account-wide /flatten, never a storm
+
+
+def test_a_gap_halt_flattens_the_whole_account_while_ninjatrader_shows_open_pnl():
+    """Review of #221 (round 3), non-blocking 1: the app flat at 0, NinjaTrader at 52,200 with
+    -1,900 open (its floor 50,200). The roll halts and flattens the account once, journalled
+    with the halt's reason; while NinjaTrader's loss runs to -3,500 the flatten is out, so
+    nothing more is sent; once NinjaTrader shows no open P&L, nothing is sent either."""
+    s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=-1900.0))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
+    assert sends(effects) == [Flatten] and s.position.qty == 0
+    [row] = actions(effects)
+    assert (row["type"], row["sent"], row["reason"]) == ("Flatten", True, s.halted)
+    for n, loss in enumerate((-2100.0, -2500.0, -3500.0), start=1):
+        s, _ = core.on_account(s, account(52_200.0, today=0.0, unrealized=loss), T.ts)
+        s, effects = core.on_bar(s, at(f"09:3{n}", D2))
+        assert sends(effects) == [] and s.halt_kind is None
+    s, effects = core.on_account(s, account(52_200.0 - 3500.0), T.ts)  # flattened: no open P&L
+    assert s.exiting is None and effects == ()
+    assert sends(core.on_bar(s, at("09:34", D2))[1]) == []
+
+
+def test_a_gap_halt_on_a_flat_account_with_no_open_pnl_at_ninjatrader_sends_nothing():
+    s = running(sim(), account(balance=52_200.0, today=2200.0))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith("confirm balances: a gap ") and sends(effects) == []
+
+
+def test_the_gap_flatten_of_a_held_position_is_journalled_with_the_halts_reason():
+    """Review of #221 (round 3), nit K6: not "no known stop" (`_stopless`), but the halt."""
+    s, close = held_over_the_close(2150.0, 1960.0, 52_200.0, -1960.0)
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+    assert "alert" not in kinds(effects)
+
+
+# #222: an intraday peak raise from NinjaTrader's equity (every account message) that alone
+# would breach the app's own figures is a gap, as at the end-of-day roll (#219)
+
+GAP_INTRADAY = "confirm balances: a gap on NinjaTrader's account figures: NinjaTrader's equity "
+
+
+def test_an_intraday_gain_the_app_never_saw_is_no_breach():
+    """The issue's probe: the app at 50,000, NinjaTrader at 52,200 (a gain the app never booked):
+    its raise puts the floor at 50,200, above the app's equity. That used to be `breach
+    max_drawdown: equity 0.00 at or below drawdown floor 200.00` on the next bar."""
+    s = running(sim(trailing="intraday"))
+    s, effects = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    assert s.halted == (
+        GAP_INTRADAY + "52200.00 puts the drawdown floor at 50200.00, at or above the app's"
+        " equity 50000.00 (P&L the app never booked: a trade on another instrument, or a fill"
+        " while the server was down); any position the app holds is flattened, and the whole"
+        " account while NinjaTrader shows open P&L; re-arm with the confirmed balances"
+    )
+    assert (s.halt_kind, s.halt_day, s.acct.peak, s.acct.floor) == (None, None, 0.0, -2000.0)
+    assert kinds(effects) == ["halt"]  # the app's own peak did not move: no "peak" row
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.halt_kind is None and sends(effects) == []  # flat, and NinjaTrader holds nothing
+    s, effects = core.on_account(s, account(balance=52_300.0), T.ts)  # every message: no raise
+    assert (s.acct.floor, effects) == (-2000.0, ())
+
+
+@pytest.mark.parametrize(
+    ("balance", "gap"), [(52_000.0, True), (51_999.996, True), (51_999.99, False)]
+)
+def test_an_intraday_raise_against_the_apps_equity_is_compared_to_the_cent(balance, gap):
+    """NinjaTrader's floor at the app's equity 0 (to the cent) is the gap's halt; a cent below,
+    the raise is taken (stricter) and nothing halts."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=balance), T.ts)
+    if gap:
+        assert s.halted.startswith(GAP_INTRADAY) and s.acct.floor == -2000.0
+    else:
+        assert s.halted is None and s.acct.floor == pytest.approx(-0.01)
+
+
+def test_a_real_loss_through_ninjatraders_intraday_floor_still_breaches():
+    """A smaller gap takes the raise (floor -100, from NinjaTrader's 51,900); a loss the app
+    books through it is a breach."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=51_900.0), T.ts)
+    assert (s.halted, s.acct.floor) == (None, -100.0)
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19990.0, 19990.0))
+    assert s.halted == "breach max_drawdown: equity -200.00 at or below drawdown floor -100.00"
+
+
+@pytest.mark.parametrize("unrealized", [-1500.0, 0.0])
+def test_equal_intraday_balances_with_a_stale_open_pnl_still_breach(unrealized):
+    """The app and NinjaTrader agree at 52,200 and the app holds a long at -1,500 (floor 200
+    from its own intraday peak). NinjaTrader's open P&L, accurate or a stale 0, raises nothing,
+    so nothing halts, and the loss breaches at -2,100 and is flattened."""
+    s, close = held_over_the_close(2200.0, 1500.0, 52_200.0, unrealized, trailing="intraday")
+    assert (s.halted, s.acct.peak, s.acct.floor) == (None, 2200.0, 200.0)
+    worse = 20000.0 - 2100 / 20
+    s, effects = core.on_bar(s, bar("09:33", worse, worse, worse, worse))
+    assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
+    assert sends(effects) == [Flatten]
+
+
+def test_an_intraday_gap_halt_flattens_a_held_position_and_its_loss_still_breaches():
+    """The app at +1,000 (its intraday peak) holds a long at -500; NinjaTrader at 53,500 with the
+    same -500 open (its equity 53,000, floor 51,000) is above the app's equity 50,500. The gap
+    halts, the app's floor stays its own (49,000), the next bar flattens with the halt's reason,
+    and a loss through that floor still breaches."""
+    s, close = held_over_the_close(1000.0, 500.0, 53_500.0, -500.0, trailing="intraday")
+    assert s.halted.startswith(GAP_INTRADAY + "53000.00 puts the drawdown floor at 51000.00, ")
+    assert (s.halt_kind, s.acct.peak, s.acct.floor) == (None, 1000.0, -1000.0)
+    s, effects = core.on_bar(s, bar("09:33", close, close, close, close))
+    assert s.halt_kind is None
+    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+    worse = 20000.0 - 2000 / 20  # -2,000 open: equity -1,000
+    s, effects = core.on_bar(s, bar("09:34", worse, worse, worse, worse))
+    assert s.halted == "breach max_drawdown: equity -1000.00 at or below drawdown floor -1000.00"
+
+
+def test_an_intraday_gap_halt_flattens_the_whole_account_while_ninjatrader_shows_open_pnl():
+    """The app flat at 0; NinjaTrader at 54,500 with -1,900 open (its equity 52,600, floor
+    50,600): the gap halt, then one account-wide flatten on the next bar."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
+    assert s.halted.startswith(GAP_INTRADAY + "52600.00 puts the drawdown floor at 50600.00, ")
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == [Flatten] and actions(effects)[0]["reason"] == s.halted
+    s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-3500.0), T.ts)
+    assert sends(core.on_bar(s, at("09:32"))[1]) == []
+
+
+def test_a_same_day_intraday_restart_after_a_gain_the_app_never_saw_is_no_breach():
+    """The server was down while NinjaTrader booked +2,200 the app never saw. The restart opens
+    today as journalled (50,000) and replays to the app's balance 0, so NinjaTrader's 52,200 is
+    no peak at start: the account message after it is the gap's halt, not a breach."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=52_200.0, realized_today=2200.0)
+    )
+    s, effects = core.start(replace(setup, day_start=None), T.ts, opens=[opened(D1, 50_000.0)])
+    assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0) and "peak" not in kinds(effects)
+    s = reconciled(core.replay(s, []))
+    assert s.acct.balance == 0.0
+    s, _ = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    assert s.halted.startswith(GAP_INTRADAY)
+    s, _ = core.on_bar(s, at("09:31"))
+    assert s.halt_kind is None
+
+
+def test_an_intraday_restart_with_no_open_journalled_today_still_starts_at_the_balance():
+    """A first start today opens at NinjaTrader's balance, which is then the app's too: the
+    intraday peak starts at least there, as before."""
+    s, _ = first_start(52_200.0, 2200.0)
+    assert s.acct.peak == 0.0  # end_of_day (sim()): only the close raises
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=52_200.0, realized_today=2200.0)
+    )
+    s, effects = core.start(replace(setup, day_start=None), T.ts)
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (2200.0, 2200.0, 200.0)
+    assert peaks(effects) == [{"peak": 52_200.0, "ts": iso(T.ts)}]
+
+
+def test_a_gap_halt_flattens_the_account_for_an_open_gain_at_ninjatrader_too():
+    """Any open P&L the app cannot account for goes, a gain as well as a loss (#229)."""
+    s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=300.0))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith("confirm balances: a gap ") and sends(effects) == [Flatten]
+
+
+def test_open_pnl_at_ninjatrader_flattens_nothing_without_a_gap_halt():
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_account(s, account(unrealized=-500.0), T.ts)
+    s, effects = core.on_bar(s, T)
+    assert (s.halted, s.exiting, sends(effects)) == (None, None, [])
+
+
+def test_an_intraday_gap_counts_the_apps_open_loss():
+    """The app at 0 holds a long at -500; NinjaTrader at 52,200 with the same -500 open puts
+    the floor at -300: above the app's equity (-500), though not its balance (0). The equity is
+    what the rules check, so it is the gap's halt, not a breach on the next bar."""
+    s, close = held_over_the_close(0.0, 500.0, 52_200.0, -500.0, trailing="intraday")
+    assert s.halted.startswith(
+        GAP_INTRADAY + "51700.00 puts the drawdown floor at 49700.00, at or above the app's"
+        " equity 49500.00 ("
+    )
+    s, _ = core.on_bar(s, bar("09:33", close, close, close, close))
+    assert s.halt_kind is None
+
+
+def test_an_intraday_gap_halt_raises_the_apps_peak_to_its_own_balance():
+    """A gain the app booked with no bar since (balance 1,000, peak still 0) and a larger gap at
+    NinjaTrader (54,000): the halt keeps the app's figures with its peak at least its balance,
+    as an intraday peak always is, so its floor is -1,000, not -2,000."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    exit_ = {**fill_at(T.ts + timedelta(minutes=1, seconds=10), qty=-1), "price": 20050.0}
+    s, _ = core.on_fill(s, exit_)
+    assert s.acct.peak == 0.0
+    s, effects = core.on_account(s, account(balance=54_000.0), T.ts)
+    assert s.halted.startswith(GAP_INTRADAY + "54000.00 puts the drawdown floor at 52000.00, ")
+    assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+    assert peaks(effects) == [{"peak": 51_000.0, "ts": iso(T.ts)}]
+
+
+def test_an_app_loss_through_its_own_floor_is_a_breach_not_a_gap():
+    """A loss the app booked through its own floor before the next bar, then a raise from
+    NinjaTrader: it is the app's own breach, not NinjaTrader's raise alone, so no gap halt."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    exit_ = {**fill_at(T.ts + timedelta(minutes=1, seconds=10), qty=-1), "price": 19895.0}
+    s, _ = core.on_fill(s, exit_)
+    assert s.acct.balance == -2100.0
+    s, effects = core.on_account(s, account(balance=50_500.0), T.ts)
+    assert s.halted is None and "halt" not in kinds(effects)
+    s, _ = core.on_bar(s, at("09:31"))
+    assert s.halt_kind == "breach"
+
+
+def gap_flattening(trailing):
+    """A gap halt with the app flat while NinjaTrader shows -1,900 open: the account-wide
+    Flatten is out (the add-on accepted it, nothing filled). Intraday: NinjaTrader at 54,500
+    (#222); end_of_day: 52,200 at the close (#219). Returns the state and the next fill's time."""
+    if trailing == "intraday":
+        s = running(sim(trailing="intraday"))
+        s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
+        s, effects = core.on_bar(s, at("09:31"))
+        ts = T.ts + timedelta(minutes=2, seconds=5)
+    else:
+        s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=-1900.0))
+        s, effects = core.on_bar(s, at("09:30", D2))
+        ts = at("09:30", D2).ts + timedelta(minutes=1, seconds=5)
+    assert s.halted.startswith("confirm balances: a gap ") and sends(effects) == [Flatten]
+    assert s.exiting is not None and s.position.qty == 0
+    return s, ts
+
+
+@pytest.mark.parametrize("trailing", ["intraday", "end_of_day"])
+def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened_at_once(trailing):
+    """Review of #231, blocking 1: a fill on the app's instrument while the account-wide Flatten
+    is out (a manual MNQ buy while the add-on closes a manual ES) opens a position with no known
+    stop. That Flatten was sent while the app was flat, so it cannot be closing this one: the
+    fill ends it and the position gets its own Flatten at once, as on main; one at a time after."""
+    s, ts = gap_flattening(trailing)
+    first = s.exiting
+    s, effects = core.on_fill(s, fill_at(ts, qty=1))
+    assert s.position.qty == 1 and sends(effects) == [Flatten]
+    [row] = actions(effects)
+    assert row["reason"] == "position 1 has no known stop" and s.exiting not in (None, first)
+    for n, close in enumerate((19950.0, 19900.0, 19850.0), start=1):  # through the floor
+        s, _ = core.on_account(s, account(54_500.0, unrealized=-5000.0), ts)
+        s, effects = core.on_bar(s, bar("10:0" + str(n), close, close, close, close, ts.date()))
+        assert sends(effects) == []  # its Flatten is out: no storm
+    assert s.halt_kind == "breach"
+
+
+def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next_bar():
+    """The same for an entry with a known stop, sent before the gap halt and filled while the
+    account-wide Flatten is out: not stopless, so the next bar's gap flatten closes it."""
+    s = running(sim(trailing="intraday"))
+    s, effects = decide_now(s, [LONG])
+    assert sends(effects) == [Bracket]
+    s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.halted.startswith(GAP_INTRADAY) and sends(effects) == [Flatten]
+    entry = {
+        **fill_at(T.ts + timedelta(minutes=2, seconds=5), qty=1),
+        "client_id": s.working.client_id,
+    }
+    s, effects = core.on_fill(s, entry)
+    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [])
+    s, effects = core.on_bar(s, at("09:32"))
+    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+
+
+def test_a_same_day_intraday_restart_starts_the_peak_at_least_at_the_replayed_balance():
+    """Review of #231, non-blocking 1: a gain the app booked raises an intraday peak only at the
+    next Mark or account message, so a restart in between finds no "peak" row for it. Today's
+    open 50,000 is journalled; the replay books +1,000 (exit at 20,050) and a re-entry at 20,050
+    with no Mark since; NinjaTrader is at 51,000 with -800 open. The replayed balance holds no
+    P&L the app never saw, so the peak starts there (floor -1,000), and a -2,100 open loss
+    (equity -1,100) breaches it, as on main."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=51_000.0, realized_today=1000.0)
+    )
+    s, effects = core.start(replace(setup, day_start=None), T.ts, opens=[opened(D1, 50_000.0)])
+    assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0) and "peak" not in kinds(effects)
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    again = {**fill_at(T.ts + timedelta(seconds=15), qty=1), "price": 20050.0}
+    rows = [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_), ("fill", again)]
+    s = core.replay(s, rows)
+    assert (s.acct.balance, s.position.qty, s.acct.peak, s.acct.floor) == (
+        1000.0,
+        1,
+        1000.0,
+        -1000.0,
+    )
+    now = T.ts + timedelta(seconds=30)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20050.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    s, _ = core.on_account(s, account(51_000.0, today=1000.0, unrealized=-800.0), now)
+    assert (s.halted, s.acct.peak, s.acct.floor) == (None, 1000.0, -1000.0)
+    worse = 20050.0 - 2100 / 20
+    s, _ = core.on_bar(s, bar("09:31", worse, worse, worse, worse))
+    assert s.halted == "breach max_drawdown: equity -1100.00 at or below drawdown floor -1000.00"
+
+
+def test_a_dry_replay_raises_no_peak():
+    """Dry runs have no NinjaTrader start, so no phase start to raise the peak from."""
+    setup = make_setup(make_rules(trailing="intraday"))
+    assert setup.start is None
+    s, _ = core.start(setup, T.ts)
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    s = core.replay(s, [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_)])
+    assert s.acct.peak == 0.0
+
+
+def alerts(effects):
+    return [e.payload["message"] for e in effects if isinstance(e, Log) and e.kind == "alert"]
+
+
+def test_a_same_bar_breach_after_an_intraday_gap_halt_is_not_put_down_to_the_gap():
+    """Review of #231, nit: the app holds a long marked at 0 when NinjaTrader's +2,100 open (a
+    spike within the bar) puts its floor at 100, at or above the app's equity: the gap's halt.
+    The bar's own high-first Mark then breaches on the app's own figures, which replaces it; the
+    alert says so, not that the breach followed a gap."""
+    s = reconciled(core.start(sim(trailing="intraday"), T.ts)[0])
+    now = T.ts + timedelta(seconds=30)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    s, _ = core.on_bar(s, bar("09:30", 20000.0, 20000.0, 20000.0, 20000.0))
+    s, _ = core.on_account(s, account(50_000.0, unrealized=2100.0), now)
+    gap = s.halted
+    assert gap.startswith(GAP_INTRADAY + "52100.00 puts the drawdown floor at 50100.00, ")
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20105.0, 20000.0, 20100.0))
+    breach = "breach max_drawdown: equity 0.00 at or below drawdown floor 100.00"
+    assert (s.halted, s.halt_kind) == (breach, "breach")
+    assert alerts(effects) == [
+        f"{breach}, on the app's own figures, not the gap (was halted: {gap})"
+    ]
+
+
+def test_a_breach_that_replaces_another_open_ended_halt_alerts_with_its_reason():
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(is_sim=False), T.ts)
+    was = s.halted
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19895.0, 19895.0))
+    breach = "breach max_drawdown: equity -2100.00 at or below drawdown floor -2000.00"
+    assert s.halted == breach and alerts(effects)[0] == f"{breach} (was halted: {was})"
+
+
+# review of #231: its mutants R2-R8, which the tests above let through
+
+
+@pytest.mark.parametrize("halt", ["strategy error", "safety margin"])
+def test_open_pnl_at_ninjatrader_flattens_nothing_under_another_halt(halt):
+    """R7, R8: only a gap halt flattens a flat app's account; another halt, open-ended (a
+    strategy error) or for the day (the safety margin), leaves NinjaTrader's open P&L alone."""
+    balance = 48_500.0 if halt == "safety margin" else 50_000.0  # the safety level: -1,600
+    s = running(sim(), account(balance=balance, unrealized=-150.0))
+    if halt == "strategy error":
+        s, _ = core.step_failed(s, "boom")
+    assert s.halted.startswith(halt) and s.position.qty == 0
+    s, effects = core.on_bar(s, at("09:31"))
+    assert (s.exiting, sends(effects)) == (None, [])
+
+
+def test_the_gap_flatten_waits_for_ninjatraders_figures_after_a_lost_link():
+    """R3: with no NinjaTrader figures (the link lost, then a reconcile that ends the account-wide
+    Flatten), a flat app sends nothing; NinjaTrader's next figures with open P&L flatten again."""
+    s, ts = gap_flattening("intraday")
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_reconcile(s, INSTRUMENT, [], [], ts)
+    assert (s.nt, s.exiting, s.position.qty) == (None, None, 0)
+    s, effects = core.on_bar(s, at("09:32"))
+    assert sends(effects) == []
+    s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), ts)
+    s, effects = core.on_bar(s, at("09:33"))
+    assert sends(effects) == [Flatten]
+
+
+def test_a_stale_zero_open_pnl_never_ends_the_gap_flatten_of_a_held_position():
+    """R2: the app holds the long its gap Flatten is closing; NinjaTrader then shows no open P&L
+    (a stale figure, the app still long): that Flatten stays out, so nothing more is sent."""
+    s, close = held_over_the_close(2150.0, 1960.0, 52_200.0, -1960.0)
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    assert sends(effects) == [Flatten]
+    s, _ = core.on_account(s, account(52_200.0), T.ts)
+    assert s.exiting is not None
+    s, effects = core.on_bar(s, bar("09:31", close, close, close, close, D2))
+    assert sends(effects) == []
+
+
+def test_an_intraday_gap_halt_raises_the_peak_to_the_balance_not_the_equity():
+    """R4: the app booked +1,000 (exit at 20,050), re-entered at 20,050 and was marked between
+    -200 and -400 (close -300): its peak 800. The gap halt raises it to the balance, 1,000, as
+    an intraday peak never stays below the balance, not to its equity, 700."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    exit_ = {**fill_at(T.ts + timedelta(minutes=1, seconds=10), qty=-1), "price": 20050.0}
+    again = {**fill_at(T.ts + timedelta(minutes=1, seconds=15), qty=1), "price": 20050.0}
+    s, _ = core.on_fill(s, exit_)
+    s, _ = core.on_fill(s, again)
+    s, _ = core.on_bar(s, bar("09:31", 20035.0, 20040.0, 20030.0, 20035.0))
+    assert (s.acct.balance, s.acct.open_pnl, s.acct.peak) == (1000.0, -300.0, 800.0)
+    s, _ = core.on_account(s, account(balance=53_500.0, unrealized=-300.0), T.ts)
+    assert s.halted.startswith(GAP_INTRADAY + "53200.00 puts the drawdown floor at 51200.00, ")
+    assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+
+
+def test_a_same_day_intraday_restart_starts_from_the_highest_journalled_peak():
+    """R6: today's open journalled at peak 50,000, then a raise to 51,000 journalled as a "peak"
+    row: a same-day restart starts from 51,000 (floor -1,000), not the open's peak."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=52_200.0, realized_today=2200.0)
+    )
+    peak = [{"peak": 51_000.0, "ts": iso(T.ts)}]
+    opens = [opened(D1, 50_000.0)]
+    s, _ = core.start(replace(setup, day_start=None), T.ts, peaks=peak, opens=opens)
+    assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+
+
+def test_a_same_day_intraday_restart_raises_the_peak_to_the_balance_kept_not_the_booked_one():
+    """The replay books +1,000 but NinjaTrader is at 50,500 (a loss the journal never saw): the
+    balance kept is NinjaTrader's lower one, and the peak rises to it, 500, not to 1,000."""
+    setup = replace(
+        sim(trailing="intraday"), start=replace(START, balance=50_500.0, realized_today=500.0)
+    )
+    s, _ = core.start(replace(setup, day_start=None), T.ts, opens=[opened(D1, 50_000.0)])
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
+    s = core.replay(s, [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_)])
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (500.0, 500.0, -1500.0)

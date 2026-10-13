@@ -101,6 +101,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 if (config.ManagedAccounts.Count == 0)
                     FenrirLog.Alert("managed_accounts is empty in fenrir-addon.json: Fenrir will not see or touch any account");
                 broker = new FenrirBroker(config);
+                broker.Start();
                 if (config.Token.Length < 16)
                 {
                     FenrirLog.Alert("set a token of at least 16 characters in fenrir-addon.json; server not started");
@@ -122,6 +123,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 if (server != null) server.Stop();
+                if (broker != null) broker.Stop();
             }
             catch (Exception e)
             {

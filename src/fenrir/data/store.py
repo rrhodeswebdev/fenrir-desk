@@ -253,9 +253,14 @@ def write_bars(data_dir: Path, series: str, contract: str, bars: Sequence[Bar]) 
 
 
 def _read_series(
-    data_dir: Path, series: str, columns: list[str] | None = None
+    data_dir: Path,
+    series: str,
+    columns: list[str] | None = None,
+    contracts: set[str] | None = None,
 ) -> pl.DataFrame | None:
     files = sorted(_series_dir(data_dir, series).glob("*.parquet"))
+    if contracts is not None:  # only these contracts' files are opened
+        files = [f for f in files if f.stem in contracts]
     if not files:
         return None
     # bytes, not the path: the terminal can write data/ and coverage() runs in the root server
@@ -277,7 +282,14 @@ def load_bars(
     start: date | None = None,
     end: date | None = None,
 ) -> tuple[Bar, ...]:
-    frame = _read_series(data_dir, series)
+    contracts = None
+    if start and end:  # a few days (live warm-up, #79): only their front months' files
+        rolls = [r for r in instruments.rolls if r.series == series]
+        ends = [r.start for r in rolls[1:]] + [date.max]
+        contracts = {
+            r.contract for r, e in zip(rolls, ends, strict=True) if r.start <= end and e > start
+        }
+    frame = _read_series(data_dir, series, contracts=contracts)
     if frame is None:
         return ()
     if start:

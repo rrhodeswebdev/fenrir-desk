@@ -11,6 +11,7 @@ pure; `main` is shell.
 import json
 import os
 import sys
+from collections.abc import Iterable, Iterator
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -30,6 +31,22 @@ def ctx_json(c: Ctx) -> dict[str, Any]:
         "account": asdict(c.account),
         "spec": asdict(c.spec),
     }
+
+
+def ctx_lines(ctxs: Iterable[Ctx]) -> Iterator[bytes]:
+    """The `{"ctx": ctx_json(c)}` request line for each of `ctxs`, each bar encoded once: a
+    warm-up (#79) replays a day of contexts whose windows share up to 500 bars."""
+    encoded: dict[Bar, str] = {}
+    for c in ctxs:
+        bars = ",".join(
+            encoded.get(b)
+            or encoded.setdefault(b, json.dumps(asdict(b) | {"ts": b.ts.isoformat()}))
+            for b in c.bars
+        )
+        rest = json.dumps(
+            {"position": asdict(c.position), "account": asdict(c.account), "spec": asdict(c.spec)}
+        )
+        yield f'{{"ctx": {{"bars": [{bars}], {rest[1:]}}}\n'.encode()
 
 
 def parse_ctx(d: dict[str, Any]) -> Ctx:

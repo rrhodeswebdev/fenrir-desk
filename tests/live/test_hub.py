@@ -334,6 +334,82 @@ async def test_a_lost_halt_row_still_halts_and_spares_the_others(hub, conn, arme
     assert kinds(conn, "Sim102") == ["bar", "action"]
 
 
+BREACH = {"reason": "breach max_drawdown: x", "kind": "breach", "until": None}
+
+
+def breaching(monkeypatch):
+    """core.on_bar breaches on every bar, as a Mark below the floor would."""
+    on_bar = core.on_bar
+
+    def fake(s, b):
+        s, out = on_bar(s, b)
+        s = replace(s, halted=BREACH["reason"], halt_kind="breach")
+        return s, (*out, core.Log("halt", BREACH))
+
+    monkeypatch.setattr(core, "on_bar", fake)
+
+
+async def test_a_breach_whose_row_fails_keeps_its_kind(hub, conn, armed, monkeypatch):
+    """The catch-all never swaps an in-memory breach for a weaker `live runner error` halt."""
+    write = journal.write
+
+    def locked(conn, ts, account, kind, payload):
+        if kind == "halt":
+            raise sqlite3.OperationalError("database is locked")
+        write(conn, ts, account, kind, payload)
+
+    breaching(monkeypatch)
+    monkeypatch.setattr(journal, "write", locked)
+    arming.insert_armed(conn, armed)
+    await hub.handle_bar(bar(T0))
+    s = hub.states["Sim101"]
+    assert (s.halted, s.halt_kind) == (BREACH["reason"], "breach")
+
+
+async def test_an_unjournalled_breach_survives_a_restart(hub, settings, conn, armed, monkeypatch):
+    """sqlite refuses every write on the breaching bar; the halt row lands on the next tick."""
+    write, locked = journal.write, {"on": True}
+
+    def flaky(conn, ts, account, kind, payload):
+        if locked["on"]:
+            raise sqlite3.OperationalError("database is locked")
+        write(conn, ts, account, kind, payload)
+
+    arming.insert_armed(conn, armed)
+    await hub.tick(T0)
+    breaching(monkeypatch)
+    monkeypatch.setattr(journal, "write", flaky)
+    await hub.handle_bar(bar(T0))
+    locked["on"] = False
+    await hub.tick(T0)
+    await hub.stop()
+    restarted = LiveHub(settings)
+    try:
+        await restarted.tick(T0)
+        [acc] = restarted.status()["accounts"]
+    finally:
+        await restarted.stop()
+    assert (acc["halt_kind"], acc["halt_reason"]) == ("breach", BREACH["reason"])
+
+
+async def test_disarming_drops_unjournalled_halts(hub, conn, armed, monkeypatch):
+    write = journal.write
+
+    def locked(conn, ts, account, kind, payload):
+        if kind == "halt":
+            raise sqlite3.OperationalError("database is locked")
+        write(conn, ts, account, kind, payload)
+
+    breaching(monkeypatch)
+    monkeypatch.setattr(journal, "write", locked)
+    arming.insert_armed(conn, armed)
+    await hub.handle_bar(bar(T0))
+    monkeypatch.setattr(journal, "write", write)
+    arming.insert_armed(conn, replace(armed, armed_at=T0 + timedelta(minutes=5)))  # re-armed
+    await hub.tick(T0 + timedelta(minutes=5))
+    assert "halt" not in kinds(conn)
+
+
 async def test_isolation_refusal_halts_without_a_child(hub, conn, armed, monkeypatch):
     monkeypatch.setenv("FENRIR_BIND_ALL", "1")
     monkeypatch.delenv("FENRIR_PTY_USER", raising=False)

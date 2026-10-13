@@ -48,6 +48,7 @@ ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
+RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
 
 Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
 
@@ -141,6 +142,7 @@ class LiveHub:
         self.instruments: Instruments | None = None
         self.states: dict[str, RunnerState] = {}
         self.broken: dict[str, tuple[Armed, str]] = {}  # alerted once; retried when the row changes
+        self.unwritten: dict[str, tuple[Log, ...]] = {}  # RESTORED rows sqlite refused; retried
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
@@ -186,9 +188,11 @@ class LiveHub:
                     log.exception("live account %s failed on a bar", account)
                     await self._kill(account)
                     error = f"{type(e).__name__}: {e}"
+                    # from the state _apply kept, so a breach it could not journal is not replaced
+                    s = self.states[account]
                     try:
                         self._apply(account, *core.halt(s, f"live runner error: {error}"))
-                    except Exception:  # the journal itself failed: halted in memory, row lost
+                    except Exception:  # the journal itself failed: halted in memory, row retried
                         log.exception("live account %s halted; halt not journalled", account)
 
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
@@ -212,11 +216,18 @@ class LiveHub:
 
     def _apply(self, account: str, s: RunnerState, effects: tuple[Log | core.Send, ...]) -> None:
         self.states[account] = s
-        for e in effects:
+        effects = self.unwritten.pop(account, ()) + tuple(effects)
+        for i, e in enumerate(effects):
             if isinstance(e, core.Send):
                 # unreachable until 22.2/22.4 supply sim/live start figures; fail loud, never drop
                 raise RuntimeError(f"order sending lands in 22.4 (#86): {e.client_id} not sent")
-            journal.write(self.conn, _now(), account, e.kind, e.payload)
+            try:
+                journal.write(self.conn, _now(), account, e.kind, e.payload)
+            except Exception:  # keep what a restart restores; the next _apply (a tick) retries
+                self.unwritten[account] = tuple(
+                    x for x in effects[i:] if isinstance(x, Log) and x.kind in RESTORED
+                )
+                raise
 
     async def _sync(self, now: datetime) -> None:
         if self.conn is None:
@@ -227,6 +238,7 @@ class LiveHub:
         rows = {a.account: a for a in list_armed(self.conn)}
         for account in [x for x, s in self.states.items() if rows.get(x) != s.setup.armed]:
             del self.states[account]
+            self.unwritten.pop(account, None)  # disarmed: its halts must not reach a new arming
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]

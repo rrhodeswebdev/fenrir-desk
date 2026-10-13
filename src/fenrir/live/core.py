@@ -3,7 +3,9 @@
 Per closed bar the shell calls `on_bar`, runs the strategy's `step` on `ctx(state)` in its own child
 process (DEC-1), then passes the returned actions to `decide` (or the error to `step_failed`).
 Effects are `Log`s to journal and, for sim and live, `Send`s for the shell to post to the add-on;
-the add-on's fills come back through `on_fill`, and a failed post through `send_failed`.
+the add-on's fills come back through `on_fill`, and a failed post through `send_failed`. Sim and
+live take no new entries until NinjaTrader's book is reconciled (`on_reconcile`), on start and after
+every lost link (`on_disconnect`); after a restart `replay` rebuilds today's book from the journal.
 """
 
 import hashlib
@@ -16,6 +18,7 @@ from typing import Any
 
 from fenrir.backtest.attempt import ADDON_FLATTEN, MINUTE, WINDOW
 from fenrir.backtest.fills import OpenPosition, best_open_pnl, gross_pnl, worst_open_pnl
+from fenrir.bridge.reconcile import ExpectedBook, NtOrder, NtPosition, reconcile
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import ContractSpec, in_roll_window
@@ -45,6 +48,8 @@ CONFIRM_BALANCES = (
     "confirm balances: an end-of-day session close passed while the runner was down;"
     " re-arm with the confirmed peak balance"
 )
+UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
+LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +116,9 @@ class RunnerState:
     stale: str | None = None  # stale-data pause: no new entries until the next bar
     working: Working | None = None  # no new entries while an entry is working
     exiting: str | None = None  # client_id of the Flatten out (runner or step), until flat
-    drift: str | None = None  # entry-fill drift pause: no new entries until resolved (22.3)
+    drift: str | None = None  # entry-fill drift pause: no new entries until resolved
+    unreconciled: str | None = None  # sim/live: no new entries until NinjaTrader's book matches
+    mismatch: str | None = None  # reconcile pause: no new entries until the user resolves it
     fills: tuple[datetime, ...] = ()  # this trading day's fill times
     opened: datetime | None = None  # first fill of the open position
     opened_balance: float = 0.0  # acct.balance before that fill, for TradeClosed
@@ -196,11 +203,22 @@ def start(
         floor = start_account(setup.rules, a.phase, acct.day, at_open).floor
     else:
         floor = acct.floor
-    s = RunnerState(setup, acct, FLAT, (), (), acct.day_start_balance, floor, now)
+    waiting = None if a.mode == "dry" else UNRECONCILED
+    s = RunnerState(
+        setup, acct, FLAT, (), (), acct.day_start_balance, floor, now, unreconciled=waiting
+    )
     for h in halts:  # replayed in order, so open-ended halts and breaches win as they did live
-        until = h["until"] and date.fromisoformat(h["until"])
-        if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
-            s, _ = _halt(s, h["reason"], h["kind"], until)
+        match h["kind"]:  # first the pauses that only `resolve` lifts
+            case "reconcile":
+                s = replace(s, mismatch=h["reason"])
+            case "drift":
+                s = replace(s, drift=h["reason"])
+            case "resolve":
+                s = replace(s, mismatch=None, drift=None)
+            case _:
+                until = h["until"] and date.fromisoformat(h["until"])
+                if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
+                    s, _ = _halt(s, h["reason"], h["kind"], until)
     if setup.strategy_hash != a.strategy_hash:
         s, more = halt(replace(s, started=False), "strategy file changed since arming; re-arm")
         return s, out + more
@@ -316,8 +334,8 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
                 f"entry fill {price} is {ticks:g} ticks from the LSE close {w.close};"
                 " new entries paused until resolved"
             )
-            s = replace(s, drift=reason)
-            out += (Log("alert", {"message": reason}),)
+            s = replace(s, drift=reason)  # a "halt" row, so a restart restores it
+            out += (Log("halt", {"reason": reason, "kind": "drift", "until": None}),)
     if s.position.qty and s.position.stop is None and not s.exiting:  # no broker-side stop known
         # "f<n>": today's n-th fill, so each fill's Flatten has its own id, the same on a replay
         s, more = _stopless(s, ts, f"f{len(s.fills)}")
@@ -355,6 +373,112 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
         exiting=None if s.exiting == client_id else s.exiting,  # the next bar sends another
     )
     return s, (Log("alert", {"message": f"send {client_id} failed: {error}"}),)
+
+
+def on_disconnect(s: RunnerState, error: str) -> Step:
+    """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
+    one "alert" per outage. Positions keep their broker-side stop and target (the add-on's
+    `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs ignore it."""
+    if s.setup.armed.mode == "dry" or s.unreconciled == LINK_LOST:
+        return s, ()
+    return replace(s, unreconciled=LINK_LOST), (
+        Log("alert", {"message": f"{LINK_LOST} ({error})"}),
+    )
+
+
+def on_reconcile(
+    s: RunnerState,
+    instrument: str,
+    positions: Sequence[NtPosition],
+    orders: Sequence[NtOrder],
+    now: datetime,
+) -> Step:
+    """NinjaTrader's `/positions` and working `/orders` for this account (`instrument`: its name
+    for the armed contract), on start, after every reconnect and on `resolve`; dry runs ignore it.
+
+    NinjaTrader is the source of truth: the runner takes its position on the instrument, with
+    the stop and target that cover it, keeps its working entry only while NinjaTrader still works
+    it, and forgets a Flatten in flight (`/flatten` never over-closes). Every reconcile lifts
+    the `unreconciled` pause; a mismatch pauses entries until the user resolves it, and a position
+    with no covering stop is flattened at once as well."""
+    a, w = s.setup.armed, s.working
+    if a.mode == "dry":
+        return s, ()
+    # the sent entry, still working: not a stray; any other was filled, rejected or cancelled
+    entry = [o for o in orders if w and o.client_id == w.client_id and o.role == "entry"]
+    rest = [o for o in orders if o not in entry]
+    found = reconcile(ExpectedBook(a.account, instrument, s.position.qty), positions, rest)
+    mine = [p for p in positions if p.account == a.account and p.instrument == instrument]
+    qty = sum(p.qty for p in mine)
+    avg = qty and sum(p.qty * p.avg_price for p in mine) / qty
+    on = [o for o in rest if o.instrument == instrument]
+    # NinjaTrader just reported the book: the position is verified and an outage is over
+    s = replace(s, working=w if entry else None, exiting=None, unreconciled=None)
+    s = _adopt(s, qty, avg, on, now)
+    if not found:
+        return s, ()
+    detail = "; ".join(f"{m.kind}: {m.detail}" for m in found)
+    s, out = _mismatched(s, f"NinjaTrader mismatch: {detail}; fix it there, then resolve")
+    if s.position.qty and s.position.stop is None:
+        # each reconcile is a fresh read of NinjaTrader: its own id, even twice in one minute
+        s, more = _stopless(s, now, f"r{now.timestamp()}")
+        out += more
+    return s, out
+
+
+def resolve(
+    s: RunnerState,
+    instrument: str,
+    positions: Sequence[NtPosition],
+    orders: Sequence[NtOrder],
+    now: datetime,
+) -> Step:
+    """The user fixed NinjaTrader: lift the reconcile and drift pauses, with a "halt" row of kind
+    "resolve" so a restart keeps them lifted, then reconcile with NinjaTrader's book again (a
+    mismatch left pauses again). Never lifts a halt: a breach or any other halt stays."""
+    lifted = [r for r in (s.mismatch, s.drift) if r]
+    lift = {"reason": "resolved: " + "; ".join(lifted), "kind": "resolve", "until": None}
+    out = (Log("halt", lift),) if lifted else ()
+    s, more = on_reconcile(
+        replace(s, mismatch=None, drift=None), instrument, positions, orders, now
+    )
+    return s, out + more
+
+
+def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> RunnerState:
+    """After a restart, `s` from `start`: rebuild today's book from today's journal rows since
+    `armed_at` as (kind, payload), oldest first. Sent Brackets and Flattens ("action") become the
+    working entry and the Flatten in flight, and the "fill" rows rebuild the position through
+    `on_fill`. The balance is the lower of today's opening balance plus the replayed fills (with
+    `day_start`) and NinjaTrader's at the restart; without `day_start` it stays NinjaTrader's,
+    which already holds today's fills. No effects: every row was journalled when it happened.
+    The drift pause stays as `start` restored it from the "halt" rows (a resolve may have lifted
+    it), and sim and live stay `unreconciled` until `on_reconcile`."""
+    r = s
+    if s.setup.day_start is not None:
+        r = replace(s, acct=replace(s.acct, balance=s.acct.day_start_balance, traded_today=False))
+    close = math.nan  # the last "bar" row's close: a Bracket was checked at it
+    for kind, p in rows:
+        if kind == "bar":
+            close = p["close"]
+        elif kind == "action" and p["sent"] and p["type"] == "Bracket":
+            b = Bracket(p["side"], p["qty"], p["stop"], p["target"])
+            r = replace(r, working=Working(p["client_id"], b, close))
+        elif kind == "action" and p["sent"] and p["type"] == "Flatten":
+            r = replace(r, exiting=p["client_id"])
+        elif kind == "fill":
+            r, _ = on_fill(r, p)
+    # NinjaTrader's balance at the restart holds every fill, also those made while the runner was
+    # down and never journalled: never loosen it. Without day_start it already holds today's.
+    booked, a = r.acct.balance, s.acct
+    if s.setup.day_start is None:
+        acct = replace(r.acct, balance=a.balance, traded_today=a.traded_today)
+    else:
+        traded = r.acct.traded_today or a.traded_today
+        acct = replace(r.acct, balance=min(booked, a.balance), traded_today=traded)
+    shift = acct.balance - booked  # the open trade's P&L counts from the balance kept
+    # an exit's `held` marks its own bar only, which is gone
+    return replace(r, acct=acct, opened_balance=r.opened_balance + shift, drift=s.drift, held=None)
 
 
 def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:
@@ -466,7 +590,7 @@ def account_status(s: RunnerState) -> dict[str, Any]:
     """One AccountStatus (Plans 21–24)."""
     a, rules, acct = s.setup.armed, s.setup.rules, s.acct
     p, v = phase_rules(rules, acct.phase), view(_strict(s), rules)
-    pause = "stale" if s.stale else "drift" if s.drift else None
+    pause = "reconcile" if s.mismatch else "stale" if s.stale else "drift" if s.drift else None
     head = {
         "account": a.account,
         "mode": a.mode,
@@ -474,9 +598,10 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "strategy": Path(a.strategy_path).stem,
         "rules_account": a.rules_account,
         "contract": a.contract,
-        "halted": bool(s.halted or s.stale or s.drift),
+        "halted": bool(s.halted or s.mismatch or s.stale or s.drift),
         "halt_kind": s.halt_kind if s.halted else pause,
-        "halt_reason": s.halted or s.stale or s.drift,
+        # the brief unreconciled pause shows only here
+        "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.unreconciled,
     }
     if not s.started:
         keys = ("balance", "nt_balance", "today_pnl", "limits", "position", "session")
@@ -525,11 +650,77 @@ def _minute(ts: datetime) -> datetime:
 
 def _event(s: RunnerState, event: Event) -> Step:
     """Apply one event through the phase's rules; a Breach halts until disarmed."""
-    acct = apply(build_rules(s.setup.rules, s.acct.phase), s.acct, event)
+    acct, unverified = _rules(s, event)
     if not isinstance(acct, Breach):
-        return replace(s, acct=acct), ()
+        return _mismatched(replace(s, acct=acct), unverified)
     s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
     return replace(s, acct=book(s.acct, event)), out  # failed: keep the books, not the rules
+
+
+def _rules(s: RunnerState, event: Event) -> tuple[AccountState | Breach, str | None]:
+    """`event` through the phase's rules, and the reconcile pause it raises instead of a flat_by
+    breach: while unreconciled the position is unverified (an exit fill missed while the link was
+    down; the add-on flattens at 16:40 on its own), so a Mark or day close applies as if flat."""
+    rules = build_rules(s.setup.rules, s.acct.phase)
+    acct = apply(rules, s.acct, event)
+    unverified = isinstance(acct, Breach) and acct.rule == "flat_by" and s.unreconciled is not None
+    if not unverified:
+        return acct, None
+    flat = apply(rules, replace(s.acct, position=0), event)
+    if isinstance(flat, Breach):  # drawdown, or a Fill: NinjaTrader's own report of a position
+        return flat, None
+    why = f"unverified position: {acct.reason}; reconcile with NinjaTrader, then resolve"
+    return replace(flat, position=s.acct.position), why
+
+
+def _mismatched(s: RunnerState, reason: str | None) -> Step:
+    """Pause entries until resolved, journalled as a "halt" row of kind "reconcile" (restored on
+    restart) each time the reason changes."""
+    if reason is None or s.mismatch == reason:
+        return s, ()
+    return replace(s, mismatch=reason), (
+        Log("halt", {"reason": reason, "kind": "reconcile", "until": None}),
+    )
+
+
+def _adopt(
+    s: RunnerState, qty: int, avg: float, orders: Sequence[NtOrder], now: datetime
+) -> RunnerState:
+    """NinjaTrader's `qty` at `avg` on the armed contract, with the stop and target prices that
+    cover it (None when they do not); the runner's own entry and trade start stay while the qty
+    and side match. Fills missed meanwhile are not booked: NinjaTrader's figures still count."""
+    p, acct = s.position, s.acct
+    if qty == 0:
+        return replace(s, position=FLAT, acct=replace(acct, position=0, open_pnl=0.0), opened=None)
+    entry = p.entry if qty == p.qty else avg
+    a = s.setup.armed.account
+    stop, target = (_cover(a, orders, qty, entry, role) for role in ("stop", "target"))
+    position = Position(qty, entry, stop, target)
+    if p.qty and (p.qty > 0) == (qty > 0):
+        return replace(s, position=position, acct=replace(acct, position=qty))
+    return replace(
+        s,
+        position=position,
+        acct=replace(acct, position=qty),
+        opened=now,
+        opened_balance=acct.balance,
+    )
+
+
+def _cover(
+    account: str, orders: Sequence[NtOrder], qty: int, entry: float, role: str
+) -> float | None:
+    """The price of the `role` orders that close exactly `qty` (as `reconcile` counts them), the
+    furthest from `entry` when there are several; None when they do not cover it."""
+    closing = "sell" if qty > 0 else "buy"
+    mine = [
+        o
+        for o in orders
+        if o.account == account and o.role == role and o.action == closing and o.qty > 0
+    ]
+    if sum(o.qty for o in mine) != abs(qty):
+        return None
+    return max((o.price for o in mine), key=lambda price: abs(price - entry))
 
 
 def _mark(p: Position, bar: Bar, spec: ContractSpec) -> Mark:
@@ -607,14 +798,14 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     day = trading_day(ts)
     if day <= s.acct.day:
         return s, ()
-    out: tuple[Log | Send, ...] = ()
-    acct = apply(build_rules(s.setup.rules, s.acct.phase), s.acct, DayClosed(s.acct.day, ts))
+    acct, unverified = _rules(s, DayClosed(s.acct.day, ts))
+    s, out = _mismatched(s, unverified)
     if isinstance(acct, Breach):
         s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
         acct = s.acct  # failed until disarmed: its figures stay as they were
     elif s.nt and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day":
         acct = _raised(s.setup, acct, s.nt.balance)  # NinjaTrader's balance at the close (DEC-4a)
-        out = (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+        out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40
@@ -689,8 +880,8 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"side must be long or short, got {a.side!r}"
     if s.halted:
         return f"halted: {s.halted}"
-    if s.stale or s.drift:
-        return f"paused: {s.stale or s.drift}"
+    if paused := s.mismatch or s.unreconciled or s.stale or s.drift:
+        return f"paused: {paused}"
     if old:  # a late or replayed bar: never trade at its old close
         return old
     if pending:

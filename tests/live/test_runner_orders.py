@@ -1,9 +1,9 @@
 from dataclasses import replace
-from datetime import UTC, timedelta
+from datetime import timedelta
 
 import pytest
 from backtest_helpers import D1, D2, NQ, bar, make_rules, scripted
-from live_helpers import decide_now, make_setup
+from live_helpers import decide_now, fill, make_setup, reconciled
 
 from fenrir.backtest import attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
@@ -25,23 +25,7 @@ def sim(**kw):
 
 
 def started(setup, b):
-    return core.on_bar(core.start(setup, b.ts)[0], b)[0]
-
-
-def fill(qty, price, ts, commission=0.0, cid="other"):
-    """An add-on "fill" stream message (validated by fenrir.bridge.client)."""
-    stamp = ts.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-    return {
-        "type": "fill",
-        "account": "Sim101",
-        "client_id": cid,
-        "order_id": "o",
-        "instrument": "NQ 12-25",
-        "qty": qty,
-        "price": price,
-        "commission": commission,
-        "ts": stamp,
-    }
+    return core.on_bar(reconciled(core.start(setup, b.ts)[0]), b)[0]
 
 
 def kinds(effects):
@@ -376,7 +360,7 @@ def test_entry_fill_drift_past_4_ticks_pauses_entries(price, paused):
     s, effects = core.on_fill(
         s, fill(1, price, at("09:31").ts + timedelta(seconds=1), cid=s.working.client_id)
     )
-    assert kinds(effects) == (["fill", "alert"] if paused else ["fill"])
+    assert kinds(effects) == (["fill", "halt"] if paused else ["fill"])  # restored on restart
     assert (s.drift is not None) is paused
     if paused:
         st = core.account_status(s)

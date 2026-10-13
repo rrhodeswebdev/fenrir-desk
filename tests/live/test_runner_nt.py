@@ -827,3 +827,59 @@ def test_an_app_loss_through_its_own_floor_is_a_breach_not_a_gap():
     assert s.halted is None and "halt" not in kinds(effects)
     s, _ = core.on_bar(s, at("09:31"))
     assert s.halt_kind == "breach"
+
+
+def gap_flattening(trailing):
+    """A gap halt with the app flat while NinjaTrader shows -1,900 open: the account-wide
+    Flatten is out (the add-on accepted it, nothing filled). Intraday: NinjaTrader at 54,500
+    (#222); end_of_day: 52,200 at the close (#219). Returns the state and the next fill's time."""
+    if trailing == "intraday":
+        s = running(sim(trailing="intraday"))
+        s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
+        s, effects = core.on_bar(s, at("09:31"))
+        ts = T.ts + timedelta(minutes=2, seconds=5)
+    else:
+        s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=-1900.0))
+        s, effects = core.on_bar(s, at("09:30", D2))
+        ts = at("09:30", D2).ts + timedelta(minutes=1, seconds=5)
+    assert s.halted.startswith("confirm balances: a gap ") and sends(effects) == [Flatten]
+    assert s.exiting is not None and s.position.qty == 0
+    return s, ts
+
+
+@pytest.mark.parametrize("trailing", ["intraday", "end_of_day"])
+def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened_at_once(trailing):
+    """Review of #231, blocking 1: a fill on the app's instrument while the account-wide Flatten
+    is out (a manual MNQ buy while the add-on closes a manual ES) opens a position with no known
+    stop. That Flatten was sent while the app was flat, so it cannot be closing this one: the
+    fill ends it and the position gets its own Flatten at once, as on main; one at a time after."""
+    s, ts = gap_flattening(trailing)
+    first = s.exiting
+    s, effects = core.on_fill(s, fill_at(ts, qty=1))
+    assert s.position.qty == 1 and sends(effects) == [Flatten]
+    [row] = actions(effects)
+    assert row["reason"] == "position 1 has no known stop" and s.exiting not in (None, first)
+    for n, close in enumerate((19950.0, 19900.0, 19850.0), start=1):  # through the floor
+        s, _ = core.on_account(s, account(54_500.0, unrealized=-5000.0), ts)
+        s, effects = core.on_bar(s, bar("10:0" + str(n), close, close, close, close, ts.date()))
+        assert sends(effects) == []  # its Flatten is out: no storm
+    assert s.halt_kind == "breach"
+
+
+def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next_bar():
+    """The same for an entry with a known stop, sent before the gap halt and filled while the
+    account-wide Flatten is out: not stopless, so the next bar's gap flatten closes it."""
+    s = running(sim(trailing="intraday"))
+    s, effects = decide_now(s, [LONG])
+    assert sends(effects) == [Bracket]
+    s, _ = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.halted.startswith(GAP_INTRADAY) and sends(effects) == [Flatten]
+    entry = {
+        **fill_at(T.ts + timedelta(minutes=2, seconds=5), qty=1),
+        "client_id": s.working.client_id,
+    }
+    s, effects = core.on_fill(s, entry)
+    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [])
+    s, effects = core.on_bar(s, at("09:32"))
+    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]

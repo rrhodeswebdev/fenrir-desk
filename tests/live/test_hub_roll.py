@@ -396,3 +396,43 @@ async def test_an_intraday_gain_the_app_never_saw_halts_and_survives_a_restart(
         assert [h["kind"] for h in halts(conn)] == [None] and fake.requests == []
     finally:
         await second.stop()
+
+
+@pytest.mark.parametrize("rules_account", ["lucid-daily-50k", "lucid-flex-50k"])
+async def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened(
+    settings, client, conn, armed, fake, rules_account
+):
+    """Review of #231, blocking 1 (hub probe): the gap halt with the app flat and NinjaTrader at
+    -500 open sends one account-wide /flatten, which the add-on accepts but does not fill. A
+    manual MNQ buy is then booked: it gets its own /flatten at once, journalled as having no
+    known stop, and no storm follows over falling bars, ticks and account messages."""
+    if rules_account == "lucid-daily-50k":  # intraday: NinjaTrader's equity 52,200
+        arming.insert_armed(conn, pinned(replace(armed, rules_account=rules_account)))
+        figures, roll, at = account(52_700.0, realized=2700.0), T0 + timedelta(minutes=1), T0
+    else:  # end_of_day: NinjaTrader's balance 52,200 at the close
+        figures, roll, at = account(52_200.0, realized=2200.0), D2, D2
+    hub = LiveHub(settings, addon=client)
+    try:
+        await started(hub)
+        await hub.handle_stream(figures | {"unrealized_pnl": -500.0})
+        sent = len(fake.requests)
+        await hub.handle_bar(bar(roll))
+        s = hub.states["Sim101"]
+        assert s.halted.startswith("confirm balances: a gap ") and s.position.qty == 0
+        [one] = flattens(fake, sent)
+        sent = len(fake.requests)
+        await hub.handle_fill(fill(1, 20000.0, at + timedelta(minutes=2, seconds=5)))
+        s = hub.states["Sim101"]
+        [two] = flattens(fake, sent)
+        assert s.position.qty == 1 and s.exiting == two != one
+        rows = journal.rows(conn, account="Sim101", kind="action")
+        assert [r.payload["reason"] for r in rows if r.payload["client_id"] == two] == [
+            "position 1 has no known stop"
+        ]
+        for n, close in enumerate((19950.0, 19900.0, 19850.0), start=3):
+            await hub.handle_bar(bar(at + timedelta(minutes=n), close))
+            await hub.tick(at + timedelta(minutes=n, seconds=30))
+            await hub.handle_stream(figures | {"unrealized_pnl": -3500.0})
+        assert flattens(fake, sent) == [two]
+    finally:
+        await hub.stop()

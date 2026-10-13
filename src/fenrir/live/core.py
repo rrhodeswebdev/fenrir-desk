@@ -407,8 +407,10 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         position=position,
         fills=(*s.fills, ts),
         working=None if mine else w,
-        # an over-close that reversed the position ends that Flatten: the reversal gets its own
-        exiting=None if rest == 0 or flipped else s.exiting,
+        # an over-close that reversed the position ends that Flatten: the reversal gets its own;
+        # so does a fill from flat: a Flatten sent while flat (the gap's account-wide one, #229)
+        # cannot be closing it, and a second `/flatten` never over-closes (review of #231)
+        exiting=None if rest == 0 or flipped or pos.qty == 0 else s.exiting,
         held=s.held or (None if opening else (pos, before)),
     )
     s, more = _event(s, Fill(ts, qty, price, commission, realized))

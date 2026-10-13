@@ -1,5 +1,6 @@
 """Account id <-> rules file. Reads rules files; `writer.py` writes them."""
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -42,16 +43,23 @@ def rules_path(account_id: str, rules_dir: Path) -> Path:
 
 
 def load_account(aid: str, rules_dir: Path) -> AccountRules:
+    return read_account(aid, rules_dir)[0]
+
+
+def read_account(aid: str, rules_dir: Path) -> tuple[AccountRules, str]:
+    """The rules for `aid` and the sha256 of the very bytes they were parsed from (the
+    backtest's `rules_hash`), so a pinned hash always describes the rules in use (DEC-4d)."""
     path = rules_path(aid, rules_dir)
     try:
         # the terminal can write rules/ and the root server reads it (DEC-1); read_regular's
         # ValueError (symlink, not a regular file, too big) already names the file
-        text = read_regular(path, RULES_MAX).decode("utf-8")
+        raw = read_regular(path, RULES_MAX)
+        text = raw.decode("utf-8")
     except FileNotFoundError:
         raise ValueError(f"unknown account {aid!r}: {path} not found") from None
     except (UnicodeDecodeError, OSError) as e:
         raise ValueError(f"{path}: {e}") from e
-    return parse_account(text, aid, path)
+    return parse_account(text, aid, path), hashlib.sha256(raw).hexdigest()
 
 
 def parse_account(text: str, aid: str, path: Path) -> AccountRules:

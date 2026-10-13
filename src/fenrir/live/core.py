@@ -90,6 +90,10 @@ class Setup:
     rules: AccountRules  # with_dll already applied
     spec: ContractSpec
     safety_margin_pct: float
+    # the pinned inputs as they are now (DEC-4d): a change since arming halts at start
+    rules_hash: str  # sha256 of the rules file `rules` was read from
+    instruments_hash: str  # sha256 of instruments.yaml
+    dll_on: bool  # accounts.yaml's
     start: Start | None = None  # ignored for dry runs, which start fresh (DEC-4a)
     # sim and live take no new brackets while it is None; ignored for dry runs
     day_start: DayStart | None = None
@@ -225,8 +229,9 @@ def start(
                 until = h["until"] and date.fromisoformat(h["until"])
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
-    if setup.strategy_hash != a.strategy_hash:
-        s, more = halt(replace(s, started=False), "strategy file changed since arming; re-arm")
+    refused = changed_since_arming(setup)
+    if refused:
+        s, more = halt(replace(s, started=False), refused)
         return s, out + more
     if a.mode != "dry" and setup.start is None:
         reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
@@ -236,6 +241,24 @@ def start(
         s, more = halt(s, CONFIRM_BALANCES)
         return s, out + more
     return s, out
+
+
+def changed_since_arming(setup: Setup) -> str | None:
+    """Why the account must not run on what it was armed with (DEC-4d), or None: `start`
+    halts on it, and the hub, with the files as they are at each bar, halts a running one."""
+    a = setup.armed
+    if setup.strategy_hash != a.strategy_hash:
+        return "strategy file changed since arming; re-arm"
+    if None in (a.dll_on, a.rules_hash, a.instruments_hash):
+        return "armed before dll_on and the rules and instruments.yaml hashes were pinned; re-arm"
+    if setup.rules_hash != a.rules_hash:
+        return "rules file changed since arming; re-arm"
+    if setup.instruments_hash != a.instruments_hash:
+        return "instruments.yaml changed since arming; re-arm"
+    if setup.dll_on != a.dll_on:
+        was, now = ("on" if on else "off" for on in (a.dll_on, setup.dll_on))
+        return f"dll_on changed since arming (armed {was}, accounts.yaml now {now}); re-arm"
+    return None
 
 
 def _missed_close(armed_at: datetime, peaks: Sequence[Mapping[str, Any]], today: date) -> bool:

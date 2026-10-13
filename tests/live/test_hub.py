@@ -1,10 +1,11 @@
 import asyncio
+import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from live_helpers import ARMED_AT
+from live_helpers import ARMED_AT, RULES, pinned
 
 from fenrir.core.bars import Bar
 from fenrir.live import arming, core, journal, service
@@ -53,8 +54,17 @@ def strategy(tmp_path, source: str = ALWAYS, name: str = "always"):
 @pytest.fixture
 def armed(tmp_path) -> Armed:
     path = strategy(tmp_path)
-    return Armed(
-        "Sim101", str(path), file_hash(path), "lucid-flex-50k", "MNQ", "dry", "evaluation", ARMED_AT
+    return pinned(
+        Armed(
+            "Sim101",
+            str(path),
+            file_hash(path),
+            "lucid-flex-50k",
+            "MNQ",
+            "dry",
+            "evaluation",
+            ARMED_AT,
+        )
     )
 
 
@@ -213,6 +223,120 @@ async def test_a_row_after_the_close_is_no_proof_of_a_roll(hub, conn, armed, mon
     clock["t"] = after + timedelta(minutes=5)
     await hub.tick(clock["t"])
     assert got[0].halted.startswith("confirm balances: ")
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (None, None),
+        ("dll_on", "dll_on changed since arming (armed off, accounts.yaml now on); re-arm"),
+        ("rules", "rules file changed since arming; re-arm"),
+        ("instruments", "instruments.yaml changed since arming; re-arm"),
+    ],
+)
+async def test_a_start_with_inputs_other_than_the_pinned_halts(
+    settings, conn, armed, tmp_path, monkeypatch, change, reason
+):
+    """#91, DEC-4d: after a Settings change and a restart the account halts, never trading an
+    untested DLL choice, rules file or instruments.yaml; its strategy never runs."""
+    rules = tmp_path / "rules"
+    shutil.copytree(RULES / "lucid", rules / "lucid")
+    shutil.copy("instruments.yaml", tmp_path / "instruments.yaml")
+    monkeypatch.chdir(tmp_path)  # the hub reads ./instruments.yaml
+    edited = {
+        "dll_on": settings.data_dir / "accounts.yaml",
+        "rules": rules / "lucid" / "flex-50k.yaml",
+        "instruments": tmp_path / "instruments.yaml",
+    }
+    if change == "dll_on":
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        edited[change].write_text("lucid-flex-50k: {dll_on: true}\n")
+    elif change is not None:
+        with edited[change].open("a") as f:
+            f.write("\n# edited after arming\n")
+    arming.insert_armed(conn, armed)
+    hub = LiveHub(replace(settings, rules_dir=rules))
+    try:
+        await hub.tick(T0)
+        [acc] = hub.status()["accounts"]
+        assert acc["halt_reason"] == reason
+        if reason is None:
+            assert hub.children and kinds(conn) == []
+        else:
+            assert acc["halted"] is True and acc["balance"] is None
+            assert hub.children == {}  # the strategy never runs
+            [row] = journal.rows(conn, account="Sim101")
+            assert (row.kind, row.payload["reason"]) == ("halt", reason)
+    finally:
+        await hub.stop()
+
+
+@pytest.fixture
+def own_inputs(settings, tmp_path, monkeypatch):
+    """A rules dir and ./instruments.yaml the test may edit; the hub's settings use them."""
+    rules = tmp_path / "rules"
+    shutil.copytree(RULES / "lucid", rules / "lucid")
+    shutil.copy("instruments.yaml", tmp_path / "instruments.yaml")
+    monkeypatch.chdir(tmp_path)  # the hub reads ./instruments.yaml
+    return replace(settings, rules_dir=rules)
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ("dll_on", "dll_on changed since arming (armed off, accounts.yaml now on); re-arm"),
+        ("rules", "rules file changed since arming; re-arm"),
+        ("instruments", "instruments.yaml changed since arming; re-arm"),
+    ],
+)
+async def test_a_pinned_input_edited_while_armed_halts_on_the_next_bar(
+    own_inputs, conn, armed, tmp_path, change, reason
+):
+    """SPEC DEC-4d and the failure table: halted while armed, like a changed strategy file."""
+    arming.insert_armed(conn, pinned(armed, rules_dir=own_inputs.rules_dir))
+    hub = LiveHub(own_inputs)
+    try:
+        await hub.handle_bar(bar(T0))
+        if change == "dll_on":
+            own_inputs.data_dir.mkdir(parents=True, exist_ok=True)
+            (own_inputs.data_dir / "accounts.yaml").write_text("lucid-flex-50k: {dll_on: true}\n")
+        else:
+            edited = {
+                "rules": own_inputs.rules_dir / "lucid" / "flex-50k.yaml",
+                "instruments": tmp_path / "instruments.yaml",
+            }[change]
+            with edited.open("a") as f:
+                f.write("\n# edited while armed\n")
+        await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
+        assert kinds(conn) == ["bar", "action", "halt", "bar", "rejection"]
+        assert hub.states["Sim101"].halted == reason
+    finally:
+        await hub.stop()
+
+
+async def test_each_account_keeps_the_instruments_it_started_with(
+    own_inputs, conn, armed, tmp_path
+):
+    """Another account's start never swaps a running account's instruments; an account whose
+    bar cannot be checked (here: its calendar ends before today) halts instead of going dark."""
+    arming.insert_armed(conn, pinned(armed, rules_dir=own_inputs.rules_dir))
+    hub = LiveHub(own_inputs)
+    try:
+        await hub.handle_bar(bar(T0))
+        p = tmp_path / "instruments.yaml"
+        p.write_text(p.read_text().replace("last_year: 2030", "last_year: 2025"))
+        # armed after the edit: pins the new file, whose NQ calendar ends 2026-03-12
+        arming.insert_armed(conn, pinned(replace(armed, account="Sim102"), own_inputs.rules_dir))
+        await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
+        await hub.handle_bar(bar(T0 + timedelta(minutes=2)))
+        first, second = hub.states["Sim101"], hub.states["Sim102"]
+        # Sim101 still reads its own calendar: its bars are journalled and its pin halts it
+        assert kinds(conn) == ["bar", "action", "halt", "bar", "rejection", "bar", "rejection"]
+        assert first.halted == "instruments.yaml changed since arming; re-arm"
+        assert second.halted.startswith("live runner error: ValueError: no NQ contract")
+        assert kinds(conn, "Sim102") == ["halt"]
+    finally:
+        await hub.stop()
 
 
 async def test_file_edited_while_armed_halts_on_next_bar(hub, conn, armed):

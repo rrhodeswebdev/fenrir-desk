@@ -33,9 +33,23 @@ CREATE TABLE IF NOT EXISTS armed (
     contract TEXT NOT NULL,
     mode TEXT NOT NULL,
     phase TEXT NOT NULL,
-    armed_at TEXT NOT NULL
+    armed_at TEXT NOT NULL,
+    dll_on INTEGER,
+    rules_hash TEXT,
+    instruments_hash TEXT,
+    start_balance REAL,
+    peak_balance REAL
 );
 """
+# plan 23.3 (DEC-4d): columns CREATE TABLE IF NOT EXISTS never adds to an older `armed`; NULL in
+# a row armed before them, which the runner refuses to start
+PINNED = (
+    ("dll_on", "INTEGER"),
+    ("rules_hash", "TEXT"),
+    ("instruments_hash", "TEXT"),
+    ("start_balance", "REAL"),
+    ("peak_balance", "REAL"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +84,24 @@ def open_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")  # readers (`open_ro`) never block the hub's writes
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     return conn
+
+
+def _missing(conn: sqlite3.Connection) -> list[tuple[str, str]]:
+    have = {row[1] for row in conn.execute("PRAGMA table_info(armed)")}
+    return [(name, kind) for name, kind in PINNED if name not in have]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add the pinned columns to an `armed` table from before plan 23.3."""
+    if not _missing(conn):
+        return
+    with conn:
+        # the write lock, then look again: the hub and the arm route may both be migrating
+        conn.execute("BEGIN IMMEDIATE")
+        for name, kind in _missing(conn):
+            conn.execute(f"ALTER TABLE armed ADD COLUMN {name} {kind}")
 
 
 def open_ro(path: Path) -> sqlite3.Connection:
@@ -84,13 +115,20 @@ def open_ro(path: Path) -> sqlite3.Connection:
 def write(
     conn: sqlite3.Connection, ts: datetime, account: str, kind: str, payload: Mapping[str, Any]
 ) -> None:
+    with conn:
+        insert(conn, ts, account, kind, payload)
+
+
+def insert(
+    conn: sqlite3.Connection, ts: datetime, account: str, kind: str, payload: Mapping[str, Any]
+) -> None:
+    """`write` inside the caller's transaction: commits nothing."""
     if kind not in KINDS:
         raise ValueError(f"unknown journal kind {kind!r}")
-    with conn:
-        conn.execute(
-            "INSERT INTO journal (ts, account, kind, payload_json) VALUES (?, ?, ?, ?)",
-            (iso(ts), account, kind, json.dumps(payload, default=str)),
-        )
+    conn.execute(
+        "INSERT INTO journal (ts, account, kind, payload_json) VALUES (?, ?, ?, ?)",
+        (iso(ts), account, kind, json.dumps(payload, default=str)),
+    )
 
 
 def day_bounds(day: date) -> tuple[datetime, datetime]:

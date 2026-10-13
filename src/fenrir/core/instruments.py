@@ -1,3 +1,4 @@
+import hashlib
 from bisect import bisect_right
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -92,8 +93,14 @@ def parse_instruments(doc: Mapping[str, Any]) -> Instruments:
 
 
 def load_instruments(path: Path = Path("instruments.yaml")) -> Instruments:
+    return read_instruments(path)[0]
+
+
+def read_instruments(path: Path = Path("instruments.yaml")) -> tuple[Instruments, str]:
+    """The instruments and the sha256 of the bytes they were parsed from (pinned at arming)."""
     # the terminal can write the repo and the root server reads this (DEC-1)
-    return parse_instruments(yaml.safe_load(read_regular(path, INSTRUMENTS_MAX)))
+    raw = read_regular(path, INSTRUMENTS_MAX)
+    return parse_instruments(yaml.safe_load(raw)), hashlib.sha256(raw).hexdigest()
 
 
 def spec(instruments: Instruments, symbol: str) -> ContractSpec:

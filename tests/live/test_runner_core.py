@@ -1,18 +1,21 @@
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import date, timedelta
+from pathlib import Path
 
 import pytest
 from backtest_helpers import D1, NQ, bar, make_rules, rules_data, scripted
 from live_helpers import decide_now, make_setup, reconciled
 
-from fenrir.backtest.attempt import run_attempt
+from fenrir.backtest.attempt import MINUTE, run_attempt
 from fenrir.core.actions import Bracket, Cancel, Flatten
-from fenrir.core.instruments import ContractSpec
+from fenrir.core.instruments import ContractSpec, in_roll_window
+from fenrir.core.sessions import trading_day
 from fenrir.live import core
 from fenrir.live.core import DayStart, Start
 from fenrir.rules.drawdown import max_drawdown
 from fenrir.rules.schema import AccountRules
 from fenrir.rules.state import DayClosed
+from fenrir.strategy import Strategy
 
 BAR = bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0)
 LONG = Bracket("long", 1, 19990.0, 20020.0)  # stop-out: (10 + 1 tick) x $20 = $205
@@ -157,14 +160,41 @@ def test_no_entries_at_or_after_flat_time():
     assert kinds(decide(make_setup(make_rules()), [LONG], early)[1]) == ["bar", "action"]
 
 
-def test_no_entries_in_the_roll_window():
+def test_roll_window_bar_is_journalled_but_never_shown_to_step():
     # NQ Z25 -> H26: trading days 2025-12-11 .. 2025-12-16 are the roll window
+    s = run(make_setup(make_rules()))
     inside = bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 16))
-    _, effects = decide(make_setup(make_rules()), [LONG, Flatten()], inside)
-    assert kinds(effects) == ["bar", "rejection", "action"]  # exits still allowed
-    assert effects[1].payload["reason"] == "roll window: no new entries"
+    assert not core.runs_step(inside)
+    held, effects = core.on_bar(s, inside)
+    assert held.bars == s.bars and held.last_seen == inside.ts + MINUTE
+    assert effects[-1] == core.Log("bar", {**asdict(inside), "actions": 0})
     after = bar("09:30", 20000.0, 20005.0, 19995.0, 20000.0, date(2025, 12, 17))
-    assert kinds(decide(make_setup(make_rules()), [LONG], after)[1]) == ["bar", "action"]
+    assert core.runs_step(after)
+    assert core.ctx(core.on_bar(held, after)[0]).bars == (*s.bars, after)
+
+
+def test_step_sees_the_bars_the_backtest_shows_it_around_a_roll():
+    days = (date(2025, 12, 10), date(2025, 12, 11), date(2025, 12, 12), date(2025, 12, 17))
+    bars = tuple(
+        bar(hhmm, 20000.0, 20005.0, 19995.0, 20000.0 + i, d)
+        for i, d in enumerate(days)
+        for hhmm in ("09:30", "09:31", "09:32")
+    )
+    seen = []
+
+    def record(state, b, ctx):
+        seen.append(ctx.bars)
+        return state, []
+
+    loaded = tuple(b for b in bars if not in_roll_window(trading_day(b.ts)))  # as load_bars
+    strategy = Strategy("rec", Path("rec.py"), "0" * 64, "NQ", {}, lambda p: None, record)
+    run_attempt(loaded, 0, len(loaded), strategy, make_rules(), NQ)
+    s, live = core.start(make_setup(make_rules()), bars[0].ts)[0], []
+    for b in bars:  # as LiveHub._bar
+        s, _ = core.on_bar(s, b)
+        if core.runs_step(b):
+            live.append(core.ctx(s).bars)
+    assert len(live) == 6 and live == [tuple(c) for c in seen]
 
 
 def test_one_bracket_per_bar_and_flatten_cancel_replace_it():

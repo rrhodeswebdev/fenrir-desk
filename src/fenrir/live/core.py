@@ -1,11 +1,12 @@
 """Pure live-runner core: (RunnerState, input) -> (RunnerState, effects). No I/O or clock.
 
 Per closed bar the shell calls `on_bar`, runs the strategy's `step` on `ctx(state)` in its own child
-process (DEC-1), then passes the returned actions to `decide` (or the error to `step_failed`).
-Effects are `Log`s to journal and, for sim and live, `Send`s for the shell to post to the add-on;
-the add-on's fills come back through `on_fill`, and a failed post through `send_failed`. Sim and
-live take no new entries until NinjaTrader's book is reconciled (`on_reconcile`), on start and after
-every lost link (`on_disconnect`); after a restart `replay` rebuilds today's book from the journal.
+process (DEC-1) unless `runs_step` is false (a roll-window bar), then passes the returned actions to
+`decide` (or the error to `step_failed`). Effects are `Log`s to journal and, for sim and live,
+`Send`s for the shell to post to the add-on; the add-on's fills come back through `on_fill`, and a
+failed post through `send_failed`. Sim and live take no new entries until NinjaTrader's book is
+reconciled (`on_reconcile`), on start and after every lost link (`on_disconnect`); after a
+restart `replay` rebuilds today's book from the journal.
 """
 
 import hashlib
@@ -247,7 +248,15 @@ def halt(s: RunnerState, reason: str) -> Step:
     return _halt(s, reason, None, None)
 
 
+def runs_step(bar: Bar) -> bool:
+    """Whether the shell runs `step` on `bar`: never on a roll-window day, which the backtest
+    never loads, so live and backtest show `step` the same bars."""
+    return not in_roll_window(trading_day(bar.ts))
+
+
 def on_bar(s: RunnerState, bar: Bar) -> Step:
+    """Roll the day, mark and risk-check the bar; a roll-window bar (`runs_step` False) is
+    journalled here and never joins `bars`, as the shell then skips `step` and `decide`."""
     s, out = _roll_day(s, bar.ts)  # journals its own "peak" row
     was = s
     # backtest calling order: the entry fill, then the Mark of the position held, then the exit
@@ -264,7 +273,7 @@ def on_bar(s: RunnerState, bar: Bar) -> Step:
     a = s.acct
     s = replace(
         s,
-        bars=(*s.bars, bar)[-WINDOW:],
+        bars=(*s.bars, bar)[-WINDOW:] if runs_step(bar) else s.bars,
         equity=(*s.equity, (bar.ts, a.balance + a.open_pnl)),
         last_seen=bar.ts + MINUTE,
         stale=None,
@@ -272,7 +281,8 @@ def on_bar(s: RunnerState, bar: Bar) -> Step:
     s, more = _safety(s)
     out += more
     s, more = _exit(s, bar)
-    return s, out + more + _peaked(was, s, bar.ts)
+    out += more + _peaked(was, s, bar.ts)
+    return s, out if runs_step(bar) else (*out, Log("bar", {**asdict(bar), "actions": 0}))
 
 
 def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
@@ -895,6 +905,4 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"at or after {flat_at} flat-by: no new entries"
     if s.setup.armed.mode != "dry" and s.setup.day_start is None:
         return "today's opening balance unknown"
-    if in_roll_window(trading_day(bar.ts)):
-        return "roll window: no new entries"  # the backtest loads no bars on these days
     return check(_strict(s), rules, a, s.setup.spec, entry_price=bar.close, held_minis=0.0)

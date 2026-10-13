@@ -63,10 +63,16 @@ namespace NinjaTrader.NinjaScript.AddOns
 
     public static class FenrirLog
     {
-        // NinjaScript Output window, tab 1
+        // NinjaScript Output window, tab 1. Logging never throws: it runs inside catch blocks.
         public static void Info(string message)
         {
-            NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            try
+            {
+                NinjaTrader.Code.Output.Process("Fenrir: " + message, PrintTo.OutputTab1);
+            }
+            catch
+            {
+            }
         }
 
         // also the Control Center Log tab, as an alert
@@ -162,6 +168,8 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             try
             {
+                if (broker.SecondsSinceSweep > 5)
+                    FenrirLog.Alert(string.Format("the broker thread has not run for {0:0} s: orders and the New York flatten are stuck", broker.SecondsSinceSweep));
                 DateTime ny = TimeZoneInfo.ConvertTimeBySystemTimeZoneId(DateTime.UtcNow, "Eastern Standard Time");
                 if (ny.TimeOfDay >= config.FlattenAt && ny.TimeOfDay < config.FlattenAt + TimeSpan.FromMinutes(20))
                     broker.FlattenManaged(string.Format("{0:hh\\:mm} New York flatten", config.FlattenAt));

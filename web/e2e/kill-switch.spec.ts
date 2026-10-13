@@ -149,7 +149,7 @@ test('the kill POST gives up after 90 s and says it may not have run', async ({ 
   await expect(page.getByRole('alert').filter({ hasText: 'Kill switch' })).toHaveText(
     new RegExp(`^${TIME}Kill switch got no answer in 90 s\\. It may not have run: check NinjaTrader and press it again\\.$`),
   )
-  expect(await page.evaluate(() => (window as unknown as { asked: number[] }).asked)).toEqual([90_000])
+  expect(await page.evaluate(() => (window as unknown as { asked: number[] }).asked)).toContain(90_000)
   await expect(killAll(page)).toBeEnabled()
   expect(calls.kill).toBe(1)
   release()

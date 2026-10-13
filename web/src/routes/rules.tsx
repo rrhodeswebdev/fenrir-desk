@@ -46,13 +46,13 @@ function Field({ f, path, label, control }: { f: Form; path: Path; label: string
   const id = useId()
   const errors = errorsAt(f.errors, path)
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_14rem] items-center gap-x-4 gap-y-1 py-1">
+    <div className="grid grid-cols-[minmax(0,1fr)_14rem] items-center gap-x-4 gap-y-1 py-1 max-md:grid-cols-1">
       <label htmlFor={id} className="label">
         {label}
       </label>
       {control({ id, 'aria-invalid': errors.length > 0, 'aria-describedby': errors.length ? `${id}-error` : undefined })}
       {errors.length > 0 && (
-        <p id={`${id}-error`} className="col-start-2 text-red">
+        <p id={`${id}-error`} className="col-start-2 text-red max-md:col-start-1">
           {errors.join(' ')}
         </p>
       )}

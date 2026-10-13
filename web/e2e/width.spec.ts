@@ -56,7 +56,8 @@ const routes: [string, (page: Page) => Promise<void>][] = [
   ['/no-such-page', (page) => expect(page.getByRole('heading', { level: 1 })).toHaveText('Not found')],
 ]
 
-for (const width of [390, 800, 1024, 1280]) {
+// 340 px pins Settings' minmax(0, 1fr) page column: without it the accounts table widens the page below about 353 px.
+for (const width of [340, 360, 390, 800, 1024, 1280]) {
   test(`no page scrolls sideways at ${width} px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 })
     // the report is a fixture (no e2e backtest needs to have run); the live status has an alarming account
@@ -67,6 +68,7 @@ for (const width of [390, 800, 1024, 1280]) {
       await page.goto(path)
       await ready(page)
       await expect(page.getByText('Loading…')).toHaveCount(0)
+      await page.evaluate(() => document.fonts.ready) // measure in the web fonts, not the fallback
       const scroll = await page.evaluate(() => document.documentElement.scrollWidth)
       expect.soft(scroll, `${path} at ${width} px`).toBeLessThanOrEqual(width)
     }

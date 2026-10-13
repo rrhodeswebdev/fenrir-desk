@@ -5,9 +5,10 @@ from datetime import date, timedelta
 
 import pytest
 from backtest_helpers import D1, D2, bar, make_rules, rules_data
-from live_helpers import decide_now, make_setup, reconciled
+from live_helpers import INSTRUMENT, decide_now, make_setup, reconciled
 
-from fenrir.core.actions import Bracket
+from fenrir.bridge.reconcile import NtOrder, NtPosition
+from fenrir.core.actions import Bracket, Flatten
 from fenrir.live import core
 from fenrir.live.core import DayStart, Log, Start
 from fenrir.live.journal import iso
@@ -150,6 +151,13 @@ def test_end_of_day_peak_rises_to_ninjatraders_balance_at_the_session_close():
     s, effects = core.on_bar(s, nxt)
     assert (s.acct.peak, s.acct.floor, s.session_floor) == (400.0, -1600.0, -1600.0)
     assert peaks(effects) == [{"peak": 50_400.0, "ts": iso(nxt.ts)}]
+
+
+def test_the_end_of_day_peak_rises_to_the_balance_not_the_equity():
+    """DEC-4a: NinjaTrader's balance at the close, never its open P&L (review of #221, X4)."""
+    s = running(sim(), account(balance=50_400.0, unrealized=300.0))
+    s, _ = core.on_bar(s, at("09:30", D2))
+    assert (s.acct.peak, s.acct.floor) == (400.0, -1600.0)
 
 
 def test_the_runners_own_peak_raise_is_journalled():
@@ -476,3 +484,125 @@ def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
     assert s2.halted is None and "halt" not in kinds(effects)
     halted, _ = core.on_account(s, account(balance, is_sim=False), T.ts)
     assert halted.halted.startswith("mode mismatch: ")  # the mode is still checked
+
+
+# #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's
+# own figures (P&L the app never saw) halts with "confirm balances", never a breach
+
+
+def test_a_gap_against_an_unverified_open_loss_at_the_roll_halts_not_breaches():
+    """The link dropped holding a long (its exit fill may be missed) with $200 open loss at the
+    close: NinjaTrader's $51,900 puts the floor at -100, above the app's equity -200 though not
+    its balance 0. The equity is what the rules check, so this is the gap's halt, not a breach."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))
+    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19990.0, 19990.0))
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(balance=51_900.0), T.ts)
+    assert (s.acct.balance, s.acct.open_pnl, s.unreconciled) == (0.0, -200.0, core.LINK_LOST)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith(
+        "confirm balances: a gap at the end-of-day session close: NinjaTrader's balance 51900.00"
+        " puts the drawdown floor at 49900.00, at or above the app's equity 49800.00"
+    )
+    assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
+    assert peaks(effects) == [{"peak": 50_000.0, "ts": iso(at("09:30", D2).ts)}]
+
+
+def held_over_the_close(gain, loss, nt_balance, unrealized):
+    """The app books `gain` in fills, then adopts NinjaTrader's long with a known stop (19,000)
+    and marks it `loss` open; the link drops over the close and NinjaTrader reports `nt_balance`
+    and `unrealized`. Returns the state before the roll and the roll bar's close."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=1))
+    exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20000.0 + gain / 20}
+    s, _ = core.on_fill(s, exit_)
+    s, _ = core.on_bar(s, at("09:31"))  # the exit's own bar
+    assert (s.acct.balance, s.position.qty, s.halted) == (gain, 0, None)
+    now = T.ts + timedelta(minutes=2)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    assert (s.position.qty, s.position.stop) == (1, 19000.0)
+    close = 20000.0 - loss / 20
+    s, _ = core.on_bar(s, bar("09:32", 20000.0, 20000.0, close, close))
+    assert (s.acct.open_pnl, s.halted) == (-loss, None)
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(nt_balance, today=gain, unrealized=unrealized), now)
+    return s, close
+
+
+def sends(effects):
+    return [type(e.action) for e in effects if isinstance(e, core.Send)]
+
+
+# NinjaTrader's equity 50,100 (through its floor), 50,200 (at it), 50,210 and 52,200 (above it)
+@pytest.mark.parametrize("unrealized", [-2100.0, -2000.0, -1990.0, 0.0])
+def test_an_open_loss_held_over_the_close_breaches_at_the_roll(unrealized):
+    """Review of #221, P1: the app and NinjaTrader agree at 52,200 (no gap), and a long with a
+    known stop is held unverified over the close at -2,100 open; NinjaTrader's floor is 50,200.
+    Whatever open P&L NinjaTrader shows, the app's own close raises its floor from its own
+    balance, as NinjaTrader's raises it from NinjaTrader's (DEC-4a), so the loss breaches and is
+    flattened at the roll, as on main. With equal balances, NinjaTrader showing a smaller loss or
+    none (its exit filled, or its figure is stale) cannot be told from a misreport: fail closed."""
+    s, close = held_over_the_close(2200.0, 2100.0, 52_200.0, unrealized)
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    assert s.halt_kind == "breach"
+    assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
+    assert sends(effects) == [Flatten]
+
+
+def test_a_gap_halt_flattens_the_position_and_its_loss_still_breaches():
+    """Review of #221, C5: a commission-sized gap (the app 52,150, NinjaTrader 52,200) and the
+    same long held over the close at -1,960, which NinjaTrader reports accurately (its equity
+    50,240, $40 above its floor). The gap halts, and a halted account the app cannot trust holds
+    nothing: it is flattened at once. Its floor is raised from its own balance (50,150), so the
+    loss breaches as soon as it runs through it, not at the app's old floor 48,190."""
+    s, close = held_over_the_close(2150.0, 1960.0, 52_200.0, -1960.0)
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    assert s.halted.startswith(
+        "confirm balances: a gap at the end-of-day session close: NinjaTrader's balance 52200.00"
+        " puts the drawdown floor at 50200.00, at or above the app's equity 50190.00 "
+    )
+    assert (s.halt_kind, s.acct.floor) == (None, 150.0)
+    assert sends(effects) == [Flatten] and s.exiting is not None
+    worse = 20000.0 - 2300 / 20  # -2,300 open: equity -150
+    s, effects = core.on_bar(s, bar("09:31", worse, worse, worse, worse, D2))
+    assert s.halt_kind == "breach"
+    assert s.halted == "breach max_drawdown: equity -150.00 at or below drawdown floor 150.00"
+
+
+@pytest.mark.parametrize(
+    ("unrealized", "breach"),
+    [(-1900.0, False), (-1999.99, False), (-1999.996, True), (-2000.0, True)],
+)
+def test_ninjatraders_own_open_pnl_decides_a_gap_against_a_flat_app(unrealized, breach):
+    """Review of #221, C3: the app flat at 0, NinjaTrader at 52,200 (floor 50,200) holding a loss
+    the app knows nothing of. Above its floor, to the cent, it is the gap's halt and nothing is
+    sent; at or through it, the roll takes the raise and the bar breaches."""
+    s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=unrealized))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    if breach:
+        assert s.halt_kind == "breach" and s.acct.floor == 200.0
+    else:
+        assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
+        assert (s.halt_kind, s.acct.floor, sends(effects)) == (None, -2000.0, [])
+
+
+@pytest.mark.parametrize(("balance", "gap"), [(50_200.004, True), (50_200.01, False)])
+def test_the_apps_equity_against_ninjatraders_floor_is_compared_to_the_cent(balance, gap):
+    """At the floor to the cent is a breach for the rules, so it is the gap's halt; a cent above
+    it, NinjaTrader's floor is taken (stricter) and nothing halts."""
+    setup = make_setup(
+        make_rules(),
+        mode="sim",
+        start=Start(50_000.0, 50_000.0, balance),
+        day_start=DayStart(balance, 50_000.0),
+    )
+    s = running(setup, account(balance=52_200.0))
+    s, _ = core.on_bar(s, at("09:30", D2))
+    assert s.halt_kind is None
+    if gap:
+        assert s.halted.startswith("confirm balances: a gap at the end-of-day session close: ")
+    else:
+        assert s.halted is None and s.acct.floor == 200.0

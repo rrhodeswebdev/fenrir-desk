@@ -272,8 +272,10 @@ def test_account_status_shape():
     st = core.account_status(run(make_setup(make_rules())))
     assert set(st) == {
         "account", "mode", "phase", "strategy", "rules_account", "contract", "halted",
-        "halt_kind", "halt_reason", "balance", "today_pnl", "limits", "position", "session",
+        "halt_kind", "halt_reason", "balance", "nt_balance", "today_pnl", "limits", "position",
+        "session",
     }  # fmt: skip
+    assert st["nt_balance"] is None  # no NinjaTrader figures (always for dry runs)
     assert st["limits"] == {
         "drawdown_remaining": 2000.0,
         "drawdown_max": 2000.0,

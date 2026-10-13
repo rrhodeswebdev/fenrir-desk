@@ -55,7 +55,12 @@ def test_status_lists_armed_accounts_with_limits_and_session(client):
     s, _ = core.on_bar(s, Bar(T0, 20000.0, 20005.0, 19995.0, 20000.0, 10, "NQZ26"))
     client.app.state.live.states["Sim101"] = s
     body = client.get("/api/live/status").json()
-    assert body["lse"] == {"connected": False, "last_bar_ts": None}
+    assert body["lse"] == {
+        "connected": False,
+        "last_bar_ts": None,
+        "error": None,
+        "retry_at": None,
+    }
     assert body["nt"] == {"connected": False, "last_heartbeat": None}
     assert body["drift"] == {"ok": True, "ticks": None}
     [acc] = body["accounts"]

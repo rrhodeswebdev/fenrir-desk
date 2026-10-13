@@ -18,9 +18,9 @@ import secrets
 import signal
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ from fenrir.core.instruments import (
     spec,
 )
 from fenrir.core.sessions import trading_day
+from fenrir.data.live import FeedStopped
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
@@ -62,11 +63,13 @@ STRATEGY_MAX = 1024 * 1024
 INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
+FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
+FEED_RETRY_MAX = 900.0
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
-Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
+Stream = Callable[[Settings, Sequence[str]], AsyncGenerator[Bar, None]]
 
 
 def _no_constant(name: str) -> None:
@@ -193,6 +196,9 @@ class LiveHub:
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
+        self.lse_error: str | None = None  # why the feed is down (FeedStopped), until a bar
+        self.lse_retry_at: datetime | None = None  # next resubscribe; None = only a restart
+        self._lse_alerted: set[str] = set()  # accounts told about this outage
         self.nt_connected = False  # the add-on stream is up (22.5)
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
@@ -238,7 +244,11 @@ class LiveHub:
                 if self.states[account].unreconciled and self.nt_connected:
                     await self._reconcile(account)
                 s = self.states[account]
-                await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                s, effects = core.on_tick(s, now, self.settings.stale_seconds)
+                if self.lse_error is not None and account not in self._lse_alerted:
+                    self._lse_alerted.add(account)  # once per outage, not per retry
+                    effects = (*effects, Log("alert", {"message": self._feed_alert()}))
+                await self._apply(account, s, effects)
 
             # e.g. its rows still refused: the others' retries still go out
             await self._each("a tick", one)
@@ -451,6 +461,26 @@ class LiveHub:
         s, last = await self._step(account, s)
         return s, out + more + last
 
+    def feed_down(self, reason: str, retry_at: datetime | None) -> None:
+        """The bar feed stopped (`FeedStopped`): shown in `status()` and, once per outage, as an
+        alert on each running account at its next tick. `retry_at` None: only a restart helps."""
+        if self.lse_error is None:
+            self._lse_alerted.clear()  # a new outage
+        self.lse_connected = False
+        self.lse_error, self.lse_retry_at = reason, retry_at
+
+    def feed_up(self) -> None:
+        self.lse_connected = True
+        self.lse_error = self.lse_retry_at = None
+
+    def _feed_alert(self) -> str:
+        then = (
+            "retrying with a backoff (1 to 15 min); see the live status"
+            if self.lse_retry_at is not None
+            else "no live bars until the server restarts"
+        )
+        return f"LSE feed down: {self.lse_error}; {then}"
+
     def _inputs_now(self, setup: Setup) -> Setup:
         """`setup` with the pinned inputs as the files hold them now (unreadable: ""); a broken
         accounts.yaml raises, which halts the account (`handle_bar`)."""
@@ -467,9 +497,14 @@ class LiveHub:
 
     def status(self) -> dict[str, Any]:
         """The `GET /api/live/status` body."""
-        last = self.last_bar_ts
+        last, retry = self.last_bar_ts, self.lse_retry_at
         return {
-            "lse": {"connected": self.lse_connected, "last_bar_ts": last and last.isoformat()},
+            "lse": {
+                "connected": self.lse_connected,
+                "last_bar_ts": last and last.isoformat(),
+                "error": self.lse_error,
+                "retry_at": retry and retry.isoformat(),
+            },
             "nt": {"connected": self.nt_connected, "last_heartbeat": self.last_heartbeat},
             "drift": {
                 "ok": not any(s.drift for s in self.states.values()),
@@ -737,17 +772,34 @@ async def run_stream(hub: LiveHub) -> None:
 
 async def run_bars(hub: LiveHub, stream: Stream) -> None:
     """Feed `stream`'s bars to the hub, resubscribing each trading day so a roll picks up the
-    new front month. `lse_connected` is true only once a bar has arrived."""
+    new front month. `lse_connected` is true only once a bar has arrived. The old stream is
+    closed before the next subscribes: LSE allows one socket per key. On `FeedStopped` (bad
+    key, quota, the key's socket still held) it resubscribes after `FEED_RETRY` s, doubling to
+    `FEED_RETRY_MAX`, back to `FEED_RETRY` after a bar; a permanent one (no key) ends it. Either
+    way `hub.feed_down` puts the reason in the status and alerts each account once."""
+    delay = FEED_RETRY
     while True:
         day = trading_day(_now())
         try:
             instruments = load_instruments()
             contracts = [front_month(instruments, series, day) for series in SERIES]
-            async for bar in stream(hub.settings, contracts):
-                hub.lse_connected = True
-                await hub.handle_bar(bar)
-                if trading_day(_now()) != day:
-                    break
+            async with contextlib.aclosing(stream(hub.settings, contracts)) as bars:
+                async for bar in bars:
+                    hub.feed_up()
+                    delay = FEED_RETRY
+                    await hub.handle_bar(bar)
+                    if trading_day(_now()) != day:
+                        break
+        except FeedStopped as e:
+            if e.permanent:
+                hub.feed_down(str(e), None)
+                log.error("live bar stream stopped: %s; no live bars until the server restarts", e)
+                return
+            hub.feed_down(str(e), _now() + timedelta(seconds=delay))
+            log.error("live bar stream stopped: %s; resubscribing in %.0f s", e, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, FEED_RETRY_MAX)
+            continue
         except Exception:  # keep the runner alive; the stale-data pause covers the gap
             log.exception("live bar stream failed")
         hub.lse_connected = False

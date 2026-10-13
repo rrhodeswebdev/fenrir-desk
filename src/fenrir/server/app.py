@@ -17,7 +17,7 @@ from fenrir.live.service import LiveHub
 from fenrir.server.auth import SESSION_COOKIE, allowed_origins, require_session, session_ok
 from fenrir.server.jobs_runner import JobRunner
 from fenrir.server.pull import PullRunner, pull_command, pull_env
-from fenrir.server.routes import backtests, data, live, rules, strategies, terminal
+from fenrir.server.routes import arming, backtests, data, live, rules, strategies, terminal
 from fenrir.server.routes import settings as settings_routes
 from fenrir.settings import Settings
 
@@ -148,6 +148,7 @@ def create_app(
     app.include_router(backtests.router, dependencies=[Depends(require_session)])
     app.include_router(settings_routes.router, dependencies=[Depends(require_session)])
     app.include_router(live.router, dependencies=[Depends(require_session)])
+    app.include_router(arming.router, dependencies=[Depends(require_session)])
     app.include_router(backtests.ws_router)  # check_ws in the handler, before accept()
     app.include_router(terminal.router)  # WebSockets call check_ws themselves, before accept()
 

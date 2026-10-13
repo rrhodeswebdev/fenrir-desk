@@ -19,12 +19,19 @@ RUN apt-get update \
 
 # Linux hosts: --build-arg CLAUDE_UID=$(id -u) so files the terminal writes in the repo are yours
 ARG CLAUDE_UID=1000
+# .git is mounted read-only (#185): git in the terminal reads history; commits happen on the host
 RUN useradd --create-home --uid "$CLAUDE_UID" --user-group --shell /bin/bash claude \
  && install -d -m 0700 /var/lib/fenrir \
  && install -d -o claude -g claude /home/claude/.claude-config \
- && git config --system --add safe.directory /app \
- && git config --system user.name "Claude" \
- && git config --system user.email "noreply@anthropic.com"
+ && git config --system --add safe.directory /app
+
+# pinned Claude Code (the installer checks the binary's sha256), root-owned so the terminal
+# cannot replace what `claude` runs; updates come with a rebuild
+ARG CLAUDE_CODE_VERSION=2.1.296
+RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install.sh \
+ && HOME=/tmp/claude-install bash /tmp/install.sh "$CLAUDE_CODE_VERSION" \
+ && install -m 0755 "$(readlink -f /tmp/claude-install/.local/bin/claude)" /usr/local/bin/claude \
+ && rm -rf /tmp/claude-install /tmp/install.sh
 
 # server code and UI live in /opt, outside the repo bind-mounted (terminal-writable) at /app
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON_DOWNLOADS=never UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
@@ -35,15 +42,13 @@ COPY src/ src/
 RUN uv sync --frozen --no-dev --no-editable
 COPY --from=web /build/web/dist/ web-dist/
 
-USER claude
-RUN curl -fsSL https://claude.ai/install.sh | bash
-USER root
-# a link, not PATH: root never looks up commands in a directory claude can write
-RUN ln -s /home/claude/.local/bin/claude /usr/local/bin/claude
+# no setuid/setgid binaries (su, mount, passwd, ...), even run without no-new-privileges
+RUN find / -xdev -perm /6000 -type f -exec chmod a-s {} +
 
 ENV PATH=/opt/venv/bin:$PATH \
     UV_NO_SYNC=1 \
     CLAUDE_CONFIG_DIR=/home/claude/.claude-config \
+    DISABLE_AUTOUPDATER=1 \
     FENRIR_BIND_ALL=1 \
     FENRIR_PTY_USER=claude \
     FENRIR_PRIVATE_DIR=/var/lib/fenrir \

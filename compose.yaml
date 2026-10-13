@@ -1,7 +1,6 @@
 services:
   fenrir:
     build: .
-    image: fenrir-desk
     ports:
       # Loopback only, never "8000:8000": the app includes a shell. Both loopbacks, since
       # localhost is ::1 first on macOS and an unbound [::1]:8000 could catch the launch link.
@@ -9,14 +8,22 @@ services:
       - "[::1]:8000:8000"
     volumes:
       - .:/app
-      # read-only: the terminal must not change what the host runs on the next build or git command
+      # read-only: the terminal must not change what the host runs or reads without review
+      # (#185: a writable .git can redirect the host git's config through .git/commondir)
+      - ./.git:/app/.git:ro
+      - ./.claude:/app/.claude:ro
       - ./compose.yaml:/app/compose.yaml:ro
       - ./Dockerfile:/app/Dockerfile:ro
       - ./.dockerignore:/app/.dockerignore:ro
-      - ./.git/config:/app/.git/config:ro
-      - ./.git/hooks:/app/.git/hooks:ro
+      # the host's docker compose reads these from the project dir; Docker creates them empty
+      - ./docker/empty:/app/.env:ro
+      - ./docker/empty:/app/compose.override.yaml:ro
+      - ./docker/empty:/app/compose.override.yml:ro
+      - ./docker/empty:/app/docker-compose.override.yaml:ro
+      - ./docker/empty:/app/docker-compose.override.yml:ro
       - fenrir-private:/var/lib/fenrir
       - claude-config:/home/claude/.claude-config
+    init: true
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped

@@ -107,6 +107,7 @@ Every directory with its own responsibility has a short `CLAUDE.md` saying what 
 | `web/src/routes/` | One file per UI page (`<page>Route`); `root.tsx` is the index rail shell, `../router.tsx` assembles the tree. |
 | `web/src/components/` | Shared components: `Page` (top strip + body), `StateText`; `ui/` holds shadcn components edited to DESIGN.md. |
 | `web/src/backtests/` | Backtests page parts: `RunForm` (strategies × accounts × contracts → `POST /api/backtests/jobs`), `JobList` (live over `/ws/jobs`), `ReportView` (one report: periods, histogram, equity charts). |
+| `docker/` | Files compose mounts into the container: `empty`, the read-only placeholder over `/app/.env` and the compose override names. |
 | `data/` | Gitignored runtime data: Parquet bars, manifest, backtest results, jobs, SQLite. Only `CLAUDE.md` is committed. |
 | `.claude/skills/fenrir-strategy/` | Project skill teaching Claude the strategy loop (rules → data → strategy → backtest → report), tuning period only. |
 

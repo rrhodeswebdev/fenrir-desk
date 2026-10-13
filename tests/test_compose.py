@@ -19,11 +19,30 @@ def test_ports_published_on_host_loopback_only():
     assert {str(p).rsplit(":", 2)[0] for p in SVC["ports"]} == {"127.0.0.1", "[::1]"}
 
 
-def test_build_and_git_files_mounted_read_only_over_the_repo():
+OVERRIDES = (
+    "compose.override.yaml",
+    "compose.override.yml",
+    "docker-compose.override.yaml",
+    "docker-compose.override.yml",
+)
+
+
+def test_host_read_files_mounted_read_only_over_the_repo():
     volumes = SVC["volumes"]
     assert ".:/app" in volumes
-    for path in ("compose.yaml", "Dockerfile", ".dockerignore", ".git/config", ".git/hooks"):
+    # .git whole (#185): a writable .git/commondir redirects the host git's config and hooks
+    for path in (".git", ".claude", "compose.yaml", "Dockerfile", ".dockerignore"):
         assert f"./{path}:/app/{path}:ro" in volumes
+    assert not [v for v in volumes if v.startswith("./.git/")]
+
+
+def test_env_and_compose_overrides_hidden_behind_an_empty_placeholder():
+    # the host's docker compose reads .env (COMPOSE_FILE=...) and the override names unreviewed
+    for name in (".env", *OVERRIDES):
+        assert f"./docker/empty:/app/{name}:ro" in SVC["volumes"]
+    assert (ROOT / "docker" / "empty").read_bytes() == b""
+    ignored = (ROOT / ".gitignore").read_text().split()
+    assert set(OVERRIDES) <= set(ignored)
 
 
 def test_named_volumes_for_secrets_and_claude_login():
@@ -40,6 +59,8 @@ def test_settings_never_come_from_compose():
 def test_hardening_and_restart():
     assert "no-new-privileges:true" in SVC["security_opt"]
     assert SVC["restart"] == "unless-stopped"
+    assert SVC["init"] is True  # reaps the terminal's orphans; the server is not PID 1
+    assert "image" not in SVC  # project-scoped name: another clone's build never re-tags it
     assert not SVC.get("privileged") and "docker.sock" not in COMPOSE_TEXT
 
 
@@ -66,3 +87,12 @@ def test_image_isolation_env():
     ):
         assert line in DOCKERFILE
     assert "install -d -m 0700 /var/lib/fenrir" in DOCKERFILE
+    assert "find / -xdev -perm /6000 -type f -exec chmod a-s {} +" in DOCKERFILE
+    assert "user.name" not in DOCKERFILE  # .git is read-only: nothing commits in the image
+
+
+def test_claude_code_pinned_and_root_owned():
+    assert re.search(r"^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$", DOCKERFILE, re.M)
+    assert 'install.sh "$CLAUDE_CODE_VERSION"' in DOCKERFILE
+    assert "install -m 0755" in DOCKERFILE and "/usr/local/bin/claude" in DOCKERFILE
+    assert "USER claude" not in DOCKERFILE

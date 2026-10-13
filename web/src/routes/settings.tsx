@@ -19,9 +19,8 @@ export type Settings = {
   holdout_months: number
   safety_margin_pct: number
   stale_seconds: number
-  repo_env_secrets: boolean
 }
-type Key = Exclude<keyof Settings, 'repo_env_secrets'>
+type Key = keyof Settings
 /** `GET /api/settings/accounts`: account id → the user's own choices. */
 export type Choices = Record<string, { eval_price: number; dll_on: boolean }>
 
@@ -157,40 +156,6 @@ function SettingsForm({ server }: { server: Settings }) {
   )
 }
 
-/** In the image a repo `.env` is ignored and readable from the terminal: offer to move its secrets. */
-function RepoSecrets() {
-  const qc = useQueryClient()
-  const imp = useMutation({
-    mutationFn: () => apiFetch<Settings & { imported: SecretKey[] }>('/api/settings/import-repo-secrets', { method: 'POST' }),
-    onSuccess: ({ imported: _, ...data }) => qc.setQueryData(['settings'], data),
-  })
-  return (
-    <div className="mb-6 grid max-w-[72ch] gap-3 border border-ember p-4">
-      <p className="text-ember">The repo .env holds secrets. The app ignores it, and the terminal can read it.</p>
-      <div className="flex flex-wrap items-center gap-4">
-        <Button type="button" variant="caution" disabled={imp.isPending} onClick={() => imp.mutate()}>
-          Import into the secrets file
-        </Button>
-        {imp.data && (
-          <p role="status" className="text-ink-2">
-            Imported {imp.data.imported.map((k) => SECRET_NAMES[k]).join(' and ')}. The terminal could read the repo .env: rotate them, then delete them there.
-          </p>
-        )}
-      </div>
-      {imp.error != null && (
-        <div role="alert" className="text-red">
-          <p>{errorText(imp.error)}</p>
-          {fieldErrors(imp.error).map((e) => (
-            <p key={`${e.loc.join('.')}:${e.msg}`}>
-              {e.loc.join('.')}: {e.msg}
-            </p>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
 type ChoiceDraft = Record<string, Record<string, unknown>>
 
 function AccountsForm({ server }: { server: Choices }) {
@@ -294,7 +259,6 @@ function SettingsPage() {
           <h2 id="settings-env" className="mb-4 text-ink">
             Secrets and limits
           </h2>
-          {settings.data?.repo_env_secrets && <RepoSecrets />}
           {settings.data ? <SettingsForm server={settings.data} /> : state(settings)}
         </section>
         <section aria-labelledby="settings-accounts">

@@ -23,19 +23,21 @@ The full v1 spec is [SPEC.md](SPEC.md).
 
 ## Run
 
-Requires Docker (Docker Desktop on macOS or Windows).
+Requires Docker (Docker Desktop on macOS or Windows) and a `git clone`: a checkout whose `.git` is a file (`git worktree`, `--separate-git-dir`) or missing (a zip download) is not supported.
 
 ```
 git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
 docker compose up
 ```
 
-Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo; a repo `.env` is ignored in Docker. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo; the container never sees a repo `.env`. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
 
 - **This machine only.** The app includes a shell. Keep the `127.0.0.1:8000:8000` and `[::1]:8000:8000` port mappings in `compose.yaml`; never change them to `8000:8000`.
 - **Terminal.** It runs as an unprivileged `claude` user in `/app` (your clone), and cannot read the secrets, the session key or the server. Run CLI commands there, e.g. `uv run fenrir backtest strategies/orb.py --account lucid-flex-50k`. Each backtest worker holds a full price series (up to about 2 GB), and workers are capped to fit the container's memory, so a larger Docker Desktop memory limit runs more of them.
-- **Rebuilds.** The server runs code built into the image, so changes to `src/` or `web/` (including Claude's commits) take effect only after `docker compose up --build`. Review them first: `git log -p origin/main..` and `git diff`.
-- **Linux hosts.** Build with your uid so files the terminal writes are yours: `docker compose build --build-arg CLAUDE_UID=$(id -u)`.
+- **You commit, on the host.** Claude edits files and reads history in the terminal, but `.git`, `.claude/`, the Docker files, `.env` and the compose override names are read-only there, so nothing it writes changes what your git, Claude Code or `docker compose` run. Review its edits with `git status --short --ignored` and `git diff`, then commit yourself. Docker creates empty `.env` and `compose.override.yaml`-style placeholder files in your clone; leave them (they are gitignored).
+- **Rebuilds.** The server runs code built into the image, so changes to `src/` or `web/` take effect only after you review them and run `docker compose up --build`.
+- **Linux hosts.** Build with your uid so files the terminal writes are yours, every time, then start: `docker compose build --build-arg CLAUDE_UID=$(id -u) && docker compose up` (a plain `up --build` would rebuild with uid 1000).
+- **`docker compose exec`.** Add `-u claude` for anything you run inside; without it the command runs as root.
 - **NinjaTrader address.** `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine; `http://<VM IP>:8123` for NinjaTrader in a Windows VM on a Mac (run `ipconfig` in the VM; use bridged or shared networking). Live trading needs NinjaTrader 8 with the Fenrir add-on imported: see [addon/INSTALL.md](addon/INSTALL.md).
 
 ## Windows Firewall

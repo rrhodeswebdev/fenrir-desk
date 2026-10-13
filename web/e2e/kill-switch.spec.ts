@@ -127,6 +127,34 @@ test('while the kill runs Kill all stays disabled, even across a page change, an
   expect(calls.kill).toBe(1)
 })
 
+test('the kill POST gives up after 90 s and says it may not have run', async ({ page }) => {
+  // The page's AbortSignal.timeout(ms) is recorded and fires after 50 ms instead, so the test need not wait 90 s.
+  await page.addInitScript(() => {
+    const timeout = AbortSignal.timeout.bind(AbortSignal)
+    const asked: number[] = ((window as unknown as { asked: number[] }).asked = [])
+    AbortSignal.timeout = (ms: number) => {
+      asked.push(ms)
+      return timeout(50)
+    }
+  })
+  let release!: () => void
+  const held = new Promise<void>((r) => (release = r))
+  const calls = await mock(page, ok, async (route) => {
+    await held // never answered: only the page's own timeout ends the request
+    await route.abort().catch(() => {}) // the page has already aborted it
+  })
+  await page.goto('/live')
+  await killAll(page).click()
+  await confirm(page).click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Kill switch' })).toHaveText(
+    new RegExp(`^${TIME}Kill switch got no answer in 90 s\\. It may not have run: check NinjaTrader and press it again\\.$`),
+  )
+  expect(await page.evaluate(() => (window as unknown as { asked: number[] }).asked)).toContain(90_000)
+  await expect(killAll(page)).toBeEnabled()
+  expect(calls.kill).toBe(1)
+  release()
+})
+
 test('the status polls every 2 s with no retry, and a failed re-read is never shown as current', async ({ page }) => {
   await page.clock.install()
   const calls = await mock(page, (route) => (calls.status === 1 ? ok(route) : fail(route)))

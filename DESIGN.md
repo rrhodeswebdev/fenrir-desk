@@ -322,7 +322,7 @@ The focus field is three columns (identity, dial, data: `minmax(280px,1fr) minma
 
 Spacing is a 4px rhythm: 4, 8, 12, 16, 24, 32, 48. Controls and nav rows are 44px tall.
 
-Responsive: at 1180px and below the dial takes a full row above identity and data, and the journal drops below the sleeves at full width. At 760px and below the rail becomes a horizontal scrolling strip at the top (32px mark, 40px items), the top strip wraps, and focus, sleeves and journal stack to one column with sleeves separated by bottom hairlines.
+Responsive: at 1180px and below the dial takes a full row above identity and data, and the journal drops below the sleeves at full width. At 760px and below the rail becomes a horizontal scrolling strip at the top (32px mark, 40px items), focus, sleeves and journal stack to one column with sleeves separated by bottom hairlines, and form rows put the label above the control. At any width the top strip wraps onto another line when its content does not fit, so nothing in it is ever off-screen. No page scrolls sideways down to 390px: long keys and hashes break, and a table too wide for the column scrolls inside its own box.
 
 ## Elevation & Depth
 

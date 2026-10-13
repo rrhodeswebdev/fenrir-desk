@@ -114,7 +114,7 @@ describe('report page', () => {
       c.getQueryCache().find({ queryKey: ['backtests', 'results', KEY] })?.setState({ status: 'error', error: new ApiError(500, '{"detail":"boom"}') })
     })
     expect(html).toContain(`<span class="value min-w-0 break-all">${KEY}</span>`)
-    expect(html).toContain('<p role="alert" class="text-red">500: boom</p>')
+    expect(html).toContain('<p role="alert" class="text-red wrap-anywhere">500: boom</p>')
     expect(html).toContain('Net per attempt')
   })
 

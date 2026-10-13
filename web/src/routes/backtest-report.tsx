@@ -26,7 +26,7 @@ function BacktestReport() {
     <Page title="Report" strip={<span className="value min-w-0 break-all">{key}</span>}>
       <div className="grid gap-8">
         {message && (
-          <p role="alert" className="text-red">
+          <p role="alert" className="text-red wrap-anywhere">
             {message}
           </p>
         )}

@@ -30,6 +30,9 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly BlockingCollection<Action> work = new BlockingCollection<Action>();
         private Timer sweep;
 
+        // the stream's sink; called on NinjaTrader's threads, so it must never block
+        public volatile Action<Dictionary<string, object>> Publish = delegate { };
+
         // worker thread only
         private readonly Dictionary<string, DateTime> seen = new Dictionary<string, DateTime>(); // client id -> first seen, UTC
         private readonly Dictionary<string, Working> brackets = new Dictionary<string, Working>();
@@ -370,12 +373,22 @@ namespace NinjaTrader.NinjaScript.AddOns
         private void AttachManaged()
         {
             foreach (Account a in Managed())
-                if (attached.Add(a)) a.OrderUpdate += OnOrderUpdate;
+            {
+                if (!attached.Add(a)) continue;
+                a.OrderUpdate += OnOrderUpdate;
+                a.ExecutionUpdate += OnExecutionUpdate;
+                a.PositionUpdate += OnPositionUpdate;
+            }
         }
 
         private void DetachAll()
         {
-            foreach (Account a in attached) a.OrderUpdate -= OnOrderUpdate;
+            foreach (Account a in attached)
+            {
+                a.OrderUpdate -= OnOrderUpdate;
+                a.ExecutionUpdate -= OnExecutionUpdate;
+                a.PositionUpdate -= OnPositionUpdate;
+            }
             attached.Clear();
         }
 
@@ -399,6 +412,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 Order o = e.Order;
+                Dictionary<string, object> row = OrderJson(o);
+                row["type"] = "order";
+                row["state"] = e.OrderState.ToString();
+                row["qty"] = Math.Max(0, e.Quantity - e.Filled);
+                Publish(row);
                 if (ClientId(o.Name) == null) return;
                 OrderState state = e.OrderState;
                 int filled = e.Filled;
@@ -408,6 +426,84 @@ namespace NinjaTrader.NinjaScript.AddOns
             {
                 FenrirLog.Info("order update: " + ex.Message);
             }
+        }
+
+        // qty signed: + buy, - sell. An entry's fills carry its bracket's client id.
+        private void OnExecutionUpdate(object sender, ExecutionEventArgs e)
+        {
+            try
+            {
+                Execution x = e.Execution;
+                bool buy = x.Order != null
+                    ? x.Order.OrderAction == OrderAction.Buy || x.Order.OrderAction == OrderAction.BuyToCover
+                    : x.MarketPosition == MarketPosition.Long;
+                Publish(new Dictionary<string, object>
+                {
+                    { "type", "fill" },
+                    { "account", x.Account.Name },
+                    { "client_id", (x.Order != null ? ClientId(x.Order.Name) : null) ?? "" },
+                    { "order_id", x.OrderId ?? "" },
+                    { "instrument", x.Instrument.FullName },
+                    { "qty", buy ? x.Quantity : -x.Quantity },
+                    { "price", x.Price },
+                    { "commission", x.Commission },
+                    { "ts", Utc(x.Time) },
+                });
+            }
+            catch (Exception ex)
+            {
+                FenrirLog.Info("execution update: " + ex.Message);
+            }
+        }
+
+        private void OnPositionUpdate(object sender, PositionEventArgs e)
+        {
+            try
+            {
+                int qty = e.MarketPosition == MarketPosition.Long ? e.Quantity
+                        : e.MarketPosition == MarketPosition.Short ? -e.Quantity : 0;
+                Publish(new Dictionary<string, object>
+                {
+                    { "type", "position" },
+                    { "account", e.Position.Account.Name },
+                    { "instrument", e.Position.Instrument.FullName },
+                    { "qty", qty },
+                    { "avg_price", qty == 0 ? 0.0 : e.AveragePrice },
+                });
+            }
+            catch (Exception ex)
+            {
+                FenrirLog.Info("position update: " + ex.Message);
+            }
+        }
+
+        // UTC ISO 8601 with milliseconds and Z. NinjaTrader reports times in the time zone set under
+        // Tools > Options > General, which may differ from the PC's.
+        public static string Utc(DateTime t)
+        {
+            DateTime utc;
+            try
+            {
+                utc = t.Kind == DateTimeKind.Utc ? t
+                    : t.Kind == DateTimeKind.Local ? t.ToUniversalTime()
+                    : TimeZoneInfo.ConvertTimeToUtc(t, NinjaTrader.Core.Globals.GeneralOptions.TimeZoneInfo);
+            }
+            catch (Exception)
+            {
+                utc = DateTime.UtcNow; // a time skipped by a DST change
+            }
+            return utc.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        }
+
+        // managed accounts holding a position: flatten them (flatten_on_disconnect_seconds)
+        public void FlattenHeld(string why)
+        {
+            Post(() =>
+            {
+                foreach (Account a in Managed())
+                    if (Snapshot(a.Positions).Any(p => p.MarketPosition != MarketPosition.Flat) && FlattenAccount(a, false))
+                        FenrirLog.Alert(why + ": flattened " + a.Name);
+            });
         }
 
         private void OnFenrirOrder(Order o, OrderState state, int filled)

@@ -1,5 +1,6 @@
 {
   "port": 8123,
   "token": "",
-  "managed_accounts": ["Sim101"]
+  "managed_accounts": ["Sim101"],
+  "flatten_on_disconnect_seconds": null
 }

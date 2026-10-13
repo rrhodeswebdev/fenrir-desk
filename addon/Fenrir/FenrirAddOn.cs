@@ -17,6 +17,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         public int Port = 8123;
         public string Token = "";
         public HashSet<string> ManagedAccounts = new HashSet<string>();
+        public int FlattenOnDisconnectSeconds; // 0 = off (null in the file)
 
         public static string Dir
         {
@@ -40,6 +41,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (raw.TryGetValue("managed_accounts", out v) && v is IEnumerable && !(v is string))
                 foreach (object name in (IEnumerable)v)
                     if (name is string) config.ManagedAccounts.Add((string)name);
+            if (raw.TryGetValue("flatten_on_disconnect_seconds", out v) && v != null)
+            {
+                if (v is int && (int)v > 0) config.FlattenOnDisconnectSeconds = (int)v;
+                else FenrirLog.Alert("flatten_on_disconnect_seconds must be null or a whole number of seconds > 0; it is off");
+            }
             return config;
         }
     }

@@ -27,12 +27,14 @@ Copy `addon\fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.
 {
   "port": 8123,
   "token": "<the token>",
-  "managed_accounts": ["Sim101"]
+  "managed_accounts": ["Sim101"],
+  "flatten_on_disconnect_seconds": null
 }
 ```
 
 - `token`: at least 16 characters, the same value as Fenrir's NinjaTrader token (Settings page, or `FENRIR_NT_TOKEN` natively). With a shorter token the add-on logs why and serves nothing.
 - `managed_accounts`: the NinjaTrader account names Fenrir may see and trade. Every other account is invisible to Fenrir and refused. An empty list is logged as an alert at start.
+- `flatten_on_disconnect_seconds`: `null` (default) keeps the broker-side stop and target when Fenrir's link drops. A number of seconds flattens every managed account holding a position once no Fenrir stream has been connected for that long, counted from NinjaTrader's start too.
 
 Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the last 7 days, so a request Fenrir retries after a NinjaTrader restart is still answered `duplicate` instead of placed twice. Leave it alone.
 
@@ -58,4 +60,10 @@ From the machine running Fenrir, with `T` set to the token and `H` to the NinjaT
 curl -s -o /dev/null -w "%{http_code}\n" "$H/accounts"                            # 401
 curl -s -o /dev/null -w "%{http_code}\n" -H "X-Fenrir-Token: wrong" "$H/accounts" # 401
 curl -s -H "X-Fenrir-Token: $T" "$H/accounts"                                     # [{"id":"Sim101",...,"is_sim":true,...}]
+```
+
+The event stream (heartbeat every 2 s, then account, order, position and fill events):
+
+```bash
+uv run --with websockets python -m websockets "${H/http/ws}/stream?token=$T"
 ```

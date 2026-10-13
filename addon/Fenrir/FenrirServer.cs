@@ -1,8 +1,11 @@
 #region Using declarations
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
+using System.Linq;
 using System.Net;
+using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,11 +16,19 @@ namespace NinjaTrader.NinjaScript.AddOns
 {
     // HttpListener routing and the shared-token check. Every request runs on a pool thread; an
     // exception becomes a 500 for that request, never a crashed NinjaTrader.
+    //
+    // /stream: NinjaTrader's event handlers only drop a message in one bounded queue; one sender
+    // thread writes it to every client, and a client that takes over 2 s to take a message is
+    // dropped. So NinjaTrader's threads never wait on the network.
     public class FenrirServer
     {
         private readonly FenrirConfig config;
         private readonly FenrirBroker broker;
         private readonly HttpListener listener = new HttpListener();
+        private readonly List<WebSocket> sockets = new List<WebSocket>();
+        private readonly BlockingCollection<string> outbox = new BlockingCollection<string>(1000);
+        private DateTime noClientSince = DateTime.UtcNow; // under lock (sockets)
+        private Timer beat;
 
         public FenrirServer(FenrirConfig config, FenrirBroker broker)
         {
@@ -30,12 +41,128 @@ namespace NinjaTrader.NinjaScript.AddOns
             // "+" so Docker and a Mac host can reach it; needs the netsh urlacl from INSTALL.md
             listener.Prefixes.Add(string.Format("http://+:{0}/", config.Port));
             listener.Start();
+            broker.Publish = Enqueue;
             Task.Run(() => AcceptLoop());
+            Thread sender = new Thread(SendLoop);
+            sender.IsBackground = true;
+            sender.Name = "Fenrir stream";
+            sender.Start();
+            beat = new Timer(_ => Beat(), null, 0, 2000);
         }
 
         public void Stop()
         {
+            if (beat != null) beat.Dispose();
+            broker.Publish = delegate { };
+            outbox.CompleteAdding();
             listener.Close();
+            lock (sockets) foreach (WebSocket ws in sockets) ws.Abort();
+        }
+
+        private void Enqueue(Dictionary<string, object> msg)
+        {
+            // the client rejects NaN and infinity
+            if (msg.Values.Any(v => v is double && !FenrirBroker.Finite((double)v)))
+            {
+                FenrirLog.Info("not streamed, non-finite number: " + msg["type"]);
+                return;
+            }
+            try
+            {
+                if (!outbox.TryAdd(new JavaScriptSerializer().Serialize(msg)))
+                    FenrirLog.Info("stream queue full, dropped a " + msg["type"] + " message");
+            }
+            catch (InvalidOperationException)
+            {
+                // stopped
+            }
+        }
+
+        // every 2 s: heartbeat, one account message per managed account, flatten_on_disconnect_seconds
+        private void Beat()
+        {
+            try
+            {
+                Enqueue(new Dictionary<string, object> { { "type", "heartbeat" }, { "ts", FenrirBroker.Utc(DateTime.UtcNow) } });
+                foreach (object row in broker.Accounts())
+                {
+                    Dictionary<string, object> msg = new Dictionary<string, object>((Dictionary<string, object>)row);
+                    msg["type"] = "account";
+                    Enqueue(msg);
+                }
+                if (config.FlattenOnDisconnectSeconds > 0)
+                {
+                    double alone;
+                    lock (sockets) alone = sockets.Count > 0 ? 0 : (DateTime.UtcNow - noClientSince).TotalSeconds;
+                    if (alone >= config.FlattenOnDisconnectSeconds)
+                        broker.FlattenHeld(string.Format("no /stream client for {0:0} s", alone));
+                }
+            }
+            catch (Exception e)
+            {
+                FenrirLog.Info("heartbeat: " + e.Message);
+            }
+        }
+
+        private void SendLoop()
+        {
+            foreach (string text in outbox.GetConsumingEnumerable())
+            {
+                ArraySegment<byte> bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(text));
+                WebSocket[] targets;
+                lock (sockets) targets = sockets.ToArray();
+                foreach (WebSocket ws in targets)
+                {
+                    try
+                    {
+                        if (!ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None).Wait(2000))
+                            ws.Abort(); // stalled: drop it rather than hold everyone up
+                    }
+                    catch
+                    {
+                        ws.Abort();
+                    }
+                }
+            }
+        }
+
+        // the token is in ?token= (contract); a wrong one is refused before the upgrade
+        private async Task HandleSocket(HttpListenerContext ctx)
+        {
+            WebSocket ws = null;
+            try
+            {
+                if (!TokenOk(ctx.Request.QueryString["token"]))
+                {
+                    Reply(ctx, 401, Error("unauthorized"));
+                    return;
+                }
+                ws = (await ctx.AcceptWebSocketAsync(null)).WebSocket;
+                lock (sockets) sockets.Add(ws);
+                byte[] buffer = new byte[1024];
+                while (ws.State == WebSocketState.Open)
+                {
+                    // nothing is expected from the client; reading answers its pings and close
+                    WebSocketReceiveResult r = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                    if (r.MessageType == WebSocketMessageType.Close) break;
+                }
+            }
+            catch
+            {
+                // client went away or aborted by the sender
+            }
+            finally
+            {
+                if (ws != null)
+                {
+                    lock (sockets)
+                    {
+                        sockets.Remove(ws);
+                        if (sockets.Count == 0) noClientSince = DateTime.UtcNow;
+                    }
+                    ws.Dispose();
+                }
+            }
         }
 
         private async Task AcceptLoop()
@@ -70,6 +197,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             try
             {
                 HttpListenerRequest req = ctx.Request;
+                if (req.Url.AbsolutePath == "/stream" && req.IsWebSocketRequest)
+                {
+                    Task open = HandleSocket(ctx); // runs until the client leaves; catches its own errors
+                    return;
+                }
                 if (!TokenOk(req.Headers["X-Fenrir-Token"]))
                 {
                     Reply(ctx, 401, Error("unauthorized"));

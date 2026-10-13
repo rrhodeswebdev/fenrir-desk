@@ -119,6 +119,9 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (method == "GET" && path == "/positions") return broker.Positions(req.QueryString["account"]);
             if (method == "GET" && path == "/orders") return broker.Orders(req.QueryString["account"]);
             if (method == "POST" && path == "/bracket") return broker.Bracket(Body(req));
+            if (method == "POST" && path == "/flatten") return broker.Flatten(Body(req));
+            if (method == "POST" && path == "/cancel") return broker.Cancel(Body(req));
+            if (method == "POST" && path == "/flatten-all") return broker.FlattenAll(Body(req));
             return null;
         }
 

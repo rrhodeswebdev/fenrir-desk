@@ -21,7 +21,7 @@ Fenrir Desk is a local-only web app where one futures prop trader uses Claude Co
 | Instruments | ES, MES, NQ, MNQ. Micros use the mini's price series. |
 | Users | Single user per install; anyone can clone and run it. No accounts or login. |
 | Strategies per account | One armed strategy per account. Different accounts can run different strategies. |
-| Market data | London Strategic Edge (LSE) for history and live bars. Data gate item 3 passed on 2026-10-13 (real-time `ES.F`/`NQ.F` on the owner's key), so DEC-7 (another live source) is not needed. Only `fenrir.data.lse` knows LSE. |
+| Market data | London Strategic Edge (LSE) for history and live bars. Data gate item 3 passed on 2026-10-13 (real-time `ES.F`/`NQ.F` on the owner's key); live trading still waits on item 4, and DEC-7 (another live source) reopens only if item 4 fails. Only `fenrir.data.lse` knows LSE. |
 | Execution | NinjaTrader 8 (Windows) via a C# add-on: orders, accounts, positions only. |
 | Style | Functional core, imperative shell, everywhere. |
 | Running | `docker compose up`. Development runs natively. |
@@ -329,7 +329,7 @@ def daily_loss_limit(limit: float) -> Rule:
 
 ## Open Questions
 
-1. **Live futures on LSE (gate item 3): passed on 2026-10-13.** On 2026-10-11, with Globex open, the socket sent no `ES.F`/`NQ.F` ticks: tier `registered` lists no futures in any form. On 2026-10-13, with the owner's own key, a 2-minute regular-hours run got 3,210 ticks (median lag 0.25 s, p95 0.55 s; details in `docs/data-gate.md` Item 3). DEC-7 (#18) is not needed; 04.2 may run. The socket allows one connection per key, so the live runner and a gate recording cannot stream at once.
+1. **Live futures on LSE (gate item 3): passed on 2026-10-13.** On 2026-10-11, with Globex open, the socket sent no `ES.F`/`NQ.F` ticks: tier `registered` lists no futures in any form. On 2026-10-13, with the owner's own key, a 2-minute regular-hours run got 3,210 ticks (median lag 0.25 s, p95 0.55 s; details in `docs/data-gate.md` Item 3). DEC-7 (#18) waits on item 4 and is needed only if it fails; 04.2 may be built now. The socket allows one connection per key, so the live runner and a gate recording cannot stream at once.
 2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills) have not been run. Item 4's full-session recording started 2026-10-13 10:25 ET and ends about 09:45 ET 2026-10-14.
 3. **ES 2023-03 roll** is ambiguous in the data; the fixed roll window covers it, but it isn't confirmed.
 4. **Pro, Direct and Daily rules** were entered on 2026-10-11 from Lucid's help center; automation is allowed on all three. Some of their mechanics have no schema field, so the files use conservative stand-ins named in their headers: the 60% scaling DLL (fixed DLL kept), the payout buffer (Pro, Daily) and payout profit goal (Direct), encoded through `max_pct_of_profit`; Daily's choice of end-of-day evaluation drawdown (intraday entered), its news-window hard breach and its maximum daily profit are not modelled. Direct's DLL is mandatory but only applies with `dll_on: true`, and Pro 25k cannot run with `dll_on` (no evaluation DLL). Should the schema grow fields for these (ask first)?

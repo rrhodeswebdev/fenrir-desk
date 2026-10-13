@@ -89,4 +89,4 @@ Deferred to plan 22 (needs the add-on and a sim account).
 - Items 1–2: PASS → plan 03 may run. FAIL → stop; revisit the data source (Databento is the known alternative) before plan 03.
 - Items 3–4: PASS → plans 04, 21 may run. FAIL → live trading blocked until the user picks another live source; plans 03, 05–18 continue.
 
-Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Item 3 PASS (2026-10-13, with the owner's key; 2026-10-11's `registered` tier had streamed no futures), so DEC-7 (#18) is not needed and 04.2 may run. Item 4 in progress: the full-session recording runs until about 09:45 ET 2026-10-14. Plans 03 and 05–18 continue.
+Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Item 3 PASS (2026-10-13, with the owner's key; 2026-10-11's `registered` tier had streamed no futures), so 04.2 may be built; live use (plans 04, 21) still needs item 4. DEC-7 (#18) is needed only if item 4 fails. Item 4 in progress: the full-session recording runs until about 09:45 ET 2026-10-14. Plans 03 and 05–18 continue.

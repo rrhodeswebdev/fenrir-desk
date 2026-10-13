@@ -41,7 +41,7 @@ function Field({ label, unit, help, caution, errors, control }: { label: string;
   const note = caution ?? help
   const describedBy = [errors.length > 0 && `${id}-error`, note && `${id}-help`].filter(Boolean).join(' ')
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_14rem] items-center gap-x-4 gap-y-1 py-1">
+    <div className="grid grid-cols-[minmax(0,1fr)_14rem] items-center gap-x-4 gap-y-1 py-1 max-md:grid-cols-1">
       <label htmlFor={id} className="grid gap-1">
         <span className="label">{label}</span>
         {unit && <span className="text-ink-3">{unit}</span>}
@@ -53,7 +53,7 @@ function Field({ label, unit, help, caution, errors, control }: { label: string;
         </p>
       )}
       {errors.length > 0 && (
-        <p id={`${id}-error`} className="col-start-2 text-red">
+        <p id={`${id}-error`} className="col-start-2 text-red max-md:col-start-1">
           {errors.join(' ')}
         </p>
       )}
@@ -194,8 +194,12 @@ function AccountsForm({ server }: { server: Choices }) {
           <TableHeader>
             <TableRow>
               <TableHead scope="col">Account</TableHead>
-              <TableHead scope="col">Evaluation price</TableHead>
-              <TableHead scope="col">Daily loss limit</TableHead>
+              <TableHead scope="col" className="max-md:whitespace-normal">
+                Evaluation price
+              </TableHead>
+              <TableHead scope="col" className="max-md:whitespace-normal">
+                Daily loss limit
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -211,7 +215,7 @@ function AccountsForm({ server }: { server: Choices }) {
                       aria-label={`${aid} evaluation price`}
                       aria-invalid={priceErrors.length > 0}
                       aria-describedby={priceErrors.length ? errorId('price') : undefined}
-                      className="w-32"
+                      className="w-32 max-md:w-24"
                       type="number"
                       step="any"
                       value={String(at(aid, 'eval_price'))}
@@ -256,7 +260,7 @@ function SettingsPage() {
   }
   return (
     <Page title="Settings">
-      <div className="grid max-w-[60rem] gap-10">
+      <div className="grid max-w-[60rem] grid-cols-1 gap-10">
         <section aria-labelledby="settings-env">
           <h2 id="settings-env" className="mb-4 text-ink">
             Secrets and limits

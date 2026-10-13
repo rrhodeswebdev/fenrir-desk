@@ -18,9 +18,9 @@ import secrets
 import signal
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ from fenrir.core.instruments import (
     spec,
 )
 from fenrir.core.sessions import trading_day
+from fenrir.data.live import FeedStopped
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
@@ -62,11 +63,13 @@ STRATEGY_MAX = 1024 * 1024
 INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
+FEED_RETRY = 60.0  # seconds before resubscribing after FeedStopped, doubling up to FEED_RETRY_MAX
+FEED_RETRY_MAX = 900.0
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
-Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
+Stream = Callable[[Settings, Sequence[str]], AsyncGenerator[Bar, None]]
 
 
 def _no_constant(name: str) -> None:
@@ -151,6 +154,21 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
     } | dict.fromkeys(("balance", "nt_balance", "today_pnl", "limits", "position", "session"))
 
 
+def _flattened(first: str | None, again: str | None) -> str | None:
+    """The kill's two `/flatten-all` errors (before the hub lock, then under it) as one, naming
+    which failed; None when both landed."""
+    if first and again:
+        if first == again:
+            return f"both flatten-alls failed: {first}"
+        return (
+            f"first flatten-all (before the lock) failed: {first}; "
+            f"second flatten-all (under the lock) failed: {again}"
+        )
+    if first:
+        return f"first flatten-all (before the lock) failed: {first}; the second landed"
+    return again and f"second flatten-all (under the lock) failed: {again}"
+
+
 class LiveHub:
     """Runs every armed account on live bars. Opens nothing until something is armed:
     `<private_dir>/fenrir.db` is opened once it exists, never created here."""
@@ -178,6 +196,9 @@ class LiveHub:
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
+        self.lse_error: str | None = None  # why the feed is down (FeedStopped), until a bar
+        self.lse_retry_at: datetime | None = None  # next resubscribe; None = only a restart
+        self._lse_alerted: set[str] = set()  # accounts told about this outage
         self.nt_connected = False  # the add-on stream is up (22.5)
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
@@ -223,7 +244,11 @@ class LiveHub:
                 if self.states[account].unreconciled and self.nt_connected:
                     await self._reconcile(account)
                 s = self.states[account]
-                await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+                s, effects = core.on_tick(s, now, self.settings.stale_seconds)
+                if self.lse_error is not None and account not in self._lse_alerted:
+                    self._lse_alerted.add(account)  # once per outage, not per retry
+                    effects = (*effects, Log("alert", {"message": self._feed_alert()}))
+                await self._apply(account, s, effects)
 
             # e.g. its rows still refused: the others' retries still go out
             await self._each("a tick", one)
@@ -263,25 +288,23 @@ class LiveHub:
 
     async def kill(self) -> dict[str, Any]:
         """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
-        (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
-        stopped), each journalled as the disarm route does (its "halt" row before the delete),
-        plus an "alert" with the outcome. Under the hub lock, so no bar or fill runs between the
-        two. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every running
-        account is halted in memory instead and `killed` halts a row armed by then when a tick
-        starts it; when only stopping the runners fails, the running accounts are halted. A halt
-        row that cannot be written does not stop the deletes. `ok` is false, with the errors,
-        when `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
+        (`/flatten-all`) at once, before the hub lock, so a tick or bar holding it (a strategy
+        load, a step, a post) never delays it. Then, under the lock: `/flatten-all` again, which
+        closes whatever a bar opened while the kill waited, and disarm every account (runner and
+        child stopped), each journalled as the disarm route does (its "halt" row before the
+        delete), plus an "alert" with the outcome; no bar or fill runs between that flatten and
+        the disarm. When `armed` cannot be read or a delete fails (e.g. sqlite locked), every
+        running account is halted in memory instead and `killed` halts a row armed by then when
+        the next tick starts it (the kill does not sync, so loads no strategy); when only
+        stopping the runners fails, the running accounts are halted. A halt row that cannot be
+        written does not stop the deletes. `ok` is false, with the errors, when either
+        `/flatten-all` did not land, when NinjaTrader is not configured while a sim or live
         account was armed, or when any of those failed."""
+        first = await self._flatten_all()
         async with self._lock:
             live = any(s.setup.armed.mode != "dry" for s in self.states.values())
-            flat = None
-            if self.addon is not None:
-                try:  # a fresh id per press: a retry inside the client is still deduped
-                    ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
-                    if not (ack.accepted or ack.duplicate):
-                        flat = ack.error or "refused"
-                except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
-                    flat = f"{type(e).__name__}: {e}"
+            again = await self._flatten_all()
+            flat = _flattened(first, again)
             conn, armed, deleted = None, (), []
             disarm = unjournalled = unstopped = None
             try:
@@ -305,13 +328,14 @@ class LiveHub:
                 log.exception("kill switch: disarm failed")
                 left = ", ".join(a.account for a in armed[len(deleted) :])
                 disarm = f"disarm failed for {left}: {_error(e)}"
-            if disarm:  # a row armed by the kill may still be: it starts halted
+            if disarm:  # a row armed by the kill may still be: the next tick starts it halted
                 self.killed = (at, f"kill switch: {disarm}")
-            try:
-                await self._sync(_now())
-            except Exception as e:
-                log.exception("kill switch: runners not stopped")
-                unstopped = f"disarmed, but stopping the runners failed: {_error(e)}"
+            else:  # not after a failed disarm: its sync would load pending rows' strategies
+                try:
+                    await self._sync(_now())
+                except Exception as e:
+                    log.exception("kill switch: runners not stopped")
+                    unstopped = f"disarmed, but stopping the runners failed: {_error(e)}"
             if why := disarm or unstopped:  # no new entries until disarmed and stopped
                 for account in list(self.states):
                     s = self.states[account]
@@ -319,16 +343,31 @@ class LiveHub:
                         await self._apply(account, *core.halt(s, f"kill switch: {why}"))
             if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
                 flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
-            done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
+            if not flat:
+                done = "flattened and cancelled all"
+            elif self.addon is None:
+                done = f"flatten all failed: {flat}"
+            else:
+                done = flat  # names which flatten-all failed
             try:
                 for a in deleted:
                     alert = {"message": f"kill switch: disarmed; {done}"}
                     journal.write(conn, _now(), a.account, "alert", alert)
             except Exception:  # disarmed and flattened all the same: report that, not this
                 log.exception("kill switch not journalled")
-            unstopped = None if disarm else unstopped  # "disarmed, but" is untrue after one
             errors = [e for e in (flat, disarm, unjournalled, unstopped) if e]
             return {"ok": not errors, "error": "; ".join(errors) or None}
+
+    async def _flatten_all(self) -> str | None:
+        """Post `/flatten-all` under a fresh id (each post its own request; a retry inside the
+        client is still deduped); its error, None when it landed or no add-on is configured."""
+        if self.addon is None:
+            return None
+        try:
+            ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
+        except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
+            return f"{type(e).__name__}: {e}"
+        return None if ack.accepted or ack.duplicate else ack.error or "refused"
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:
@@ -422,6 +461,26 @@ class LiveHub:
         s, last = await self._step(account, s)
         return s, out + more + last
 
+    def feed_down(self, reason: str, retry_at: datetime | None) -> None:
+        """The bar feed stopped (`FeedStopped`): shown in `status()` and, once per outage, as an
+        alert on each running account at its next tick. `retry_at` None: only a restart helps."""
+        if self.lse_error is None:
+            self._lse_alerted.clear()  # a new outage
+        self.lse_connected = False
+        self.lse_error, self.lse_retry_at = reason, retry_at
+
+    def feed_up(self) -> None:
+        self.lse_connected = True
+        self.lse_error = self.lse_retry_at = None
+
+    def _feed_alert(self) -> str:
+        then = (
+            "retrying with a backoff (1 to 15 min); see the live status"
+            if self.lse_retry_at is not None
+            else "no live bars until the server restarts"
+        )
+        return f"LSE feed down: {self.lse_error}; {then}"
+
     def _inputs_now(self, setup: Setup) -> Setup:
         """`setup` with the pinned inputs as the files hold them now (unreadable: ""); a broken
         accounts.yaml raises, which halts the account (`handle_bar`)."""
@@ -438,9 +497,14 @@ class LiveHub:
 
     def status(self) -> dict[str, Any]:
         """The `GET /api/live/status` body."""
-        last = self.last_bar_ts
+        last, retry = self.last_bar_ts, self.lse_retry_at
         return {
-            "lse": {"connected": self.lse_connected, "last_bar_ts": last and last.isoformat()},
+            "lse": {
+                "connected": self.lse_connected,
+                "last_bar_ts": last and last.isoformat(),
+                "error": self.lse_error,
+                "retry_at": retry and retry.isoformat(),
+            },
             "nt": {"connected": self.nt_connected, "last_heartbeat": self.last_heartbeat},
             "drift": {
                 "ok": not any(s.drift for s in self.states.values()),
@@ -708,17 +772,34 @@ async def run_stream(hub: LiveHub) -> None:
 
 async def run_bars(hub: LiveHub, stream: Stream) -> None:
     """Feed `stream`'s bars to the hub, resubscribing each trading day so a roll picks up the
-    new front month. `lse_connected` is true only once a bar has arrived."""
+    new front month. `lse_connected` is true only once a bar has arrived. The old stream is
+    closed before the next subscribes: LSE allows one socket per key. On `FeedStopped` (bad
+    key, quota, the key's socket still held) it resubscribes after `FEED_RETRY` s, doubling to
+    `FEED_RETRY_MAX`, back to `FEED_RETRY` after a bar; a permanent one (no key) ends it. Either
+    way `hub.feed_down` puts the reason in the status and alerts each account once."""
+    delay = FEED_RETRY
     while True:
         day = trading_day(_now())
         try:
             instruments = load_instruments()
             contracts = [front_month(instruments, series, day) for series in SERIES]
-            async for bar in stream(hub.settings, contracts):
-                hub.lse_connected = True
-                await hub.handle_bar(bar)
-                if trading_day(_now()) != day:
-                    break
+            async with contextlib.aclosing(stream(hub.settings, contracts)) as bars:
+                async for bar in bars:
+                    hub.feed_up()
+                    delay = FEED_RETRY
+                    await hub.handle_bar(bar)
+                    if trading_day(_now()) != day:
+                        break
+        except FeedStopped as e:
+            if e.permanent:
+                hub.feed_down(str(e), None)
+                log.error("live bar stream stopped: %s; no live bars until the server restarts", e)
+                return
+            hub.feed_down(str(e), _now() + timedelta(seconds=delay))
+            log.error("live bar stream stopped: %s; resubscribing in %.0f s", e, delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, FEED_RETRY_MAX)
+            continue
         except Exception:  # keep the runner alive; the stale-data pause covers the gap
             log.exception("live bar stream failed")
         hub.lse_connected = False

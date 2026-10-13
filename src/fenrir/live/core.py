@@ -57,11 +57,12 @@ CONFIRM_LIQUIDATED = (
     "confirm balances: NinjaTrader's balance {balance:.2f} is at or below the liquidation level"
     " {level:.2f} from the armed balances; re-arm with the confirmed balances"
 )
-CONFIRM_GAP = (
-    "confirm balances: NinjaTrader's balance {nt:.2f} at the end-of-day session close puts the"
-    " drawdown floor at {floor:.2f}, at or above the app's equity {equity:.2f} (P&L the app"
-    " never booked: a trade on another instrument, or a fill while the server was down);"
-    " re-arm with the confirmed balances"
+GAP = "confirm balances: a gap at the end-of-day session close"
+CONFIRM_GAP = GAP + (
+    ": NinjaTrader's balance {nt:.2f} puts the drawdown floor at {floor:.2f}, at or above the"
+    " app's equity {equity:.2f} (P&L the app never booked: a trade on another instrument, or a"
+    " fill while the server was down); any position is flattened; re-arm with the confirmed"
+    " balances"
 )
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
@@ -863,8 +864,9 @@ def _late(s: RunnerState, bar: Bar) -> str | None:
 
 def _exit(s: RunnerState, bar: Bar) -> Step:
     """Flatten once while holding past flat-by (the backtest's `_flat_time`), after the daily loss
-    limit (its `_dll_exit`), after a breach, or with no known stop; the add-on also flattens at
-    16:40 on its own."""
+    limit (its `_dll_exit`), after a breach, under a gap halt (#219: the app cannot trust its
+    figures, so it holds nothing), or with no known stop; the add-on also flattens at 16:40 on
+    its own."""
     if s.position.qty == 0 or s.exiting:
         return s, ()
     if late := _late(s, bar):
@@ -872,6 +874,8 @@ def _exit(s: RunnerState, bar: Bar) -> Step:
     elif s.acct.halted_today:
         why = "daily loss limit hit"
     elif s.halt_kind == "breach" and s.halted:
+        why = s.halted
+    elif s.halted and s.halted.startswith(GAP):
         why = s.halted
     elif s.position.stop is None:  # its flatten failed (send_failed): send it again
         return _stopless(s, bar.ts, "x")
@@ -931,6 +935,9 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 )
                 s, more = halt(s, gap)
                 out += more
+                # and from its own balance at the close (DEC-4a), never looser than NinjaTrader's
+                # by more than the gap: an open loss it holds still breaches (review of #221)
+                acct = _raised(s.setup, acct, base + acct.balance)
             else:
                 acct = raised
             out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close

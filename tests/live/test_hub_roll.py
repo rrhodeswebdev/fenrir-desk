@@ -22,19 +22,19 @@ pytestmark = pytest.mark.anyio
 T0 = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)  # Monday 10:00 ET; NQ front month NQZ26
 D2 = T0 + timedelta(days=1, hours=-0.5)  # Tuesday 09:30 ET, trading day 2026-10-13
 
-ALWAYS = """
-from fenrir.core.actions import Bracket
+IDLE = """
 MARKET = "NQ"
 PARAMS = {}
 def init(params):
     return 0
 def step(state, bar, ctx):
-    return state + 1, [Bracket("long", 1, bar.close - 10, bar.close + 20)]
+    return state + 1, []
 """
 
 
-def bar(ts: datetime) -> Bar:
-    return Bar(ts, 20000.0, 20005.0, 19995.0, 20000.0, 10, "NQZ26")
+def bar(ts: datetime, close: float = 20000.0) -> Bar:
+    high = max(close, 20005.0)
+    return Bar(ts, 20000.0, high, min(close, 19995.0), close, 10, "NQZ26")
 
 
 def account(balance: float, realized: float = 0.0) -> dict:
@@ -82,8 +82,8 @@ def conn(settings):
 def armed(tmp_path, conn) -> Armed:
     """Sim101 armed in sim, Lucid Flex 50k (end_of_day, $2,000, locks at +100), MNQ, phase start
     and peak $50,000: floor $48,000, and $50,100 once NinjaTrader closes a day at $52,100+."""
-    path = tmp_path / "always.py"
-    path.write_text(ALWAYS)
+    path = tmp_path / "idle.py"
+    path.write_text(IDLE)
     a = pinned(
         Armed(
             "Sim101",
@@ -143,7 +143,7 @@ def halts(conn):
     return [r.payload for r in journal.rows(conn, account="Sim101", kind="halt")]
 
 
-async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, armed):
+async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, armed, fake):
     """The issue's probe: the app at $50,000, NinjaTrader closes the day at $52,200 (a gain the
     app never booked). The roll's floor from NinjaTrader, $50,100, is above the app's balance:
     this used to be `breach max_drawdown: equity 0.00 at or below drawdown floor 100.00`."""
@@ -154,10 +154,10 @@ async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, arme
     s = hub.states["Sim101"]
     assert s.halt_kind is None and s.halt_day is None  # open-ended, never a breach
     assert s.halted == (
-        "confirm balances: NinjaTrader's balance 52200.00 at the end-of-day session close puts"
-        " the drawdown floor at 50100.00, at or above the app's equity 50000.00 (P&L the app"
-        " never booked: a trade on another instrument, or a fill while the server was down);"
-        " re-arm with the confirmed balances"
+        "confirm balances: a gap at the end-of-day session close: NinjaTrader's balance 52200.00"
+        " puts the drawdown floor at 50100.00, at or above the app's equity 50000.00 (P&L the app"
+        " never booked: a trade on another instrument, or a fill while the server was down); any"
+        " position is flattened; re-arm with the confirmed balances"
     )
     assert [h["kind"] for h in halts(conn)] == [None]
     assert [r.payload["peak"] for r in journal.rows(conn, kind="peak")] == [50_000.0]
@@ -165,6 +165,7 @@ async def test_a_gain_the_app_never_saw_is_no_breach_at_the_roll(hub, conn, arme
     assert (s.acct.balance, s.acct.peak, s.acct.floor) == (0.0, 0.0, -2000.0)
     [acc] = hub.status()["accounts"]
     assert (acc["halted"], acc["halt_kind"], acc["nt_balance"]) == (True, None, 52_200.0)
+    assert fake.requests == []  # flat: nothing to flatten
 
 
 async def test_after_a_restart_the_gap_halt_holds_and_still_never_breaches(
@@ -244,3 +245,47 @@ async def test_a_real_drawdown_below_the_apps_own_floor_breaches_after_a_gap_hal
     assert s.halt_kind == "breach"
     assert s.halted == "breach max_drawdown: equity -2010.00 at or below drawdown floor -2000.00"
     assert [h["kind"] for h in halts(conn)] == [None, "breach"]
+
+
+HELD = {"account": "Sim101", "instrument": "MNQ 12-26", "qty": 10, "avg_price": 20000.0}
+STOP = {
+    "account": "Sim101",
+    "order_id": "s1",
+    "client_id": "x",
+    "instrument": "MNQ 12-26",
+    "role": "stop",
+    "action": "sell",
+    "qty": 10,
+    "price": 19000.0,
+    "state": "Working",
+}
+
+
+@pytest.mark.parametrize("unrealized", [-2140.0, 0.0])
+async def test_a_position_held_over_a_gap_close_is_flattened_and_breaches(
+    hub, conn, armed, fake, unrealized
+):
+    """Review of #221 at 6a33e18, hub probe: the app books +2,190 after commission, NinjaTrader
+    is at 52,250 (a $60 gap) and its book holds 10 MNQ long with a stop at 19,000, adopted on
+    reconnect, -2,140 open at the close with the link lost over it. NinjaTrader's floor is
+    50,100. NinjaTrader reports that loss (its equity $10 above its floor) or a stale 0. The app
+    must not ride the loss on its own floor (48,050) under a halt: it is flattened at the roll and
+    breaches, and the breach holds at -2,400, -3,000 and -4,000 open."""
+    await started(hub)
+    await hub.handle_fill(fill(10, 20000.0, T0 + timedelta(seconds=10)))
+    await hub.handle_fill(fill(-10, 20110.0, T0 + timedelta(seconds=20)))  # +2,200 - $10
+    await hub.handle_bar(bar(T0 + timedelta(minutes=1)))  # the exit's own bar
+    fake.positions, fake.orders = [HELD], [STOP]
+    await hub.handle_stream({"type": "connected"})  # reconciles: adopts NinjaTrader's long
+    await hub.handle_bar(bar(T0 + timedelta(minutes=2), close=19893.0))  # -2,140 open
+    s = hub.states["Sim101"]
+    assert (s.acct.balance, s.acct.open_pnl, s.position.qty) == (2190.0, -2140.0, 10)
+    await hub.handle_stream({"type": "disconnected", "error": "stream closed"})
+    await hub.handle_stream(account(52_250.0, realized=2250.0) | {"unrealized_pnl": unrealized})
+    sent = len(fake.requests)
+    await hub.handle_bar(bar(D2, close=19893.0))  # the roll, still -2,140 open
+    assert "/flatten" in [path for path, _ in fake.requests[sent:]]
+    for close in (19880.0, 19850.0, 19800.0):  # -2,400, -3,000, -4,000 open
+        await hub.handle_bar(bar(D2 + timedelta(minutes=1 + (20000 - close) // 100), close))
+        s = hub.states["Sim101"]
+        assert s.halt_kind == "breach" and s.halted.startswith("breach max_drawdown: ")

@@ -2,6 +2,8 @@ import sys
 import types
 from datetime import UTC, date, datetime
 
+import pytest
+
 from fenrir.data.lse import fetch_contract, lse_symbol
 from fenrir.data.pull import Window
 from fenrir.settings import Settings
@@ -61,3 +63,11 @@ def test_fetch_contract_pages_and_cleans(monkeypatch):
     assert [c[0] for c in calls] == ["NQ.F", "NQ.F"]
     assert calls[0][2] == "2025-11-30T23:00:00"  # 18:00 New York (EST) the evening before
     assert calls[1][2] == "2025-12-01T14:32:00"  # resumes one minute after the last row
+
+
+def test_fetch_contract_refuses_an_empty_key(monkeypatch):
+    monkeypatch.setenv("LSE_API_KEY", "someone-elses-key")  # the SDK would fall back to it
+    monkeypatch.setitem(sys.modules, "lse", types.SimpleNamespace(LSE=None))
+    w = Window("NQ", "NQZ25", date(2025, 12, 1), date(2025, 12, 1))
+    with pytest.raises(ValueError, match="FENRIR_LSE_API_KEY"):
+        fetch_contract(Settings(), w)

@@ -1,6 +1,7 @@
 """The only module that knows about London Strategic Edge (docs/data-gate.md "Client API")."""
 
 import logging
+import math
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from datetime import UTC, datetime, time, timedelta
@@ -8,7 +9,7 @@ from datetime import UTC, datetime, time, timedelta
 import polars as pl
 
 from fenrir.core.sessions import NY
-from fenrir.data.live import Tick
+from fenrir.data.live import FeedStopped, Tick
 from fenrir.data.pull import Window
 from fenrir.data.store import SCHEMA
 from fenrir.settings import Settings
@@ -24,6 +25,10 @@ def lse_symbol(contract: str) -> str:
     return contract[:-3] + ".F"
 
 
+# never let the SDK fall back to its LSE_API_KEY env var: the settings decide the key
+NO_KEY = "FENRIR_LSE_API_KEY is not set; add the LSE key on the Settings page"
+
+
 def _utc(ts: datetime) -> str:
     return ts.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S")  # naive strings are read as UTC
 
@@ -31,6 +36,8 @@ def _utc(ts: datetime) -> str:
 def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
     from lse import LSE
 
+    if not settings.lse_api_key:
+        raise ValueError(NO_KEY)
     client = LSE(api_key=settings.lse_api_key)
     cursor = datetime.combine(window.first - timedelta(days=1), time(18), NY)  # session open
     end = datetime.combine(window.last, time(17), NY)  # session close
@@ -66,21 +73,43 @@ def fetch_contract(settings: Settings, window: Window) -> pl.DataFrame:
 
 async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]:
     """Live trades for our front-month `contracts`, from LSE's continuous `ES.F`/`NQ.F`
-    (docs/data-gate.md Item 3). Ends when the SDK stops: on a fatal error it logs and returns."""
+    (docs/data-gate.md Item 3). The SDK reconnects after a drop and stops only on a fatal
+    error, which raises `FeedStopped` with the server's last error message."""
     from lse import LSE, LSEError
 
     ours = {lse_symbol(c): c for c in contracts}
+    if not settings.lse_api_key:
+        raise FeedStopped(NO_KEY)
     client = LSE(api_key=settings.lse_api_key)
-    client.on("error", lambda message: log.warning("LSE stream: %s", message))
+    errors: list[str] = []
+
+    def on_error(message: str) -> None:
+        errors.append(message)  # the server's text; it never carries the key
+        log.warning("LSE stream: %s", message)
+
+    client.on("error", on_error)
     try:
         async with aclosing(client.stream_async(list(ours), reconnect=True)) as ticks:
             async for t in ticks:
-                ts, contract = t.datetime, ours.get(t.symbol)
-                # replayed history, quotes (no volume) and untimed ticks are not trades
-                if t.replay or ts is None or not t.volume or contract is None:
+                ts, contract, price = t.datetime, ours.get(t.symbol), t.price
+                # replayed history, quotes (no volume), untimed or naive ticks and bad prices
+                # are not trades (a missing price arrives as 0.0)
+                if (
+                    t.replay
+                    or ts is None
+                    or ts.tzinfo is None
+                    or not t.volume
+                    or contract is None
+                    or price is None
+                    or not math.isfinite(price)
+                    or price <= 0
+                ):
                     continue
                 yield Tick(
-                    ts.astimezone(UTC), round(t.price / TICK) * TICK, round(t.volume), contract
+                    ts.astimezone(UTC), round(price / TICK) * TICK, round(t.volume), contract
                 )
     except LSEError as e:  # lse-data 0.14 only raises it from REST calls; kept for later versions
         log.warning("LSE stream failed: %s", e)
+        return
+    # with reconnect=True the SDK returns only after a fatal error (or a disconnect we never ask)
+    raise FeedStopped(f"LSE stream stopped: {errors[-1] if errors else 'no reason given'}")

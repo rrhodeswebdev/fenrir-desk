@@ -148,9 +148,10 @@ def close_due(state: BuilderState, now: datetime) -> tuple[BuilderState, tuple[B
 async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]   # shell
 # fenrir.data.lse
 async def stream_ticks(settings: Settings, contracts: Sequence[str]) -> AsyncGenerator[Tick, None]
+class FeedStopped(Exception)               # fenrir.data.live: the feed stopped for good; retrying will not help
 ```
 
-`contracts` are front-month codes (`ESZ26`); `stream_ticks` subscribes to `lse_symbol` of each (`ES.F`) with `LSE.stream_async(reconnect=True)` and maps ticks back to the code. It drops replayed ticks, ticks with no time and ticks with no volume (quotes), snaps the price to 0.25 and rounds `volume` (the per-trade quantity) to `size`. `stream_bars` closes a minute at wall clock minus `LAG_GRACE` (2 s), checked every second, so lagging ticks still count, and drops a tick stamped more than `MAX_AHEAD` (5 s) past the wall clock. It yields closed bars only, never a partial one when the stream ends. The SDK reconnects after a drop (every 3 s); the stream ends on a fatal error (bad key, quota, or the key's one socket already in use), logged as a warning. Closing the stream closes the socket: LSE allows one per key. During the roll window `ES.F` may still carry the expiring contract under the new code; live takes no entries then (21.3).
+`contracts` are front-month codes (`ESZ26`); `stream_ticks` subscribes to `lse_symbol` of each (`ES.F`) with `LSE.stream_async(reconnect=True)` and maps ticks back to the code. An empty `settings.lse_api_key` raises `FeedStopped` naming `FENRIR_LSE_API_KEY` before any client is built (never the SDK's `LSE_API_KEY` env fallback; `fetch_contract` raises `ValueError` the same way). It drops replayed ticks, ticks with no or a naive time, ticks with no volume (quotes) and ticks with a missing, non-finite or non-positive price, snaps the price to 0.25 and rounds `volume` (the per-trade quantity as far as the values show) to `size`. `price` is what LSE sends; every recorded tick has `price == bid` (docs/data-gate.md Item 3), which gate item 4 checks. `stream_bars` closes a minute at wall clock minus `LAG_GRACE` (2 s), checked every second, so lagging ticks still count, and drops a tick stamped more than `MAX_AHEAD` (5 s) past the wall clock; ticks dropped as ahead or late are counted and logged as one warning a minute at most. It yields closed bars only, never a partial one when the stream ends. The SDK reconnects after a drop (every 3 s) and logs each error event as a warning; when it stops for good (bad key, quota, or the key's one socket already in use) `stream_ticks` raises `FeedStopped` with the server's last message. A bar spanning a reconnect lacks the trades of the gap. Closing the stream closes the socket: LSE allows one per key. During the roll window `ES.F` may still carry the expiring contract under the new code; live takes no entries then (21.3).
 
 ### Plan 05 — `fenrir.rules.schema` / `loader`
 
@@ -579,7 +580,7 @@ class LiveHub:
     def status() -> dict               # the GET /api/live/status body; nt {connected: nt_connected, last_heartbeat}
 async def run_ticks(hub, every=5.0)
 async def run_stream(hub)              # (22.5) feeds hub.addon.stream() to handle_stream; started by start() when an add-on is configured
-async def run_bars(hub, stream)        # stream = stream_bars (04.2): lse_connected true from the first bar, false when the stream ends; resubscribes each trading day
+async def run_bars(hub, stream)        # stream = stream_bars (04.2): lse_connected true from the first bar, false when the stream ends; resubscribes each trading day, closing the old stream first (aclosing: one socket per key); on FeedStopped logs one error and returns (no bars until restart; the stale-data pause shows it)
 def parse_reply(line: bytes) -> dict   # pure: one step-child line, untrusted
 ```
 

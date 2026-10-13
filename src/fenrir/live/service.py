@@ -18,7 +18,7 @@ import secrets
 import signal
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import Instruments, front_month, load_instruments, spec
 from fenrir.core.sessions import trading_day
+from fenrir.data.live import FeedStopped
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
@@ -57,7 +58,7 @@ RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after 
 RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
 DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
-Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
+Stream = Callable[[Settings, Sequence[str]], AsyncGenerator[Bar, None]]
 
 
 def _no_constant(name: str) -> None:
@@ -643,17 +644,26 @@ async def run_stream(hub: LiveHub) -> None:
 
 async def run_bars(hub: LiveHub, stream: Stream) -> None:
     """Feed `stream`'s bars to the hub, resubscribing each trading day so a roll picks up the
-    new front month. `lse_connected` is true only once a bar has arrived."""
+    new front month. `lse_connected` is true only once a bar has arrived. The old stream is
+    closed before the next subscribes: LSE allows one socket per key. On `FeedStopped` (no or
+    bad key, quota, socket in use) it logs once and stops until restart, and the stale-data
+    pause shows the gap: a retry would not help, and could take the key's socket from its
+    other user."""
     while True:
         day = trading_day(_now())
         try:
             instruments = load_instruments()
             contracts = [front_month(instruments, series, day) for series in SERIES]
-            async for bar in stream(hub.settings, contracts):
-                hub.lse_connected = True
-                await hub.handle_bar(bar)
-                if trading_day(_now()) != day:
-                    break
+            async with contextlib.aclosing(stream(hub.settings, contracts)) as bars:
+                async for bar in bars:
+                    hub.lse_connected = True
+                    await hub.handle_bar(bar)
+                    if trading_day(_now()) != day:
+                        break
+        except FeedStopped as e:
+            hub.lse_connected = False
+            log.error("live bar stream stopped: %s; no live bars until the server restarts", e)
+            return
         except Exception:  # keep the runner alive; the stale-data pause covers the gap
             log.exception("live bar stream failed")
         hub.lse_connected = False

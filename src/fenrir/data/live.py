@@ -1,4 +1,6 @@
 import asyncio
+import logging
+from collections import Counter
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, replace
@@ -14,6 +16,13 @@ LAG_GRACE = timedelta(seconds=2)
 # a tick stamped further ahead of the wall clock is dropped: it would open a future bar and
 # every real tick before it would then be dropped as late
 MAX_AHEAD = timedelta(seconds=5)
+
+log = logging.getLogger(__name__)
+
+
+class FeedStopped(Exception):
+    """The live feed stopped for good (no key, a refused key, quota, or the key's one socket
+    already in use): retrying will not help until the settings or the other client change."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +98,8 @@ async def _bars_from(
     """Closed bars from `ticks`, closing quiet minutes on a `poll`-second timer. `now` is the
     wall clock. When `ticks` ends, only bars already due are emitted, never a partial one."""
     state = empty_builder()
+    dropped: Counter[str] = Counter()  # since the last warning: a clock off shows up here
+    reported = now()
     pending = asyncio.ensure_future(_next(ticks))
     try:
         while True:
@@ -100,12 +111,21 @@ async def _bars_from(
                     for bar in close_due(state, now() - LAG_GRACE)[1]:
                         yield bar
                     return
-                if tick.ts <= now() + MAX_AHEAD:
-                    state, bars = feed(state, tick)
+                if tick.ts > now() + MAX_AHEAD:
+                    dropped["ahead of the clock"] += 1
+                else:
+                    fed, bars = feed(state, tick)
+                    dropped["late"] += fed is state  # feed hands back the same state when it drops
+                    state = fed
                 pending = asyncio.ensure_future(_next(ticks))
             state, due = close_due(state, now() - LAG_GRACE)
             for bar in bars + due:
                 yield bar
+            if +dropped and now() - reported >= MINUTE:
+                counts = ", ".join(f"{n} {why}" for why, n in sorted(dropped.items()) if n)
+                log.warning("live ticks dropped in the last minute: %s", counts)
+                dropped.clear()
+                reported = now()
     finally:
         pending.cancel()
         await asyncio.wait({pending})  # let the source see the cancel, then close it
@@ -114,8 +134,8 @@ async def _bars_from(
 
 async def stream_bars(settings: Settings, contracts: Sequence[str]) -> AsyncIterator[Bar]:
     """Closed 1-minute bars for `contracts` (front-month codes) from the LSE stream. The SDK
-    reconnects after a drop; the stream ends on a fatal error (bad key, quota, or the key's
-    one socket already in use), and closing it closes the socket."""
+    reconnects after a drop; `FeedStopped` when it stops for good (no or bad key, quota, or the
+    key's one socket already in use). Closing the stream closes the socket."""
     from fenrir.data.lse import stream_ticks  # lse imports Tick from here
 
     async with aclosing(_bars_from(stream_ticks(settings, contracts), _now)) as bars:

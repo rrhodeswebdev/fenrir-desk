@@ -6,7 +6,14 @@ import lse
 import pytest
 
 from fenrir.core.bars import Bar
-from fenrir.data.live import LAG_GRACE, MAX_AHEAD, Tick, _bars_from, stream_bars
+from fenrir.data.live import (
+    LAG_GRACE,
+    MAX_AHEAD,
+    FeedStopped,
+    Tick,
+    _bars_from,
+    stream_bars,
+)
 from fenrir.data.lse import stream_ticks
 from fenrir.settings import Settings
 
@@ -98,12 +105,33 @@ def test_bars_from_drops_a_tick_stamped_well_ahead_of_the_clock():
     assert collect(source(), clock) == [Bar(utc(14, 30), 100.0, 102.0, 100.0, 102.0, 3, "NQZ26")]
 
 
+def test_bars_from_counts_dropped_ticks_in_one_warning_a_minute(caplog):
+    clock = [utc(14, 30, 10)]
+
+    async def source():
+        yield Tick(utc(14, 30, 10), 100.0, 1, "NQZ26")
+        for _ in range(3):
+            yield Tick(utc(14, 30, 10) + MAX_AHEAD * 2, 999.0, 1, "NQZ26")  # ahead
+        clock[0] = utc(14, 31) + LAG_GRACE
+        await asyncio.sleep(0.05)  # the 14:30 bar closes
+        for _ in range(2):
+            yield Tick(utc(14, 30, 30), 1.0, 1, "NQZ26")  # late: its minute is closed
+        clock[0] = utc(14, 31, 20)
+        yield Tick(utc(14, 31, 20), 101.0, 1, "NQZ26")
+
+    with caplog.at_level(logging.WARNING, logger="fenrir.data.live"):
+        collect(source(), clock)
+    warnings = [r.getMessage() for r in caplog.records]
+    assert warnings == ["live ticks dropped in the last minute: 3 ahead of the clock, 2 late"]
+
+
 # --- stream_ticks: the real SDK Tick through a fake client ---
 
 
 class FakeLSE:
     ticks: list = []
     error: Exception | None = None
+    fatal: str | None = None  # the SDK's last error message before it stops for good
     hang = False  # a live stream never ends on its own
     after = None  # called once the ticks are out
     calls: list = []
@@ -129,6 +157,8 @@ class FakeLSE:
                 raise self.error
             if self.hang:
                 await asyncio.Event().wait()
+            for callback in self.errors:  # a fatal error: the SDK emits it, then returns
+                callback(self.fatal or "")
         finally:
             self.closed.append(True)
 
@@ -137,9 +167,8 @@ class FakeLSE:
 def fake_lse(monkeypatch):
     class Fake(FakeLSE):
         ticks, calls, closed, errors = [], [], [], []
-        error = None
+        error = fatal = after = None
         hang = False
-        after = None
 
     monkeypatch.setattr(lse, "LSE", Fake)
     return Fake
@@ -149,21 +178,32 @@ def sdk_tick(symbol, price, volume, ts="2026-10-13T14:23:20.389780Z", replay=Fal
     return lse.Tick(symbol=symbol, price=price, volume=volume, timestamp=ts, replay=replay)
 
 
-async def take(gen) -> list:
-    return [t async for t in gen]
+async def take(gen) -> tuple[list, Exception | None]:
+    got = []
+    try:
+        async for t in gen:
+            got.append(t)
+    except FeedStopped as e:
+        return got, e
+    return got, None
 
 
-def test_stream_ticks_drops_replay_and_quotes_and_snaps_price(fake_lse):
+def test_stream_ticks_drops_replay_quotes_and_bad_ticks_and_snaps_price(fake_lse):
     fake_lse.ticks = [
         sdk_tick("NQ.F", 30770.0, 1.0, replay=True),  # replayed history
         sdk_tick("NQ.F", 30770.0, None),  # quote: no volume
         sdk_tick("ES.F", 7851.5, 0.0),  # quote: zero volume
         sdk_tick("ES.F", 7851.5, 1.0, ts=None),  # no time
+        sdk_tick("ES.F", 7851.5, 1.0, ts="2026-10-13T14:23:20"),  # naive time
         sdk_tick("MES.F", 7851.5, 1.0),  # not subscribed by us
+        sdk_tick("ES.F", None, 1.0),  # no price
+        sdk_tick("ES.F", 0.0, 1.0),  # a missing price arrives as the SDK's 0.0
+        sdk_tick("ES.F", float("nan"), 1.0),
+        sdk_tick("ES.F", float("inf"), 1.0),
         sdk_tick("NQ.F", 30770.1, 4.0, ts="2026-10-13T14:23:20.44+00:00"),
         sdk_tick("ES.F", 7851.750000000001, 2.0, ts="2026-10-13T10:23:21-04:00"),
     ]
-    got = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26", "NQZ26"])))
+    got, _ = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26", "NQZ26"])))
     assert got == [
         Tick(datetime(2026, 10, 13, 14, 23, 20, 440000, tzinfo=UTC), 30770.0, 4, "NQZ26"),
         Tick(datetime(2026, 10, 13, 14, 23, 21, tzinfo=UTC), 7851.75, 2, "ESZ26"),
@@ -172,21 +212,30 @@ def test_stream_ticks_drops_replay_and_quotes_and_snaps_price(fake_lse):
     assert fake_lse.calls == [("init", "k"), ("stream", ["ES.F", "NQ.F"], True)]
 
 
+def test_stream_ticks_refuses_an_empty_key_and_never_uses_the_sdk_env_var(fake_lse, monkeypatch):
+    monkeypatch.setenv("LSE_API_KEY", "someone-elses-key")
+    got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key=""), ["ESZ26"])))
+    assert got == [] and "FENRIR_LSE_API_KEY" in str(stopped)
+    assert fake_lse.calls == []  # no client built, so no socket on another key
+
+
+def test_a_fatal_sdk_stop_raises_feed_stopped_with_the_server_message(fake_lse, caplog):
+    fake_lse.ticks = [sdk_tick("ES.F", 7851.5, 1.0)]
+    fake_lse.fatal = "Max 1 concurrent websocket connection(s) for this API key"
+    with caplog.at_level(logging.WARNING, logger="fenrir.data.lse"):
+        got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
+    assert [t.contract for t in got] == ["ESZ26"]
+    assert "Max 1 concurrent" in str(stopped)
+    assert "Max 1 concurrent" in caplog.text  # the SDK's error events are logged as they come
+
+
 def test_stream_ticks_logs_lse_error_and_ends(fake_lse, caplog):
     fake_lse.ticks = [sdk_tick("ES.F", 7851.5, 1.0)]
     fake_lse.error = lse.LSEError(403, "forbidden")
     with caplog.at_level(logging.WARNING, logger="fenrir.data.lse"):
-        got = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
-    assert [t.contract for t in got] == ["ESZ26"]
+        got, stopped = asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
+    assert [t.contract for t in got] == ["ESZ26"] and stopped is None
     assert "forbidden" in caplog.text
-
-
-def test_stream_ticks_logs_the_sdk_error_events(fake_lse, caplog):
-    asyncio.run(take(stream_ticks(Settings(lse_api_key="k"), ["ESZ26"])))
-    with caplog.at_level(logging.WARNING, logger="fenrir.data.lse"):
-        for callback in fake_lse.errors:
-            callback("Max 1 concurrent websocket connection(s) for this API key")
-    assert "Max 1 concurrent" in caplog.text
 
 
 def test_closing_stream_bars_closes_the_sdk_stream(fake_lse):
@@ -198,10 +247,10 @@ def test_closing_stream_bars_closes_the_sdk_stream(fake_lse):
         gen = stream_bars(Settings(lse_api_key="k"), ["ESZ26"])
         bar = await asyncio.wait_for(anext(gen), timeout=2)  # its minute is long over
         await gen.aclose()
+        assert fake_lse.closed == [True]  # by aclose itself, not the loop's shutdown
         return bar
 
     assert asyncio.run(go()) == Bar(utc(14, 30), 7851.5, 7851.5, 7851.5, 7851.5, 1, "ESZ26")
-    assert fake_lse.closed == [True]
 
 
 def test_stream_bars_builds_front_month_bars_from_lse_ticks(fake_lse, monkeypatch):
@@ -214,12 +263,15 @@ def test_stream_bars_builds_front_month_bars_from_lse_ticks(fake_lse, monkeypatc
         sdk_tick("ES.F", 7852.25, 1.0, ts="2026-10-08T14:31:00Z", replay=True),
     ]
     fake_lse.after = lambda: clock.__setitem__(0, utc(14, 31) + LAG_GRACE)
+    fake_lse.hang = True
 
     async def go():
-        return [b async for b in stream_bars(Settings(lse_api_key="k"), ["ESZ26", "NQZ26"])]
+        gen = stream_bars(Settings(lse_api_key="k"), ["ESZ26", "NQZ26"])
+        bars = [await asyncio.wait_for(anext(gen), timeout=5) for _ in range(2)]
+        await gen.aclose()
+        return bars
 
     assert sorted(asyncio.run(go()), key=lambda b: b.contract) == [
         Bar(utc(14, 30), 7851.5, 7852.0, 7851.5, 7852.0, 4, "ESZ26"),
         Bar(utc(14, 30), 30770.0, 30770.0, 30770.0, 30770.0, 2, "NQZ26"),
     ]
-    assert fake_lse.closed == [True]

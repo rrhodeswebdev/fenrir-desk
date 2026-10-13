@@ -7,6 +7,7 @@ import pytest
 from live_helpers import ARMED_AT
 
 from fenrir.core.bars import Bar
+from fenrir.data.live import FeedStopped
 from fenrir.live import arming, core, journal, service
 from fenrir.live.arming import Armed
 from fenrir.live.service import LiveHub, run_bars
@@ -286,6 +287,52 @@ async def test_run_bars_feeds_the_hub_and_connects_on_the_first_bar(hub, conn, a
         assert kinds(conn) == ["bar", "action"]
     finally:
         task.cancel()
+
+
+async def test_run_bars_closes_the_old_stream_before_the_next_day_subscribes(
+    hub, clock, monkeypatch
+):
+    # LSE allows one socket per key: the new day's subscription must find the old one closed
+    monkeypatch.setattr(service, "TICK_EVERY", 0)
+    closed: list[bool] = []
+    seen: list[list[bool]] = []
+    second = asyncio.Event()
+
+    async def fake_stream(settings, contracts):
+        seen.append(list(closed))
+        if len(seen) > 1:
+            second.set()
+            await asyncio.sleep(3600)
+        try:
+            clock["t"] = T0 + timedelta(days=1)  # the trading day rolls with this bar
+            yield bar(T0)
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(0.05)  # closing a socket takes a moment
+            closed.append(True)
+
+    task = asyncio.create_task(run_bars(hub, fake_stream))
+    try:
+        await asyncio.wait_for(second.wait(), 120)
+        assert seen == [[], [True]]
+    finally:
+        task.cancel()
+
+
+async def test_run_bars_stops_on_feed_stopped_instead_of_resubscribing(hub, monkeypatch, caplog):
+    monkeypatch.setattr(service, "TICK_EVERY", 0)
+    calls = []
+
+    async def fake_stream(settings, contracts):
+        calls.append(contracts)
+        raise FeedStopped("LSE stream stopped: Max 1 concurrent websocket connection(s)")
+        yield  # an async generator, like stream_bars
+
+    await asyncio.wait_for(run_bars(hub, fake_stream), 5)
+    assert len(calls) == 1
+    assert hub.lse_connected is False
+    errors = [r.getMessage() for r in caplog.records if r.name == "fenrir.live.service"]
+    assert len(errors) == 1 and "Max 1 concurrent" in errors[0]
 
 
 async def test_an_overflowing_number_halts_only_that_account(hub, conn, armed, tmp_path):

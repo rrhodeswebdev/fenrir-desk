@@ -30,6 +30,7 @@ OPEN = core.DayStart(50_000.0, 50_000.0)
 HELD = {"account": "Sim101", "instrument": "MNQ 12-26", "qty": 1, "avg_price": 20000.0}
 BROKER = "no connection to the broker"
 NOT_CONFIGURED = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
+NOT_JOURNALLED = "halt held in memory, not journalled (a restart before it starts lifts it)"
 
 ALWAYS = """
 from fenrir.core.actions import Bracket
@@ -334,6 +335,43 @@ async def test_a_failed_flatten_halts_a_row_that_is_not_running_yet(
         assert [r.payload for r in rows(conn, "alert")] == [{"message": why}]
         await hub.tick(T0)
         assert hub.states["Sim101"].halted == why
+    finally:
+        await hub.stop()
+
+
+async def test_a_double_fault_still_starts_a_row_that_is_not_running_yet_halted(
+    settings, conn, armed, client, monkeypatch, clock
+):
+    """The flatten failed and sqlite refused the halt row too (e.g. locked): the halt is held in
+    memory, as the kill's `killed`, so the row still starts halted (journalled then), and the
+    answer says the halt was not journalled. It halts only that arming: a re-arm starts free."""
+    flatten, write = client.flatten, journal.write
+
+    def locked(*args):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(client, "flatten", _unreachable)
+    monkeypatch.setattr(journal, "write", locked)
+    hub = LiveHub(settings, addon=client)
+    try:
+        why = flatten_failed("ConnectError: add-on unreachable")
+        assert await hub.disarm("Sim101") == {
+            "ok": False,
+            "error": f"{why}; {NOT_JOURNALLED}: OperationalError: database is locked",
+        }
+        assert rows(conn, "halt") == ()
+        monkeypatch.setattr(journal, "write", write)
+        await hub.tick(T0)
+        assert hub.states["Sim101"].halted == why
+        assert [r.payload for r in rows(conn, "halt")] == [
+            {"reason": why, "kind": None, "until": None}
+        ]
+        monkeypatch.setattr(client, "flatten", flatten)
+        assert await hub.disarm("Sim101") == {"ok": True, "error": None}
+        clock["t"] = T0 + timedelta(minutes=1)
+        arming.insert_armed(conn, replace(armed, armed_at=clock["t"]))
+        await hub.tick(clock["t"])
+        assert hub.states["Sim101"].halted is None
     finally:
         await hub.stop()
 

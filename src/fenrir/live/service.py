@@ -161,7 +161,7 @@ def _cannot_start(a: Armed, error: str) -> dict[str, Any]:
 
 def _waiting(a: Armed, killed: str | None) -> dict[str, Any]:
     """An AccountStatus for a sim or live row waiting for NinjaTrader's first account message
-    (`killed`: the reason a kill that could not disarm it halts it with when it starts)."""
+    (`killed`: the reason a failed kill or disarm halts it with when it starts)."""
     why = killed or (
         f"waiting for NinjaTrader: no account message with a balance above 0 for {a.account}"
         " yet; nothing is sent until one arrives"
@@ -227,6 +227,8 @@ class LiveHub:
         self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         # (time, reason) of a kill whose disarm failed: a row armed by then starts halted
         self.killed: tuple[datetime, str] | None = None
+        # per account, (time, reason) of a failed disarm whose halt row sqlite refused (#227)
+        self.held: dict[str, tuple[datetime, str]] = {}
         self._secret = secret
         self._timeout = step_timeout
         self._lock = asyncio.Lock()  # a tick and a bar never interleave
@@ -468,20 +470,30 @@ class LiveHub:
     async def _keep(self, account: str, cause: str) -> dict[str, Any]:
         """A disarm that could not finish (call under the lock): the row stays armed and the
         account is halted, with an alert; journalled, so a row not running yet starts halted
-        and a restart keeps it so."""
+        and a restart keeps it so. When sqlite refuses that row too, `held` halts the row when
+        it starts instead (as the kill's `killed`), and the error says so."""
         why = f"disarm failed: {cause}; still armed, halted until disarmed"
         alert = Log("alert", {"message": why})
+        error = why
         try:
             if (s := self.states.get(account)) is not None:
                 s, out = core.halt(s, why)
                 await self._apply(account, s, (*out, alert))  # halted in memory even if refused
             else:  # waiting for NinjaTrader, broken, or armed since the last sync
                 halt = {"reason": why, "kind": None, "until": None}  # as core.halt journals
-                journal.write(self.conn, _now(), account, "halt", halt)
+                try:
+                    journal.write(self.conn, _now(), account, "halt", halt)
+                except Exception as e:
+                    self.held[account] = (_now(), why)
+                    error = (
+                        f"{why}; halt held in memory, not journalled (a restart before it"
+                        f" starts lifts it): {_error(e)}"
+                    )
+                    raise
                 journal.write(self.conn, _now(), account, alert.kind, alert.payload)
         except Exception:
             log.exception("disarm %s failed; its halt not journalled", account)
-        return {"ok": False, "error": why}
+        return {"ok": False, "error": error}
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:
@@ -829,7 +841,7 @@ class LiveHub:
         if message is not None:
             s, more = core.on_account(s, message, now)
             out += more
-        if killed := self._killed(a):  # the kill could not disarm it: no strategy loads
+        if killed := self._killed(a):  # a kill or disarm could not: no strategy loads
             s, more = core.halt(s, killed)
             out += more
         elif s.started:
@@ -841,8 +853,12 @@ class LiveHub:
         await self._apply(a.account, s, out)
 
     def _killed(self, a: Armed) -> str | None:
-        """The halt reason of a kill whose disarm failed when `a` was armed by then."""
-        return self.killed[1] if self.killed and a.armed_at <= self.killed[0] else None
+        """The halt reason of a kill whose disarm failed, or of a failed disarm of `a`'s account
+        whose halt was not journalled (`held`), when `a` was armed by then."""
+        for mark in (self.killed, self.held.get(a.account)):
+            if mark and a.armed_at <= mark[0]:
+                return mark[1]
+        return None
 
     async def _spawn(self, a: Armed) -> None:
         overlay, drop = as_user(strategy_user(self.settings))

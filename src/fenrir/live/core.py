@@ -57,6 +57,12 @@ CONFIRM_LIQUIDATED = (
     "confirm balances: NinjaTrader's balance {balance:.2f} is at or below the liquidation level"
     " {level:.2f} from the armed balances; re-arm with the confirmed balances"
 )
+CONFIRM_GAP = (
+    "confirm balances: NinjaTrader's balance {nt:.2f} at the end-of-day session close puts the"
+    " drawdown floor at {floor:.2f}, at or above the app's balance {balance:.2f} (P&L the app"
+    " never booked: a trade on another instrument, or a fill while the server was down);"
+    " re-arm with the confirmed balances"
+)
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -913,7 +919,18 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
     ):
         if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
-            acct = _raised(s.setup, acct, s.nt.balance)
+            raised = _raised(s.setup, acct, s.nt.balance)
+            equity = raised.balance + raised.open_pnl
+            if at_or_below(equity, raised.floor):  # its floor alone breaches the app's figures
+                # a gap between the balances is no breach (#219): keep the app's own figures
+                base = s.setup.start.phase_start
+                gap = CONFIRM_GAP.format(
+                    nt=s.nt.balance, floor=base + raised.floor, balance=base + equity
+                )
+                s, more = halt(s, gap)
+                out += more
+            else:
+                acct = raised
             out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
         elif s.setup.start:  # none yet, or lost with the link: this close is never taken
             s, more = halt(s, NO_CLOSE)

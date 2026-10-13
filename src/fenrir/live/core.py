@@ -49,6 +49,10 @@ CONFIRM_BALANCES = (
     "confirm balances: an end-of-day session close passed while the runner was down;"
     " re-arm with the confirmed peak balance"
 )
+NO_CLOSE = (
+    "confirm balances: no NinjaTrader balance at the end-of-day session close;"
+    " re-arm with the confirmed peak balance"
+)
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -125,6 +129,7 @@ class RunnerState:
     opened_balance: float = 0.0  # acct.balance before that fill, for TradeClosed
     held: tuple[Position, float] | None = None  # position and balance before this bar's exit
     nt: NtAccount | None = None  # for the stricter-of checks (DEC-4b); never for dry runs
+    read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,6 +297,8 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
     qty, price = fill["qty"], fill["price"]
     s, out = _roll_day(s, ts)  # journals its own "peak" row; a Fill never moves the peak
     out += (Log("fill", dict(fill)),)
+    if s.read_at is not None and ts <= s.read_at:  # buffered while the book was read: in it
+        return s, out
     if qty == 0:
         return s, (*out, Log("alert", {"message": "ignored a fill with qty 0"}))
     pos, w, spec = s.position, s.working, s.setup.spec
@@ -387,11 +394,14 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 
 def on_disconnect(s: RunnerState, error: str) -> Step:
     """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
-    one "alert" per outage. Positions keep their broker-side stop and target (the add-on's
+    one "alert" per outage, and NinjaTrader's figures are dropped as stale until its next account
+    message. Positions keep their broker-side stop and target (the add-on's
     `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs ignore it."""
-    if s.setup.armed.mode == "dry" or s.unreconciled == LINK_LOST:
+    if s.setup.armed.mode == "dry":
         return s, ()
-    return replace(s, unreconciled=LINK_LOST), (
+    if s.unreconciled == LINK_LOST:  # still the same outage: no second alert, figures dropped
+        return replace(s, nt=None), ()
+    return replace(s, unreconciled=LINK_LOST, nt=None), (
         Log("alert", {"message": f"{LINK_LOST} ({error})"}),
     )
 
@@ -423,7 +433,7 @@ def on_reconcile(
     avg = qty and sum(p.qty * p.avg_price for p in mine) / qty
     on = [o for o in rest if o.instrument == instrument]
     # NinjaTrader just reported the book: the position is verified and an outage is over
-    s = replace(s, working=w if entry else None, exiting=None, unreconciled=None)
+    s = replace(s, working=w if entry else None, exiting=None, unreconciled=None, read_at=now)
     s = _adopt(s, qty, avg, on, now)
     if not found:
         return s, ()
@@ -464,9 +474,9 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
     which already holds today's fills. No effects: every row was journalled when it happened.
     The drift pause stays as `start` restored it from the "halt" rows (a resolve may have lifted
     it), and sim and live stay `unreconciled` until `on_reconcile`."""
-    r = s
+    r = replace(s, read_at=None)  # every journalled fill is booked, whatever was read since
     if s.setup.day_start is not None:
-        r = replace(s, acct=replace(s.acct, balance=s.acct.day_start_balance, traded_today=False))
+        r = replace(r, acct=replace(s.acct, balance=s.acct.day_start_balance, traded_today=False))
     close = math.nan  # the last "bar" row's close: a Bracket was checked at it
     for kind, p in rows:
         if kind == "bar":
@@ -488,7 +498,14 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
         acct = replace(r.acct, balance=min(booked, a.balance), traded_today=traded)
     shift = acct.balance - booked  # the open trade's P&L counts from the balance kept
     # an exit's `held` marks its own bar only, which is gone
-    return replace(r, acct=acct, opened_balance=r.opened_balance + shift, drift=s.drift, held=None)
+    return replace(
+        r,
+        acct=acct,
+        opened_balance=r.opened_balance + shift,
+        drift=s.drift,
+        held=None,
+        read_at=s.read_at,
+    )
 
 
 def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:
@@ -813,9 +830,15 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     if isinstance(acct, Breach):
         s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
         acct = s.acct  # failed until disarmed: its figures stay as they were
-    elif s.nt and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day":
-        acct = _raised(s.setup, acct, s.nt.balance)  # NinjaTrader's balance at the close (DEC-4a)
-        out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+    elif s.setup.armed.mode != "dry" and (
+        phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
+    ):
+        if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
+            acct = _raised(s.setup, acct, s.nt.balance)
+            out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+        elif s.setup.start:  # none yet, or lost with the link: this close is never taken
+            s, more = halt(s, NO_CLOSE)
+            out += more
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40

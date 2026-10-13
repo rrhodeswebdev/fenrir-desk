@@ -261,6 +261,9 @@ def test_a_weekend_restart_asks_only_once_the_next_session_opened():
         assert core.start(setup, now.ts, peaks=last)[0].halted is None
     sunday_open = at("18:05", date(2025, 10, 12)).ts  # Monday's session has opened
     assert core.start(setup, sunday_open, peaks=last)[0].halted.startswith("confirm balances: ")
+    thursday = [rolled(at("09:30", date(2025, 10, 9)).ts)]  # Wednesday evening's roll
+    friday_open = at("18:05", date(2025, 10, 9)).ts  # Friday is a session day too
+    assert core.start(setup, friday_open, peaks=thursday)[0].halted.startswith("confirm balances")
 
 
 @pytest.mark.parametrize(
@@ -273,3 +276,48 @@ def test_a_weekend_restart_asks_only_once_the_next_session_opened():
 def test_no_confirm_balances_halt_unless_end_of_day_sim_or_live(setup):
     setup = armed_at(setup, at("08:00").ts)
     assert core.start(setup, at("09:30", D2).ts)[0].halted is None
+
+
+# A roll needs NinjaTrader's balance at the close: without it (none yet, or lost with the link)
+# that close is never taken, so the running account halts as a restart would
+
+
+def test_a_roll_without_ninjatraders_figures_halts_confirm_balances():
+    s, effects = core.on_bar(running(sim()), at("09:30", D2))
+    assert s.halted.startswith("confirm balances: ") and s.halt_kind is None
+    assert "no NinjaTrader balance at the" in s.halted
+    assert [e.payload["kind"] for e in effects if e.kind == "halt"] == [None]
+    assert peaks(effects) == []
+
+
+def test_a_lost_link_leaves_no_figures_for_the_roll():
+    s = running(sim(), account(balance=50_400.0))
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    assert s.nt is None  # stale from here on: never a close's balance
+    assert core.on_bar(s, at("09:30", D2))[0].halted.startswith("confirm balances: ")
+    s, _ = core.on_reconcile(s, "NQ 12-25", (), (), T.ts)
+    s, _ = core.on_account(s, account(balance=50_400.0), T.ts)  # fresh figures again
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted is None and peaks(effects)[0]["peak"] == 50_400.0
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        sim(trailing="intraday"),  # the peak follows each account message, not the close
+        make_setup(make_rules(), start=START),  # dry runs have no NinjaTrader figures
+    ],
+)
+def test_only_end_of_day_sim_or_live_rolls_need_ninjatraders_figures(setup):
+    assert core.on_bar(running(setup), at("09:30", D2))[0].halted is None
+
+
+def test_a_second_outage_drops_the_figures_too():
+    """Reconnected, the reconcile read failed (still LINK_LOST), figures flowed, link lost again."""
+    s = running(sim(), account(balance=50_400.0))
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s, _ = core.on_account(s, account(balance=50_400.0), T.ts)
+    s, effects = core.on_disconnect(s, "no heartbeat for 6 s")
+    assert effects == () and s.nt is None  # one alert per outage, but never stale figures
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith("confirm balances: ") and peaks(effects) == []

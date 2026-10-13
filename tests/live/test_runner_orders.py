@@ -24,6 +24,9 @@ def sim(**kw):
     return make_setup(make_rules(**kw), mode="sim", start=START, day_start=OPEN)
 
 
+NT = core.NtAccount(50_000.0, 0.0, 0.0)  # NinjaTrader's figures, for an end_of_day roll
+
+
 def started(setup, b):
     return core.on_bar(reconciled(core.start(setup, b.ts)[0]), b)[0]
 
@@ -273,6 +276,7 @@ def test_flat_by_flattens_and_the_day_rolls_after_the_exit_fill():
     assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
     assert sends(core.on_bar(s, at("16:40"))[1]) == []
     s, _ = core.on_fill(s, fill(-1, 20004.75, at("16:40").ts + timedelta(seconds=1)))
+    s = replace(s, nt=NT)  # the close's balance, so the roll takes it
     s, effects = core.on_bar(s, at("18:00"))  # 18:00 ET opens trading day D2
     assert s.halted is None and "halt" not in kinds(effects)
     assert s.acct.closed_days == ((D1, pytest.approx(4.5 * 20)),)
@@ -357,7 +361,7 @@ def test_fill_in_the_next_trading_day_rolls_the_day_first():
 
 
 def test_late_fill_from_a_closed_day_books_into_today():
-    s, _ = core.on_bar(started(sim(), at("16:00")), at("18:00"))  # trading day D2
+    s, _ = core.on_bar(replace(started(sim(), at("16:00")), nt=NT), at("18:00"))  # trading day D2
     s, _ = core.on_fill(s, fill(1, 20000.0, at("16:20").ts))  # stamped in D1, arrives late
     assert s.acct.day == D2 and s.position.qty == 1
     s, effects = core.on_bar(s, at("18:01"))

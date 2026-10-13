@@ -14,10 +14,11 @@ import json
 import logging
 import math
 import os
+import secrets
 import signal
 import sqlite3
 import sys
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from typing import Any
 from fenrir.backtest.run import AccountChoice, load_account_choices
 from fenrir.bridge.client import AddonClient
 from fenrir.bridge.names import nt_instrument
+from fenrir.bridge.reconcile import NtOrder, NtPosition
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import Instruments, front_month, load_instruments, spec
@@ -32,7 +34,7 @@ from fenrir.core.sessions import trading_day
 from fenrir.data.store import SERIES
 from fenrir.files import read_regular
 from fenrir.live import core, journal
-from fenrir.live.arming import Armed, list_armed
+from fenrir.live.arming import Armed, delete_armed, list_armed
 from fenrir.live.core import Log, RunnerState, Send, Setup
 from fenrir.live.step_child import ctx_json
 from fenrir.rules.account import with_dll
@@ -52,6 +54,8 @@ STRATEGY_MAX = 1024 * 1024
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
+RESTREAM_AFTER = TICK_EVERY  # before following the add-on stream again after a failure
+DISARMED = {"reason": "disarmed", "kind": None, "until": None}  # as the disarm route journals
 
 Stream = Callable[[Settings, Sequence[str]], AsyncIterator[Bar]]
 
@@ -160,20 +164,27 @@ class LiveHub:
         self.children: dict[str, asyncio.subprocess.Process] = {}
         self.lse_connected = False
         self.last_bar_ts: datetime | None = None
+        self.nt_connected = False  # the add-on stream is up (22.5)
+        self.last_heartbeat: str | None = None  # its last heartbeat's ts, as the add-on sent it
         self._secret = secret
         self._timeout = step_timeout
         self._lock = asyncio.Lock()  # a tick and a bar never interleave
         self._tasks: list[asyncio.Task] = []
 
     def start(self) -> None:
-        """Start the clock ticks; call on the event loop. Bars come from `run_bars` (04.2)."""
+        """Start the clock ticks and, when configured, follow the add-on's event stream; call on
+        the event loop. Bars come from `run_bars` (04.2)."""
         # shortcut: no bar stream yet; when 21.8 wires stream_bars, add run_bars to _tasks here
         self._tasks.append(asyncio.create_task(run_ticks(self)))
+        if self.addon is not None:
+            self._tasks.append(asyncio.create_task(run_stream(self)))
 
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        for r in await asyncio.gather(*self._tasks, return_exceptions=True):
+            if isinstance(r, Exception):  # the type only: an add-on error could hold the token
+                log.error("live task had failed: %s", type(r).__name__)
         self._tasks.clear()
         for account in list(self.children):
             await self._kill(account)
@@ -190,21 +201,108 @@ class LiveHub:
     async def tick(self, now: datetime) -> None:
         async with self._lock:
             await self._sync(now)
-            for account, s in list(self.states.items()):
+
+            async def one(account: str) -> None:
+                # armed or restarted while linked, or its last read failed: reconcile now
+                if self.states[account].unreconciled and self.nt_connected:
+                    await self._reconcile(account, now)
+                s = self.states[account]
+                await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
+
+            # e.g. its rows still refused: the others' retries still go out
+            await self._each("a tick", one)
+
+    async def handle_stream(self, msg: Mapping[str, Any]) -> None:
+        """One `AddonClient.stream()` item: `connected` reconciles every account, `disconnected`
+        pauses them, `account` feeds that account's figures and `fill` goes to `handle_fill`.
+        `position` and `order` are not needed: a reconcile reads `/positions` and `/orders`."""
+        match msg["type"]:
+            case "heartbeat":
+                self.last_heartbeat = msg["ts"]
+            case "fill":
+                await self.handle_fill(msg)
+            case "connected":
+                async with self._lock:
+                    self.nt_connected = True
+                    await self._each("reconcile", lambda a: self._reconcile(a, _now()))
+            case "disconnected":
+                async with self._lock:
+                    self.nt_connected = False
+                    await self._each(
+                        "a lost link",
+                        lambda a: self._apply(a, *core.on_disconnect(self.states[a], msg["error"])),
+                    )
+            case "account":
+                async with self._lock:
+                    if (s := self.states.get(msg["id"])) is not None:
+                        await self._apply(msg["id"], *core.on_account(s, msg, _now()))
+
+    async def resolve(self, account: str) -> bool:
+        """The Resolve button: `core.resolve` with NinjaTrader's fresh book. KeyError when the
+        account is not running; False, nothing lifted, when the book cannot be read."""
+        async with self._lock:
+            if account not in self.states:
+                raise KeyError(account)
+            return await self._reconcile(account, _now(), core.resolve)
+
+    async def kill(self) -> dict[str, Any]:
+        """The kill switch: flatten and cancel everything on NinjaTrader's managed accounts
+        (`/flatten-all`) first, as it matters most, then disarm every account (runner and child
+        stopped), journalled per account as the disarm route does plus an "alert" with the
+        outcome. Under the hub lock, so no bar or fill runs between the two. A disarm that fails
+        (e.g. sqlite locked) halts every running account in memory instead. `ok` is false, with
+        the errors, when `/flatten-all` did not land, when NinjaTrader is not configured while a
+        sim or live account was armed, or when the disarm failed."""
+        async with self._lock:
+            live = any(s.setup.armed.mode != "dry" for s in self.states.values())
+            flat = None
+            if self.addon is not None:
+                try:  # a fresh id per press: a retry inside the client is still deduped
+                    ack = await self.addon.flatten_all(f"kill-{secrets.token_hex(8)}")
+                    if not (ack.accepted or ack.duplicate):
+                        flat = ack.error or "refused"
+                except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
+                    flat = f"{type(e).__name__}: {e}"
+            armed: Sequence[Armed] = ()
+            disarm = None
+            try:
+                conn = self._db()
+                armed = list_armed(conn) if conn else ()
+                for a in armed:
+                    delete_armed(conn, a.account)
+                await self._sync(_now())
+            except Exception as e:
+                log.exception("kill switch: disarm failed")
+                disarm = f"disarm failed: {type(e).__name__}: {e}"
+                for account in list(self.states):  # still armed: no new entries until disarmed
+                    s = self.states[account]
+                    with contextlib.suppress(Exception):  # its halt row is queued and retried
+                        await self._apply(account, *core.halt(s, f"kill switch: {disarm}"))
+            if self.addon is None and (live or any(a.mode != "dry" for a in armed)):
+                flat = "NinjaTrader add-on not configured (FENRIR_NT_TOKEN)"
+            if disarm is None:
+                done = f"flatten all failed: {flat}" if flat else "flattened and cancelled all"
                 try:
-                    await self._apply(account, *core.on_tick(s, now, self.settings.stale_seconds))
-                except Exception:  # e.g. its rows still refused: the others' retries still go out
-                    log.exception("live account %s failed on a tick", account)
+                    for a in armed:
+                        journal.write(conn, _now(), a.account, "halt", DISARMED)
+                        alert = {"message": f"kill switch: disarmed; {done}"}
+                        journal.write(conn, _now(), a.account, "alert", alert)
+                except Exception:  # disarmed and flattened all the same: report that, not this
+                    log.exception("kill switch not journalled")
+            errors = [e for e in (flat, disarm) if e]
+            return {"ok": not errors, "error": "; ".join(errors) or None}
 
     async def handle_bar(self, bar: Bar) -> None:
         async with self._lock:
             self.last_bar_ts = bar.ts
             await self._sync(bar.ts)
             day = trading_day(bar.ts)
-            for account, s in list(self.states.items()):
+
+            async def one(account: str) -> None:
+                s = self.states[account]
                 # a running account means _start loaded the instruments
                 if bar.contract != front_month(self.instruments, s.setup.spec.series, day):
-                    continue
+                    return
                 try:
                     await self._apply(account, *await self._bar(account, s, bar))
                 except Exception as e:  # one account's failure must not stop the others' bar
@@ -217,6 +315,39 @@ class LiveHub:
                         await self._apply(account, *core.halt(s, f"live runner error: {error}"))
                     except Exception:  # the journal itself failed: halted in memory, row retried
                         log.exception("live account %s halted; halt not journalled", account)
+
+            await self._each("a bar", one)
+
+    async def _each(self, what: str, run: Callable[[str], Awaitable[Any]]) -> None:
+        """`run(account)` for every running account at once, so one account's slow add-on post
+        never holds back another's Flatten; an account's error is logged, the rest still run."""
+
+        async def one(account: str) -> None:
+            try:
+                await run(account)
+            except Exception:
+                log.exception("live account %s failed on %s", account, what)
+
+        await asyncio.gather(*map(one, list(self.states)))
+
+    async def _reconcile(
+        self, account: str, now: datetime, check: Callable[..., core.Step] = core.on_reconcile
+    ) -> bool:
+        """`check` (`core.on_reconcile` or `core.resolve`) with NinjaTrader's `/positions` and
+        `/orders` for the account; False when they cannot be read. Dry runs read nothing."""
+        s = self.states[account]
+        if s.setup.armed.mode == "dry":
+            return True
+        if self.addon is None:
+            return False
+        try:
+            positions = [NtPosition(**p) for p in await self.addon.positions(account)]
+            orders = [NtOrder(**o) for o in await self.addon.orders(account)]
+        except Exception as e:  # unreachable, timeout, HTTP status, malformed reply
+            log.warning("live account %s: cannot read NinjaTrader's book: %s", account, e)
+            return False
+        await self._apply(account, *check(s, self._nt(s, now), positions, orders, now))
+        return True
 
     async def handle_fill(self, fill: Mapping[str, Any]) -> None:
         """One validated add-on `fill` message (22.5 routes the stream here): booked only by the
@@ -251,11 +382,11 @@ class LiveHub:
         return s, out + more + last
 
     def status(self) -> dict[str, Any]:
-        """The `GET /api/live/status` body (22.5 fills `nt`)."""
+        """The `GET /api/live/status` body."""
         last = self.last_bar_ts
         return {
             "lse": {"connected": self.lse_connected, "last_bar_ts": last and last.isoformat()},
-            "nt": {"connected": False, "last_heartbeat": None},
+            "nt": {"connected": self.nt_connected, "last_heartbeat": self.last_heartbeat},
             "drift": {
                 "ok": not any(s.drift for s in self.states.values()),
                 "ticks": max(self.drift_ticks.values(), default=None),
@@ -297,7 +428,8 @@ class LiveHub:
 
     async def _post(self, account: str, send: Send, unjournalled: bool, again: bool) -> list[Log]:
         """Post one Send; the rows it adds. Only a definitive refusal (`accepted` and `duplicate`
-        both false, or a post never made) goes through `core.send_failed`. After a timeout or any
+        both false, a post never made, or a `duplicate` that `_landed` / `_flat` finds did not
+        land) goes through `core.send_failed`. After a timeout or any
         other error it may have landed: a Bracket stays working until a fill, the day roll or
         reconciliation, and a Flatten is resent under its client_id (`again`: no second alert)."""
         s, cid, a = self.states[account], send.client_id, send.action
@@ -315,7 +447,7 @@ class LiveHub:
                     landed = ack.duplicate and await self._landed(account, cid, nt)
                 else:
                     ack = await self.addon.flatten(cid, account)
-                    landed = ack.duplicate  # /flatten never over-closes: it did its job
+                    landed = ack.duplicate and await self._flat(account)
             except Exception as e:  # timeout, transport, HTTP status, malformed reply
                 log.warning("live account %s: send %s outcome unknown", account, cid)
                 if isinstance(a, Flatten):
@@ -328,8 +460,10 @@ class LiveHub:
             if ack.accepted or landed:
                 return []
             error = ack.error or "refused"
-            if ack.duplicate:
+            if ack.duplicate and isinstance(a, Bracket):
                 error = "duplicate, but NinjaTrader shows neither its entry order nor a position"
+            elif ack.duplicate:
+                error = "duplicate, but NinjaTrader still holds a position"
         s, out = core.send_failed(s, cid, error)
         self.states[account] = s
         return list(out)
@@ -346,12 +480,27 @@ class LiveHub:
         entry = any(o["client_id"] == cid and o["role"] == "entry" for o in orders)
         return entry or any(p["instrument"] == nt and p["qty"] for p in positions)
 
-    async def _sync(self, now: datetime) -> None:
-        if self.conn is None:
-            path = self.settings.private_dir / "fenrir.db"
-            if not path.exists():
-                return  # nothing was ever armed
+    async def _flat(self, account: str) -> bool:
+        """After a `duplicate` Flatten: the earlier attempt may have been refused, its reply lost,
+        and `exiting` would then hold back every later exit. It landed when NinjaTrader holds no
+        position on the account; unknown counts as not landed, as a second /flatten never
+        over-closes (at worst one more alert and Flatten)."""
+        try:
+            return not any(p["qty"] for p in await self.addon.positions(account))
+        except Exception:
+            log.warning("live account %s: cannot check a duplicate Flatten", account)
+            return False
+
+    def _db(self) -> sqlite3.Connection | None:
+        """`<private_dir>/fenrir.db`, opened once it exists; None while nothing was ever armed."""
+        path = self.settings.private_dir / "fenrir.db"
+        if self.conn is None and path.exists():
             self.conn = journal.open_db(path)
+        return self.conn
+
+    async def _sync(self, now: datetime) -> None:
+        if self._db() is None:
+            return  # nothing was ever armed
         rows = {a.account: a for a in list_armed(self.conn)}
         for account in [x for x, s in self.states.items() if rows.get(x) != s.setup.armed]:
             del self.states[account]
@@ -468,6 +617,28 @@ async def run_ticks(hub: LiveHub, every: float = TICK_EVERY) -> None:
         except Exception:  # e.g. a locked database: the next tick tries again
             log.exception("live tick failed")
         await asyncio.sleep(every)
+
+
+async def run_stream(hub: LiveHub) -> None:
+    """Feed the add-on's event stream to the hub; never ends (the client reconnects). Should
+    following it fail, the link counts as lost (every account paused) and it starts again."""
+    while True:
+        try:
+            async for msg in hub.addon.stream():
+                try:
+                    await hub.handle_stream(msg)
+                except Exception:  # e.g. a refused journal row: the next message still gets through
+                    log.exception("live: add-on %s message failed", msg["type"])
+        except (
+            Exception
+        ) as e:  # the type only: an unexpected error could hold the stream URL's token
+            error = f"stream follower failed: {type(e).__name__}"
+            log.error("live: add-on %s; following it again", error)
+            try:
+                await hub.handle_stream({"type": "disconnected", "error": error})
+            except Exception:
+                log.exception("live: the lost link was not applied")
+        await asyncio.sleep(RESTREAM_AFTER)
 
 
 async def run_bars(hub: LiveHub, stream: Stream) -> None:

@@ -49,6 +49,10 @@ CONFIRM_BALANCES = (
     "confirm balances: an end-of-day session close passed while the runner was down;"
     " re-arm with the confirmed peak balance"
 )
+NO_CLOSE = (
+    "confirm balances: no NinjaTrader balance at the end-of-day session close;"
+    " re-arm with the confirmed peak balance"
+)
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -387,11 +391,12 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 
 def on_disconnect(s: RunnerState, error: str) -> Step:
     """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
-    one "alert" per outage. Positions keep their broker-side stop and target (the add-on's
+    one "alert" per outage, and NinjaTrader's figures are dropped as stale until its next account
+    message. Positions keep their broker-side stop and target (the add-on's
     `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs ignore it."""
     if s.setup.armed.mode == "dry" or s.unreconciled == LINK_LOST:
         return s, ()
-    return replace(s, unreconciled=LINK_LOST), (
+    return replace(s, unreconciled=LINK_LOST, nt=None), (
         Log("alert", {"message": f"{LINK_LOST} ({error})"}),
     )
 
@@ -813,9 +818,15 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     if isinstance(acct, Breach):
         s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
         acct = s.acct  # failed until disarmed: its figures stay as they were
-    elif s.nt and phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day":
-        acct = _raised(s.setup, acct, s.nt.balance)  # NinjaTrader's balance at the close (DEC-4a)
-        out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+    elif s.setup.armed.mode != "dry" and (
+        phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
+    ):
+        if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
+            acct = _raised(s.setup, acct, s.nt.balance)
+            out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+        elif s.setup.start:  # none yet, or lost with the link: this close is never taken
+            s, more = halt(s, NO_CLOSE)
+            out += more
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40

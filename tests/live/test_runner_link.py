@@ -214,7 +214,8 @@ def test_reconcile_forgets_a_flatten_in_flight():
 
 
 def test_unreconciled_position_at_flat_by_and_the_roll_pauses_instead_of_breaching():
-    s = entered(sim(), at("16:30"))
+    # intraday: an end_of_day roll with the link down would halt for its closing balance
+    s = entered(sim(trailing="intraday"), at("16:30"))
     s, _ = core.on_disconnect(s, "no heartbeat for 6 s")  # the add-on flattens at 16:40 unseen
     for hhmm in ("16:39", "16:45"):
         s, _ = core.on_bar(s, at(hhmm))

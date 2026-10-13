@@ -1,7 +1,9 @@
 """22.4: the hub posts the core's Sends to the add-on (the fake), journals failed sends, replays
-journalled fills on a restart. The hub cannot start sim yet (23.3 stores the start figures), so
-`figures` supplies them, and reconciles with a flat book as 22.5 will on `connected`."""
+journalled fills on a restart. 22.5: it follows the add-on's event stream (reconcile, lost link,
+account figures, fills), resolves and kills. The hub cannot start sim yet (23.3 stores the start
+figures), so `figures` supplies them, and reconciles with a flat book as on `connected`."""
 
+import asyncio
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,7 +14,7 @@ from fastapi.testclient import TestClient
 from live_helpers import ARMED_AT, fill, reconciled
 
 from fenrir.bridge.client import AddonClient
-from fenrir.bridge.fake_addon import FakeAddon, running
+from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
 from fenrir.core.actions import Bracket, Flatten
 from fenrir.core.bars import Bar
 from fenrir.live import arming, core, journal, service
@@ -27,6 +29,7 @@ pytestmark = pytest.mark.anyio
 T0 = datetime(2026, 10, 12, 14, 0, tzinfo=UTC)  # Monday 10:00 ET; NQ front month NQZ26
 MNQ = "MNQ 12-26"  # NinjaTrader's name for it
 START = core.Start(50_000.0, 50_000.0, 50_000.0)
+REAL_START = core.start  # before `figures` patches it
 OPEN = core.DayStart(50_000.0, 50_000.0)
 
 ALWAYS = """
@@ -470,3 +473,262 @@ def test_create_app_sets_the_addon_client(tmp_path):
     assert app.state.addon._http.is_closed
     unset = create_app(replace(settings, nt_token=""), "k" * 43, "c" * 22, None)
     assert unset.state.addon is None and unset.state.live.addon is None
+
+
+# 22.5: the add-on's event stream, resolve and the kill switch
+
+
+def unreconciled(monkeypatch):
+    """Sim starts as the hub will start it: paused until NinjaTrader's book is read."""
+
+    def sim_start(setup, now, *rest):
+        return REAL_START(replace(setup, start=START, day_start=OPEN), now, *rest)
+
+    monkeypatch.setattr(core, "start", sim_start)
+
+
+ACCOUNT = {
+    "type": "account",
+    "id": "Sim101",
+    "name": "Sim101",
+    "is_sim": True,
+    "balance": 50_100.0,
+    "realized_pnl_today": 100.0,
+    "unrealized_pnl": 0.0,
+}
+STRAY = {**ENTRY, "client_id": "manual", "role": "other"}
+LOST = {"type": "disconnected", "error": "no heartbeat or open timed out"}
+
+
+async def until(check, timeout=10.0):
+    async with asyncio.timeout(timeout):
+        while not check():
+            await asyncio.sleep(0.01)
+
+
+async def test_connected_reconciles_and_unpauses(hub, conn, armed, fake, monkeypatch):
+    unreconciled(monkeypatch)
+    await hub.tick(T0)  # not linked yet: nothing to reconcile with
+    assert hub.states["Sim101"].unreconciled == core.UNRECONCILED
+    await hub.handle_stream({"type": "connected"})
+    assert hub.states["Sim101"].unreconciled is None
+    assert hub.status()["nt"] == {"connected": True, "last_heartbeat": None}
+
+
+async def test_disconnected_pauses_until_reconnected(hub, conn, armed, fake):
+    await hub.handle_stream({"type": "connected"})
+    await hub.tick(T0)
+    await hub.handle_stream(LOST)
+    assert hub.states["Sim101"].unreconciled == core.LINK_LOST
+    assert hub.status()["nt"]["connected"] is False
+    [alert] = rows(conn, "alert")
+    assert alert.payload["message"].startswith(core.LINK_LOST)
+    await hub.handle_bar(bar(T0))
+    assert fake.requests == []  # no new entries while the link is down
+    await hub.handle_stream({"type": "connected"})
+    assert hub.states["Sim101"].unreconciled is None
+
+
+async def test_a_mismatch_halts_until_resolved(hub, conn, armed, fake):
+    await hub.tick(T0)
+    fake.orders = [STRAY]
+    await hub.handle_stream({"type": "connected"})
+    assert "stray_orders" in hub.states["Sim101"].mismatch
+    assert hub.status()["accounts"][0]["halt_kind"] == "reconcile"
+    assert await hub.resolve("Sim101") is True  # still there: paused again
+    assert "stray_orders" in hub.states["Sim101"].mismatch
+    fake.orders = []  # the user cancelled it in NinjaTrader
+    assert await hub.resolve("Sim101") is True
+    assert hub.states["Sim101"].mismatch is None
+    halts = [r.payload["kind"] for r in rows(conn, "halt")]
+    assert halts == ["reconcile", "resolve", "reconcile", "resolve"]
+
+
+async def test_resolve_needs_a_running_account_and_ninjatraders_book(
+    hub, conn, armed, client, monkeypatch
+):
+    await hub.tick(T0)
+    with pytest.raises(KeyError):
+        await hub.resolve("Sim999")
+    hub.states["Sim101"] = replace(hub.states["Sim101"], mismatch="NinjaTrader mismatch: x")
+
+    async def down(account):
+        raise httpx.ConnectError("add-on unreachable")
+
+    monkeypatch.setattr(client, "positions", down)
+    assert await hub.resolve("Sim101") is False  # nothing lifted without a fresh read
+    assert hub.states["Sim101"].mismatch == "NinjaTrader mismatch: x"
+
+
+async def test_an_unreconciled_account_reconciles_on_a_tick_while_linked(
+    hub, conn, armed, fake, monkeypatch
+):
+    """Armed while the link is up, restarted, or its reconcile read failed: the next tick."""
+    unreconciled(monkeypatch)
+    await hub.handle_stream({"type": "connected"})  # before this account started
+    await hub.tick(T0)
+    assert hub.states["Sim101"].unreconciled is None
+
+
+async def test_reconcile_clears_a_replayed_flatten_that_was_refused(
+    settings, hub, client, conn, armed, fake
+):
+    """A restart restores `exiting` from the sent Flatten's row, even after its `send failed`."""
+    await hub.tick(T0)
+    fake.rejects = ["refused"]
+    await hub.handle_fill(FOREIGN)
+    await hub.stop()
+    restarted = LiveHub(settings, addon=client)
+    try:
+        await restarted.tick(T0 + timedelta(minutes=1))
+        assert restarted.states["Sim101"].exiting == FLATTEN["client_id"]
+        fake.positions = [HELD]  # NinjaTrader still holds the foreign fill
+        await restarted.handle_stream({"type": "connected"})
+        assert restarted.states["Sim101"].exiting != FLATTEN["client_id"]
+    finally:
+        await restarted.stop()
+
+
+async def test_a_duplicate_flatten_with_a_position_still_held_is_a_failed_send(
+    hub, conn, armed, fake
+):
+    """The first attempt was refused, its reply lost: `exiting` must not hold back later exits."""
+    await hub.tick(T0)
+    fake.seen.add(FLATTEN["client_id"])
+    fake.positions = [HELD]
+    await hub.handle_fill(FOREIGN)
+    alerts = [r.payload["message"] for r in rows(conn, "alert")]
+    assert alerts[-1] == (
+        f"send {FLATTEN['client_id']} failed: duplicate, but NinjaTrader still holds a position"
+    )
+    assert hub.states["Sim101"].exiting is None
+
+
+async def test_a_duplicate_flatten_with_ninjatrader_flat_has_landed(hub, conn, armed, fake):
+    await hub.tick(T0)
+    fake.seen.add(FLATTEN["client_id"])
+    await hub.handle_fill(FOREIGN)
+    assert hub.states["Sim101"].exiting == FLATTEN["client_id"]
+    assert [r.payload["message"].split(":")[0] for r in rows(conn, "alert")] == ["flattening"]
+
+
+async def test_a_duplicate_flatten_that_cannot_be_checked_is_a_failed_send(
+    hub, conn, armed, fake, client, monkeypatch
+):
+    """Unknown counts as not landed: a second /flatten never over-closes."""
+
+    async def down(account):
+        raise httpx.ConnectError("add-on unreachable")
+
+    await hub.tick(T0)
+    monkeypatch.setattr(client, "positions", down)
+    fake.seen.add(FLATTEN["client_id"])
+    await hub.handle_fill(FOREIGN)
+    assert hub.states["Sim101"].exiting is None
+
+
+async def test_account_messages_and_heartbeats_reach_the_hub(hub, conn, armed):
+    await hub.tick(T0)
+    await hub.handle_stream({**ACCOUNT, "id": "Sim102", "is_sim": False})  # not running here
+    await hub.handle_stream(ACCOUNT)
+    assert hub.states["Sim101"].nt == core.NtAccount(50_100.0, 100.0, 0.0)
+    assert hub.states["Sim101"].halted is None
+    ts = now_ts()
+    await hub.handle_stream({"type": "heartbeat", "ts": ts})
+    assert hub.status()["nt"]["last_heartbeat"] == ts
+    await hub.handle_stream({"type": "position", **HELD})  # reconcile reads the book itself
+    await hub.handle_stream({"type": "order", **ENTRY})
+    assert hub.states["Sim101"].position.qty == 0
+
+
+async def test_stream_fills_are_booked(hub, conn, armed):
+    await hub.tick(T0)
+    await hub.handle_stream(mnq_fill(1, 20000.0, T0 + timedelta(seconds=1)))
+    assert hub.states["Sim101"].position.qty == 1
+
+
+async def test_one_accounts_slow_post_never_holds_back_anothers(
+    hub, conn, armed, client, monkeypatch
+):
+    arming.insert_armed(conn, replace(armed, account="Sim102"))
+    second, post = asyncio.Event(), client.bracket
+
+    async def spy(cid, account, *rest):
+        if account == "Sim101":  # hangs until Sim102's post is out
+            await asyncio.wait_for(second.wait(), 10)
+        ack = await post(cid, account, *rest)
+        second.set()
+        return ack
+
+    monkeypatch.setattr(client, "bracket", spy)
+    await hub.handle_bar(bar(T0))
+    assert [s.working is not None for s in hub.states.values()] == [True, True]
+    assert "alert" not in kinds(conn)
+
+
+async def test_the_hub_follows_the_addon_stream(hub, conn, armed, fake, monkeypatch):
+    unreconciled(monkeypatch)
+    await hub.tick(T0)
+    task = asyncio.create_task(service.run_stream(hub))
+    try:
+        await until(lambda: hub.states["Sim101"].unreconciled is None)
+        fake.push(ACCOUNT)
+        await until(lambda: hub.states["Sim101"].nt is not None)
+        fake.kick()
+        await until(lambda: "alert" in kinds(conn))  # the lost link
+        await until(lambda: hub.nt_connected and hub.states["Sim101"].unreconciled is None)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_kill_disarms_all_and_flattens_all(hub, conn, armed, fake):
+    arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
+    await hub.tick(T0)
+    assert await hub.kill() == {"ok": True, "error": None}
+    [(path, body)] = fake.requests
+    assert path == "/flatten-all" and len(body["client_id"]) <= 24
+    assert arming.list_armed(conn) == () and hub.states == {} and hub.children == {}
+    for account in ("Sim101", "Dry1"):
+        [row] = journal.rows(conn, account=account, kind="alert")
+        assert row.payload["message"].startswith("kill switch: disarmed")
+    await hub.kill()  # a second press is its own request
+    assert fake.requests[1][1]["client_id"] != body["client_id"]
+
+
+async def test_kill_without_ninjatrader_is_not_ok_while_sim_or_live_is_armed(settings, conn, armed):
+    hub = LiveHub(settings)
+    try:
+        result = await hub.kill()
+    finally:
+        await hub.stop()
+    assert result["ok"] is False and "not configured" in result["error"]
+    assert arming.list_armed(conn) == ()  # disarmed all the same
+    [row] = rows(conn, "alert")
+    assert "not configured" in row.payload["message"]
+
+
+async def test_kill_with_only_dry_runs_needs_no_ninjatrader(settings, conn, armed):
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
+    hub = LiveHub(settings)
+    try:
+        assert await hub.kill() == {"ok": True, "error": None}
+    finally:
+        await hub.stop()
+    assert arming.list_armed(conn) == ()
+
+
+async def test_kill_is_not_ok_when_ninjatrader_cannot_flatten(
+    hub, conn, armed, fake, client, monkeypatch
+):
+    fake.rejects = ["no connection to the broker"]
+    assert await hub.kill() == {"ok": False, "error": "no connection to the broker"}
+    arming.insert_armed(conn, armed)
+
+    async def down(client_id):
+        raise httpx.ConnectError("add-on unreachable")
+
+    monkeypatch.setattr(client, "flatten_all", down)
+    result = await hub.kill()
+    assert result["ok"] is False and "unreachable" in result["error"]

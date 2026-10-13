@@ -18,7 +18,7 @@ The full v1 spec is [SPEC.md](SPEC.md).
 
 - **Backend and CLI:** Python 3.12, `uv`, FastAPI, Typer, Polars + Parquet.
 - **UI:** Vite, React, TypeScript, TanStack Router + Query, Tailwind, shadcn/ui.
-- **Market data:** London Strategic Edge (LSE) for history. LSE is also the intended live source, pending data gate item 3 (real-time futures access).
+- **Market data:** London Strategic Edge (LSE) for history. LSE is also the intended live source: data gate item 3 (real-time futures) passed on 2026-10-13; live use waits on item 4 (live bars match history).
 - **Execution:** a C# NinjaScript add-on in NinjaTrader 8 (Windows), over local HTTP + WebSocket.
 
 ## Run

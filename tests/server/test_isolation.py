@@ -186,3 +186,48 @@ def test_as_user_takes_env_and_ids_from_passwd(monkeypatch):
         "SHELL": "/bin/zsh",
     }
     assert kwargs == {"user": 1000, "group": 1001, "extra_groups": []}
+
+
+def test_nested_git_walks_only_the_read_write_dirs(tmp_path):
+    (tmp_path / ".git" / "sub" / ".git").mkdir(parents=True)  # read-only in the image
+    (tmp_path / "web" / ".git").mkdir(parents=True)  # read-only in the image
+    (tmp_path / "strategies").mkdir()
+    (tmp_path / "strategies" / ".git").write_text("gitdir: ../data/x\n")  # a gitfile
+    (tmp_path / "rules" / "a" / ".git" / "inner" / ".git").mkdir(parents=True)  # not descended
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "x").symlink_to(tmp_path / "web")  # never followed
+    assert isolation.nested_git(tmp_path) == ["rules/a/.git", "strategies/.git"]
+    (tmp_path / "data" / ".git").symlink_to(tmp_path / "strategies")  # reported, not followed
+    assert isolation.nested_git(tmp_path) == ["data/.git", "rules/a/.git", "strategies/.git"]
+    assert isolation.nested_git(tmp_path, ("web",)) == ["web/.git"]
+    assert isolation.nested_git(tmp_path, ("missing",)) == []
+
+
+def test_nested_git_matches_any_case(tmp_path):
+    # a case-insensitive host (macOS) git uses strategies/.GIT as strategies/.git
+    (tmp_path / "strategies" / ".GIT").mkdir(parents=True)
+    (tmp_path / "strategies" / ".GIT" / "x" / ".git").mkdir(parents=True)  # not descended
+    (tmp_path / "rules" / "a").mkdir(parents=True)
+    (tmp_path / "rules" / "a" / ".Git").write_text("gitdir: ../../data/x\n")
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / ".gitignore").write_text("x\n")  # not a .git
+    assert isolation.nested_git(tmp_path) == ["rules/a/.Git", "strategies/.GIT"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_nested_git_reports_an_unreadable_dir(tmp_path):
+    (tmp_path / "data" / "locked" / ".git").mkdir(parents=True)
+    (tmp_path / "data" / "locked").chmod(0)
+    try:
+        assert isolation.nested_git(tmp_path, ("data",)) == ["data/locked (unreadable)"]
+    finally:
+        (tmp_path / "data" / "locked").chmod(0o755)
+
+
+def test_nested_git_only_in_the_image(tmp_path, monkeypatch):
+    (tmp_path / "data" / "x" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(isolation, "APP_ROOT", tmp_path)
+    monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
+    assert isolation.nested_git_in_image() == []
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    assert isolation.nested_git_in_image() == ["data/x/.git"]

@@ -242,6 +242,8 @@ class LiveHub:
         if _hash(s.setup.armed.strategy_path) != s.setup.armed.strategy_hash:
             s, out = core.halt(s, "strategy file changed since arming; re-arm")
         s, more = core.on_bar(s, bar)
+        if not core.runs_step(bar):  # roll window: on_bar journalled the bar
+            return s, out + more
         s, last = await self._step(account, s)
         return s, out + more + last
 

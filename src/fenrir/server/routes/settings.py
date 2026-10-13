@@ -1,5 +1,6 @@
 """Settings API (contracts: Plan 24): the secrets file and the per-account choices."""
 
+import asyncio
 import os
 import tempfile
 from collections.abc import Mapping
@@ -11,9 +12,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
-from fenrir.files import read_regular
 from fenrir.rules.loader import list_accounts
-from fenrir.server.isolation import APP_ROOT
+from fenrir.server.isolation import nested_git_in_image
 from fenrir.settings import (
     env_file_path,
     mask_secret,
@@ -35,8 +35,6 @@ ENV_KEYS = {
 }
 SECRETS = ("lse_api_key", "nt_token")
 MASK = "••••"
-REPO_ENV = APP_ROOT / ".env"  # the terminal can write it, so the image never reads it as settings
-REPO_ENV_MAX = 1 << 20
 
 
 class SettingsUpdate(BaseModel):
@@ -49,15 +47,11 @@ class SettingsUpdate(BaseModel):
     stale_seconds: int = Field(180, gt=0)
 
 
-def view(env: Mapping[str, str], repo_env_secrets: bool) -> dict:
+def view(env: Mapping[str, str]) -> dict:
     """The page's settings from the secrets file's pairs, secrets masked; ValueError if bad."""
     s = parse_settings(env)
     shown = {f: getattr(s, f) for f in ENV_KEYS}
-    return {
-        **shown,
-        **{f: mask_secret(shown[f]) for f in SECRETS},
-        "repo_env_secrets": repo_env_secrets,
-    }
+    return {**shown, **{f: mask_secret(shown[f]) for f in SECRETS}}
 
 
 def env_updates(update: Mapping[str, object], env: Mapping[str, str]) -> tuple[dict, list[dict]]:
@@ -72,10 +66,6 @@ def env_updates(update: Mapping[str, object], env: Mapping[str, str]) -> tuple[d
                 continue
         out[ENV_KEYS[field]] = str(value)
     return out, errors
-
-
-def has_secrets(env: Mapping[str, str]) -> bool:
-    return any(env.get(ENV_KEYS[f]) for f in SECRETS)
 
 
 def _invalid(detail: str, errors: list[dict]) -> JSONResponse:
@@ -121,31 +111,17 @@ def _read_env(path: Path | None) -> str:
         return ""
 
 
-def _repo_env() -> dict[str, str]:
-    if os.environ.get("FENRIR_BIND_ALL") != "1":
-        return {}  # natively the repo .env is the secrets file
+def _settings_view(text: str, nested: list[str]) -> dict:
     try:
-        # the terminal owns this file: anything odd (symlink, FIFO, socket, huge) = no secrets
-        text = read_regular(REPO_ENV, REPO_ENV_MAX).decode("utf-8", errors="replace")
-    except (OSError, ValueError):
-        return {}
-    return parse_env_text(text)
-
-
-def _repo_env_secrets() -> bool:
-    return has_secrets(_repo_env())
-
-
-def _settings_view(text: str) -> dict:
-    try:
-        return view(parse_env_text(text), _repo_env_secrets())
+        shown = view(parse_env_text(text))
     except ValueError as e:  # a bad value typed into the file by hand: name it
         raise HTTPException(status_code=500, detail=f"{_env_file()}: {e}") from e
+    return {**shown, "nested_git": nested}
 
 
 @router.get("")
 def get_settings() -> dict:
-    return _settings_view(_read_env(_env_file()))
+    return _settings_view(_read_env(_env_file()), nested_git_in_image())  # in the threadpool
 
 
 @router.put("")
@@ -155,28 +131,11 @@ async def put_settings(request: Request):
         return _invalid(
             "Settings must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
-    return _save(data)
+    # the walk off the event loop, before _save's no-await section
+    return _save(data, await asyncio.to_thread(nested_git_in_image))
 
 
-@router.post("/import-repo-secrets")
-async def import_repo_secrets():
-    # async: on the event loop like PUT, so two saves never interleave. The repo .env is
-    # terminal-written: its secrets go through the same checks as PUT
-    repo, have = _repo_env(), parse_env_text(_read_env(_env_file()))
-    # only into empty keys: never silently replace a secret already in the secrets file
-    found = {f: repo[k] for f in SECRETS if repo.get(k := ENV_KEYS[f]) and not have.get(k)}
-    if not found:
-        detail = (
-            "the repo .env secrets are already set in the secrets file"
-            if has_secrets(repo)
-            else "the repo .env holds no secrets to import"
-        )
-        raise HTTPException(status_code=409, detail=detail)
-    saved = _save(found)
-    return {**saved, "imported": list(found)} if isinstance(saved, dict) else saved
-
-
-def _save(data: dict):
+def _save(data: dict, nested: list[str]):
     try:
         update = SettingsUpdate.model_validate(data).model_dump(exclude_unset=True)
     except ValidationError as e:
@@ -194,7 +153,7 @@ def _save(data: dict):
             text = update_env_text(text, updates)
         except ValueError as e:  # a value with a line break
             return _invalid("The settings do not validate.", [{"loc": [], "msg": str(e)}])
-    response = _settings_view(text)  # built first: a 500 here must not follow a write
+    response = _settings_view(text, nested)  # built first: a 500 here must not follow a write
     if updates:
         _write(path, text.encode("utf-8"), 0o600)
     return response

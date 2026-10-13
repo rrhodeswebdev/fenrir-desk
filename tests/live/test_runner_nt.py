@@ -512,6 +512,46 @@ def test_a_zero_balance_while_running_shows_a_condition_and_alerts_once_per_run(
     assert kinds(effects) == ["alert"]  # a new run alerts again
 
 
+def test_a_zero_balance_alerts_once_per_run_across_the_day_roll():
+    """#220 review (C): the day roll keeps the run's alert flag, so a zero on a later day of the
+    same run shows the condition again without a second alert."""
+    s = running(sim(trailing="intraday"), account(50_400.0))
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert kinds(effects) == ["alert"]
+    s, _ = core.on_account(s, account(50_400.0), T.ts)
+    s, _ = core.on_bar(s, at("09:30", D2))
+    assert s.acct.day == D2 and s.halted is None
+    s, effects = core.on_account(s, account(0.0), at("09:31", D2).ts)
+    assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
+
+
+def test_a_lost_link_clears_the_figures_condition():
+    """#220 review (B): a lost link drops NinjaTrader's figures as stale, and its zero with them,
+    so the unreconciled pause alone shows. Once relinked, a zero shows the condition again,
+    without a second alert in the run."""
+    s = running(sim(), account(50_400.0))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    status = core.account_status(s)
+    assert status["conditions"] == [] and status["halt_reason"] == core.LINK_LOST
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
+    assert core.account_status(s)["nt_balance"] is None  # no last figures: only the app's
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")  # still unreconciled: the same outage
+    assert core.conditions(s) == []
+
+
+def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():
+    """#220 review: a balance at or below 0 at the session close is no close. The last figures
+    above 0 may be hours old, so the roll raises nothing from them and halts with "confirm
+    balances", as with no figures at all."""
+    s = running(sim(), account(50_400.0))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted == core.NO_CLOSE and peaks(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (0.0, -2000.0)
+
+
 # #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's
 # own figures (P&L the app never saw) halts with "confirm balances", never a breach
 

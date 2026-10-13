@@ -6,7 +6,7 @@ import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
 export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach' | 'warming'
-/** `figures` (#220): NinjaTrader's balance is at or below 0, so its figures are not used; it holds nothing back. */
+/** `figures` (#220): NinjaTrader's balance is at or below 0, so it is ignored until one above 0; it holds nothing back. */
 export type ConditionKind = HaltKind | 'figures'
 /** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …).
  * `warming` (#79) is no halt: the account waits for today's bars or the bar store, with `halted` false.

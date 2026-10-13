@@ -71,7 +71,8 @@ CONFIRM_GAP = GAP + (
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 NO_BALANCE = (
     "NinjaTrader reports a balance at or below 0, which is not a figure (its account data may not"
-    " have loaded): ignored, its last figures stand until one above 0"
+    " have loaded): ignored until one above 0; the app's own figures and NinjaTrader's last ones"
+    " above 0, if any, still apply"
 )
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -470,8 +471,8 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
 
 
 def _no_balance(s: RunnerState) -> Step:
-    """A balance at or below 0 (#220): the last figures stand, shown as a condition until a
-    balance above 0, with one alert per run however often it comes back."""
+    """A balance at or below 0 (#220): NinjaTrader's last figures above 0, if any, stand, shown
+    as a condition until a balance above 0, with one alert per run however often it comes back."""
     out = () if s.no_balance_alerted else (Log("alert", {"message": NO_BALANCE}),)
     return replace(s, no_balance=NO_BALANCE, no_balance_alerted=True), out
 
@@ -492,13 +493,14 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 def on_disconnect(s: RunnerState, error: str) -> Step:
     """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
     one "alert" per outage, and NinjaTrader's figures are dropped as stale until its next account
-    message. Positions keep their broker-side stop and target (the add-on's
-    `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs ignore it."""
+    message, a zero balance's `figures` condition with them (#220). Positions keep their
+    broker-side stop and target (the add-on's `flatten_on_disconnect_seconds` may flatten them:
+    DEC-5). Dry runs ignore it."""
     if s.setup.armed.mode == "dry":
         return s, ()
     if s.unreconciled == LINK_LOST:  # still the same outage: no second alert, figures dropped
-        return replace(s, nt=None), ()
-    return replace(s, unreconciled=LINK_LOST, nt=None), (
+        return replace(s, nt=None, no_balance=None), ()
+    return replace(s, unreconciled=LINK_LOST, nt=None, no_balance=None), (
         Log("alert", {"message": f"{LINK_LOST} ({error})"}),
     )
 
@@ -1061,7 +1063,9 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     elif s.setup.armed.mode != "dry" and (
         phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
     ):
-        if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
+        # NinjaTrader's balance at the close (DEC-4a); a balance at or below 0 then is no close
+        # (#220): its last figures above 0 may be hours old
+        if s.nt and not s.no_balance:
             raised = _raised(s.setup, acct, s.nt.balance)
             equity = raised.balance + raised.open_pnl
             base = s.setup.start.phase_start
@@ -1080,7 +1084,7 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
             else:
                 acct = raised
             out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
-        elif s.setup.start:  # none yet, or lost with the link: this close is never taken
+        elif s.setup.start:  # none yet, lost with the link, or 0: this close is never taken
             s, more = halt(s, NO_CLOSE)
             out += more
     acct = replace(acct, day=day)

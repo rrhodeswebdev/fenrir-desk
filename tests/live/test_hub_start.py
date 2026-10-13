@@ -135,6 +135,7 @@ async def test_without_an_account_message_it_waits_and_sends_nothing(hub, conn, 
     assert [acc[k] for k in ("balance", "nt_balance", "limits", "position", "session")] == [
         None
     ] * 5
+    assert acc["conditions"] == [{"kind": None, "reason": acc["halt_reason"]}]  # #212
 
 
 async def test_the_first_account_message_starts_it_from_the_pins_and_ninjatrader(
@@ -287,6 +288,7 @@ async def test_a_waiting_row_the_kill_could_not_disarm_never_loads_its_strategy(
     assert (await hub.kill())["ok"] is False
     [acc] = hub.status()["accounts"]
     assert acc["halt_reason"].startswith("kill switch: disarm failed for Sim101: ")  # not "waiting"
+    assert acc["conditions"] == [{"kind": None, "reason": acc["halt_reason"]}]
     await hub.handle_stream(account(50_300.0))
     assert hub.states["Sim101"].halted and hub.children == {}
     await hub.tick(T0 + timedelta(seconds=5))

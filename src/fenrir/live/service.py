@@ -166,7 +166,10 @@ def _waiting(a: Armed, killed: str | None) -> dict[str, Any]:
         f"waiting for NinjaTrader: no account message with a balance above 0 for {a.account}"
         " yet; nothing is sent until one arrives"
     )
-    return _cannot_start(a, "") | {"halt_reason": why}
+    return _cannot_start(a, "") | {
+        "halt_reason": why,
+        "conditions": [{"kind": None, "reason": why}],
+    }
 
 
 def _flattened(first: str | None, again: str | None) -> str | None:

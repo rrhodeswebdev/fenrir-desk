@@ -149,7 +149,7 @@ def test_reconcile_adopts_ninjatraders_position_and_flattens_it_without_a_stop()
     assert s.position == core.Position(2, 20001.0, None, None) and s.acct.position == 2
     assert "position" in s.mismatch and "missing_stop" in s.mismatch
     assert kinds(effects) == ["halt", "alert", "action", "send"]
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", now, "r", Flatten()))]
+    assert [e.action for e in sends(effects)] == [Flatten()]
     assert s.exiting == sends(effects)[0].client_id
     # protected in NinjaTrader: adopted with its worst stop, and not flattened
     oco = [
@@ -179,15 +179,15 @@ def test_held_qty_above_the_oco_qty_is_flagged_and_flattened():
     s, effects = core.on_reconcile(s, INSTRUMENT, [held(2, 20000.5)], oco, now)
     assert "missing_stop: stop orders cover 1 of 2" in s.mismatch
     assert s.position == core.Position(2, 20000.5, None, None)  # the runner's own average
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", now, "r", Flatten()))]
+    assert [e.action for e in sends(effects)] == [Flatten()]
 
 
 def test_a_clean_reconcile_takes_the_stop_and_target_from_ninjatrader():
     s = entered(sim(), at("09:30"))
     oco = [order("stop", "sell", 1, 19985.0), order("target", "sell", 1, 20020.0, oid="o2")]
-    s, effects = core.on_reconcile(s, INSTRUMENT, [held(1)], oco, at("09:31").ts)
+    s, effects = core.on_reconcile(s, INSTRUMENT, [held(1, 20000.25)], oco, at("09:31").ts)
     assert effects == () and s.mismatch is None  # the user moved the stop in NinjaTrader
-    assert s.position == core.Position(1, 20000.0, 19985.0, 20020.0)
+    assert s.position == core.Position(1, 20000.0, 19985.0, 20020.0)  # its own entry kept
 
 
 def test_reconcile_frees_an_entry_ninjatrader_rejected_after_accepting():
@@ -247,7 +247,7 @@ def test_replay_rebuilds_position_and_pnl_from_journalled_fills():
         return core.replay(started, rows)
 
     b = at("09:30")
-    s = run(decide_now(ready(sim(), b), [LONG]))
+    s = run(decide_now(ready(sim(), b), [Flatten(), LONG]))  # an unsent Flatten row too
     entry = fill(1, 20000.25, b.ts + timedelta(seconds=61), 2.0, s.working.client_id)
     s = run(core.on_fill(s, entry))
     s = run(core.on_bar(s, at("09:31")))
@@ -290,3 +290,116 @@ def test_a_drift_pause_survives_restart_and_so_does_its_resolve():
     s, effects = core.resolve(s, INSTRUMENT, [held(1, 20002.0)], oco, at("09:32").ts)
     journal += effects
     assert s.drift is None and restart().drift is None  # replaying the fill does not raise it
+
+
+def restarted_after(setup, nt_balance, rows, now):
+    """`start` with NinjaTrader's balance at the restart (absolute $), then `replay`."""
+    begin = replace(setup.start, balance=nt_balance)
+    s = core.start(replace(setup, start=begin), now, [p for k, p in rows if k == "halt"])[0]
+    return core.replay(s, rows)
+
+
+def made_200():
+    """A sim day that made +$200 (entry 20000, exit 20010), and its journal rows."""
+    b, rows = at("09:30"), []
+    s, effects = decide_now(ready(sim(), b), [LONG])
+    rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    for f in (
+        fill(1, 20000.0, b.ts + timedelta(seconds=61), cid=s.working.client_id),
+        fill(-1, 20010.0, at("09:32").ts),
+    ):
+        s, effects = core.on_fill(s, f)
+        rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    return s, rows
+
+
+def test_replay_without_day_start_keeps_ninjatraders_balance():
+    s, rows = made_200()
+    assert s.acct.balance == pytest.approx(200.0)
+    setup = replace(sim(), day_start=None)  # its balance now already holds the day's fills
+    r = restarted_after(setup, 50_200.0, rows, at("09:40").ts)
+    assert r.acct.balance == pytest.approx(200.0)  # not 400: booked once
+    assert (r.position, r.fills, r.opened) == (s.position, s.fills, s.opened)
+    assert r.acct.traded_today is False  # as start had it
+
+
+def test_replay_never_loosens_ninjatraders_balance():
+    b, rows = at("09:30"), []
+    s, effects = decide_now(ready(sim(), b), [LONG])
+    rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    s, effects = core.on_fill(
+        s, fill(1, 20000.0, b.ts + timedelta(seconds=61), cid=s.working.client_id)
+    )
+    rows += [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    # down 10:00-10:05: the stop filled at 19989 (-$220) and was never journalled
+    r = restarted_after(sim(), 50_000.0 - 220.0, rows, at("10:05").ts)
+    assert r.acct.balance == pytest.approx(-220.0) and r.acct.traded_today
+    r, _ = core.on_reconcile(r, INSTRUMENT, (), (), at("10:05").ts)
+    assert r.acct.balance == pytest.approx(-220.0)
+    # a whole trade missed: still a traded day
+    r = restarted_after(sim(), 50_000.0 - 220.0, [], at("10:05").ts)
+    assert r.acct.balance == pytest.approx(-220.0) and r.acct.traded_today
+    # a missed profit stays unbooked; the rules' commission keeps the app's own stricter
+    _, rows = made_200()
+    r = restarted_after(sim(), 50_300.0, rows, at("09:40").ts)
+    assert r.acct.balance == pytest.approx(200.0)
+
+
+def test_a_mismatched_reconcile_still_ends_the_outage():
+    s = ready(sim(), at("09:30"))
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    stray = order("other", "buy", 1, 19900.0, cid="", oid="manual")
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), [stray], at("09:31").ts)
+    assert s.unreconciled is None and s.mismatch
+    s, effects = core.on_disconnect(s, "no heartbeat for 6 s")  # the next outage alerts
+    assert kinds(effects) == ["alert"]
+
+
+def test_a_flat_by_breach_after_a_mismatched_reconcile_is_a_breach():
+    s = entered(sim(), at("16:30"))
+    oco = [order("stop", "sell", 1, 19990.0), order("target", "sell", 1, 20020.0, oid="o2")]
+    stray = replace(order("other", "buy", 1, 4000.0, oid="es"), instrument="ES 12-25")
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s, _ = core.on_reconcile(s, INSTRUMENT, [held(1)], [*oco, stray], at("16:31").ts)
+    assert s.mismatch and s.unreconciled is None  # NinjaTrader just reported the long
+    s, _ = core.on_bar(s, at("16:45"))
+    assert s.halt_kind == "breach" and "flat_by" in s.halted
+
+
+@pytest.mark.parametrize(
+    "stop",
+    [
+        order("stop", "buy", 1, 19990.0),  # adds to the long: no protection
+        replace(order("stop", "sell", 1, 19990.0), account="Sim102"),  # another account's
+        replace(order("stop", "sell", 1, 19990.0), qty=0),  # nothing left
+    ],
+)
+def test_only_a_closing_stop_on_this_account_protects(stop):
+    s = ready(sim(), at("09:30"))
+    target = order("target", "sell", 1, 20020.0, oid="o2")
+    s, effects = core.on_reconcile(s, INSTRUMENT, [held(1)], [stop, target], at("09:31").ts)
+    assert s.position.stop is None and [e.action for e in sends(effects)] == [Flatten()]
+
+
+def test_a_negative_qty_stop_never_counts_toward_cover():
+    s = ready(sim(), at("09:30"))
+    stops = [order("stop", "sell", 2, 19990.0), order("stop", "sell", -1, 19995.0, oid="o3")]
+    s, effects = core.on_reconcile(s, INSTRUMENT, [held(1)], stops, at("09:31").ts)
+    assert s.position.stop is None and [e.action for e in sends(effects)] == [Flatten()]
+
+
+def test_only_an_entry_order_keeps_the_working_entry():
+    s, _ = decide_now(ready(sim(), at("09:30")), [LONG])
+    stop = order("stop", "sell", 1, 19990.0, cid=s.working.client_id)  # not the entry
+    s, _ = core.on_reconcile(s, INSTRUMENT, (), [stop], at("09:31").ts)
+    assert s.working is None and "stray_orders" in s.mismatch
+
+
+def test_each_reconcile_flatten_has_its_own_id():
+    s = ready(sim(), at("09:30"))
+    t = at("09:31").ts
+    ids = [
+        sends(core.on_reconcile(s, INSTRUMENT, [held(1)], (), t + timedelta(seconds=sec))[1])[0]
+        for sec in (5, 5, 20)
+    ]
+    assert ids[0] == ids[1] and ids[0].client_id != ids[2].client_id  # a flap in one minute

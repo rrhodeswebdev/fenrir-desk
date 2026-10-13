@@ -398,8 +398,8 @@ def on_reconcile(
 
     NinjaTrader is the source of truth: the runner takes its position on the instrument, with
     the stop and target that cover it, keeps its working entry only while NinjaTrader still works
-    it, and forgets a Flatten in flight (`/flatten` never over-closes). A match lifts the
-    `unreconciled` pause; a mismatch pauses entries until the user resolves it, and a position
+    it, and forgets a Flatten in flight (`/flatten` never over-closes). Every reconcile lifts
+    the `unreconciled` pause; a mismatch pauses entries until the user resolves it, and a position
     with no covering stop is flattened at once as well."""
     a, w = s.setup.armed, s.working
     if a.mode == "dry":
@@ -412,13 +412,16 @@ def on_reconcile(
     qty = sum(p.qty for p in mine)
     avg = qty and sum(p.qty * p.avg_price for p in mine) / qty
     on = [o for o in rest if o.instrument == instrument]
-    s = _adopt(replace(s, working=w if entry else None, exiting=None), qty, avg, on, now)
+    # NinjaTrader just reported the book: the position is verified and an outage is over
+    s = replace(s, working=w if entry else None, exiting=None, unreconciled=None)
+    s = _adopt(s, qty, avg, on, now)
     if not found:
-        return replace(s, unreconciled=None), ()
+        return s, ()
     detail = "; ".join(f"{m.kind}: {m.detail}" for m in found)
     s, out = _mismatched(s, f"NinjaTrader mismatch: {detail}; fix it there, then resolve")
     if s.position.qty and s.position.stop is None:
-        s, more = _stopless(s, now, "r")
+        # each reconcile is a fresh read of NinjaTrader: its own id, even twice in one minute
+        s, more = _stopless(s, now, f"r{now.timestamp()}")
         out += more
     return s, out
 
@@ -445,9 +448,10 @@ def resolve(
 def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> RunnerState:
     """After a restart, `s` from `start`: rebuild today's book from today's journal rows since
     `armed_at` as (kind, payload), oldest first. Sent Brackets and Flattens ("action") become the
-    working entry and the Flatten in flight, and the "fill" rows book position and P&L through
-    `on_fill` (from today's opening balance, when `day_start` gives it, since NinjaTrader's
-    balance now already holds them). No effects: every row was journalled when it happened.
+    working entry and the Flatten in flight, and the "fill" rows rebuild the position through
+    `on_fill`. The balance is the lower of today's opening balance plus the replayed fills (with
+    `day_start`) and NinjaTrader's at the restart; without `day_start` it stays NinjaTrader's,
+    which already holds today's fills. No effects: every row was journalled when it happened.
     The drift pause stays as `start` restored it from the "halt" rows (a resolve may have lifted
     it), and sim and live stay `unreconciled` until `on_reconcile`."""
     r = s
@@ -464,8 +468,17 @@ def replay(s: RunnerState, rows: Sequence[tuple[str, Mapping[str, Any]]]) -> Run
             r = replace(r, exiting=p["client_id"])
         elif kind == "fill":
             r, _ = on_fill(r, p)
+    # NinjaTrader's balance at the restart holds every fill, also those made while the runner was
+    # down and never journalled: never loosen it. Without day_start it already holds today's.
+    booked, a = r.acct.balance, s.acct
+    if s.setup.day_start is None:
+        acct = replace(r.acct, balance=a.balance, traded_today=a.traded_today)
+    else:
+        traded = r.acct.traded_today or a.traded_today
+        acct = replace(r.acct, balance=min(booked, a.balance), traded_today=traded)
+    shift = acct.balance - booked  # the open trade's P&L counts from the balance kept
     # an exit's `held` marks its own bar only, which is gone
-    return replace(r, drift=s.drift, held=None)
+    return replace(r, acct=acct, opened_balance=r.opened_balance + shift, drift=s.drift, held=None)
 
 
 def client_id(account: str, ts: datetime, suffix: str, action: Action) -> str:

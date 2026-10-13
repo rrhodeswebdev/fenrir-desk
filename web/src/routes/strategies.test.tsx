@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider, createMemoryHistory, createRouter } from '@tanstack/react-router'
 import { renderToStaticMarkup, renderToString } from 'react-dom/server'
@@ -11,6 +12,7 @@ import {
   type Strategy,
   type Summary,
   EMPTY_DRAFT,
+  REFUSALS,
   SummaryFacts,
   armBody,
   armErrorText,
@@ -115,17 +117,29 @@ describe('arming helpers', () => {
     expect(armErrorText(new ApiError(401, ''))).toBe(SESSION_EXPIRED)
   })
 
+  it('has words for every refusal code in the arming contract', () => {
+    const contract = readFileSync(new URL('../../../docs/contracts.md', import.meta.url), 'utf8')
+    const conflicts = contract.match(/409 \{error: ((?:"[a-z_]+"\|?)+)/)?.[1]?.match(/[a-z_]+/g) ?? []
+    const unavailable = contract.match(/502 \{error: "([a-z_]+)"\}/)?.[1]
+    expect(conflicts).toContain('no_backtest') // the contract line was found
+    // needs_confirmation opens the dialog instead
+    expect(Object.keys(REFUSALS).sort()).toEqual([...conflicts.filter((c) => c !== 'needs_confirmation'), unavailable].sort())
+  })
+
   it('shows armed_at to the minute in UTC', () => {
     expect(armedAt(armed.armed_at)).toBe('2026-10-13 14:05 UTC')
   })
 })
 
 describe('SummaryFacts', () => {
-  it('shows the tuning summary, dll_on, the hashes and the liquidation level', () => {
-    const html = renderToStaticMarkup(<SummaryFacts summary={summary} />)
-    for (const text of ['2019-01-02 to 2025-10-09', '1,700', '31.0%', '19.0%', '+$187.50', '+$90.00', '$48,500.00', 'On', 'aaaaaaaaaaaa', 'bbbbbbbbbbbb'])
+  it('shows the tuning summary, the balances with the liquidation level, dll_on and the hashes', () => {
+    const html = renderToStaticMarkup(<SummaryFacts summary={summary} start={50000} peak={50250} />)
+    for (const text of ['2019-01-02 to 2025-10-09', '1,700', '31.0%', '19.0%', '+$187.50', '+$90.00', '$50,000.00', '$50,250.00', '$48,500.00', 'On'])
       expect(html).toContain(text)
-    expect(html).toContain(`title="${summary.rules_hash}"`)
+    // the first 12 characters, the full hash one tap or key press away (not a title tooltip)
+    expect(html).toContain(`<details><summary class="cursor-pointer list-none">bbbbbbbbbbbb…</summary><span class="break-all select-all">${summary.rules_hash}</span></details>`)
+    expect(html).toContain(`>${summary.strategy_hash}<`)
+    expect(html).not.toContain('title=')
     expect(html).toContain('<dd class="value">None</dd>')
     expect(html).not.toContain('text-ember')
   })

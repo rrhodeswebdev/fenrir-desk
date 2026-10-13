@@ -31,19 +31,28 @@ const summary = {
   liquidation_level: 48000,
 }
 
-/** Mocks every arming call; returns the arm POST bodies as they arrive. */
-async function mockApi(page: Page): Promise<Record<string, unknown>[]> {
+type Summary = typeof summary
+const armedRow = (body: Record<string, unknown>, s: Summary) => ({ ...body, strategy_hash: s.strategy_hash, armed_at: '2026-10-13T14:05:09+00:00', dll_on: s.dll_on, rules_hash: s.rules_hash, instruments_hash: 'c'.repeat(64) })
+
+/** Mocks every arming call like the server: a live arm counts only when it confirms and echoes `current.summary`
+ * (a test can swap it, as the terminal could); a second arm of an account is already_armed. Returns the arm POST
+ * bodies as they arrive; `delayMs` holds each reply. */
+async function mockApi(page: Page, current = { summary }, delayMs = 0): Promise<Record<string, unknown>[]> {
   const arms: Record<string, unknown>[] = []
-  let armed: unknown[] = []
+  let armed: Record<string, unknown>[] = []
   await page.route('**/api/strategies', (route) => route.fulfill({ json: strategies }))
   await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
   await page.route('**/api/arming/accounts', (route) => route.fulfill({ json: accounts }))
-  await page.route('**/api/arming/arm', (route) => {
+  await page.route('**/api/arming/arm', async (route) => {
     const body = route.request().postDataJSON()
     arms.push(body)
-    if (!body.confirm) return route.fulfill({ status: 409, json: { error: 'needs_confirmation', summary } })
-    armed = [{ ...body, strategy_hash: summary.strategy_hash, armed_at: '2026-10-13T14:05:09+00:00', dll_on: true, rules_hash: summary.rules_hash, instruments_hash: 'c'.repeat(64) }]
-    return route.fulfill({ json: armed[0] })
+    if (delayMs) await new Promise((done) => setTimeout(done, delayMs))
+    const s = current.summary
+    if (armed.some((a) => a.account === body.account)) return route.fulfill({ status: 409, json: { error: 'already_armed', summary: null } })
+    const confirmed = body.confirm === true && body.strategy_hash === s.strategy_hash && body.rules_hash === s.rules_hash && body.dll_on === s.dll_on
+    if (body.mode === 'live' && !confirmed) return route.fulfill({ status: 409, json: { error: 'needs_confirmation', summary: s } })
+    armed = [...armed, armedRow(body, s)]
+    return route.fulfill({ json: armed.at(-1) })
   })
   return arms
 }
@@ -105,10 +114,50 @@ test('Cancel sends nothing', async ({ page }) => {
   await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toBeHidden()
+  // Escape closes it the same way
+  await page.getByRole('button', { name: 'Arm live' }).click()
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
   await page.waitForTimeout(500) // a stray confirm POST would land by now
-  expect(arms).toHaveLength(1)
+  expect(arms.map((a) => a.confirm)).toEqual([false, false])
   await expect(page.getByRole('status')).toHaveCount(0)
   await expect(page.getByRole('region', { name: 'Armed accounts' })).toContainText('Nothing armed.')
+})
+
+test('a stale confirm shows the new summary, sends nothing more on its own, and the next press echoes the new hash', async ({ page }) => {
+  const current = { summary }
+  const arms = await mockApi(page, current)
+  await armLive(page)
+  const dialog = page.getByRole('alertdialog', { name: 'Arm live' })
+  await expect(dialog).toBeVisible()
+  current.summary = { ...summary, strategy_hash: 'd'.repeat(64), p_pass_and_payout: 0.55 } // the terminal swapped the file
+  await dialog.getByRole('button', { name: 'Arm live' }).click()
+  await expect(dialog).toContainText('Changed since you looked')
+  await expect(dialog).toContainText('dddddddddddd')
+  await expect(dialog).toContainText('55.0%')
+  // the keyboard stays in the dialog, on the safe choice
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await page.waitForTimeout(500)
+  expect(arms).toHaveLength(2) // nothing re-sent on its own
+  await dialog.getByRole('button', { name: 'Arm live' }).click()
+  await expect(dialog).toBeHidden()
+  expect(arms[2]).toEqual({ ...arms[0], confirm: true, strategy_hash: 'd'.repeat(64), rules_hash: summary.rules_hash, dll_on: true })
+  await expect(page.getByRole('status')).toHaveText('Armed LFE0507: live.')
+})
+
+test('a double click on Arm live sends one confirm', async ({ page }) => {
+  const arms = await mockApi(page, { summary }, 100)
+  await armLive(page)
+  const dialog = page.getByRole('alertdialog', { name: 'Arm live' })
+  await dialog.getByRole('button', { name: 'Arm live' }).dblclick()
+  await expect(dialog).toBeHidden()
+  await page.waitForTimeout(300)
+  expect(arms.map((a) => a.confirm)).toEqual([false, true])
+  // the same account again: the server's already_armed shows in words under the form, no dialog
+  await page.getByRole('button', { name: 'Arm live' }).click()
+  await expect(page.getByRole('alert')).toHaveText('409: This account is already armed. Disarm it first.')
+  await expect(dialog).toBeHidden()
 })
 
 test('Disarm asks first, then posts the account', async ({ page }) => {
@@ -132,5 +181,23 @@ test('Disarm asks first, then posts the account', async ({ page }) => {
   await dialog.getByRole('button', { name: 'Disarm', exact: true }).click()
   await expect(dialog).toBeHidden()
   expect(disarms).toEqual([{ account: 'LDA0042' }])
+  await expect(region).toContainText('Nothing armed.')
+})
+
+test('a disarm the server reports as not armed says so, and closing refreshes the table', async ({ page }) => {
+  await mockApi(page)
+  let armed = [{ account: 'LDA0042', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode: 'dry', phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: null, peak_balance: null }]
+  await page.route('**/api/arming', (route) => route.fulfill({ json: armed }))
+  await page.route('**/api/arming/disarm', (route) => {
+    armed = [] // the kill switch got there first
+    return route.fulfill({ json: { ok: false } })
+  })
+  await page.goto('/strategies')
+  const region = page.getByRole('region', { name: 'Armed accounts' })
+  await region.getByRole('button', { name: 'Disarm LDA0042' }).click()
+  const dialog = page.getByRole('alertdialog', { name: 'Disarm LDA0042' })
+  await dialog.getByRole('button', { name: 'Disarm', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText('LDA0042 was not armed: nothing was disarmed.')
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(region).toContainText('Nothing armed.')
 })

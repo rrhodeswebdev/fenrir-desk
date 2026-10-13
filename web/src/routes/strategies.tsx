@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, createRoute } from '@tanstack/react-router'
-import { useId, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { ApiError, apiFetch } from '@/api'
 import { money, num, paramText, pct } from '@/backtests/format'
 import { Page } from '@/components/page'
@@ -173,8 +173,20 @@ const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'U
 const short = (hash: string) => hash.slice(0, 12)
 const fileName = (path: string) => path.split('/').pop() ?? path
 
-/** The confirmation's figures: the tuning period's summary, what arming pins, the liquidation level and the hold-out gap. */
-export function SummaryFacts({ summary: s }: { summary: Summary }) {
+/** A hash's first 12 characters; the full hash opens below them (keyboard and touch, and copyable). */
+function Hash({ hash }: { hash: string }) {
+  return (
+    <details>
+      <summary className="cursor-pointer list-none">{`${short(hash)}…`}</summary>
+      <span className="break-all select-all">{hash}</span>
+    </details>
+  )
+}
+
+const balanceText = (b: Balance | undefined) => (typeof b === 'number' ? dollars.format(b) : '—')
+
+/** The confirmation's figures: the tuning period's summary, the balances sent with the liquidation level they give, what arming pins and the hold-out gap. */
+export function SummaryFacts({ summary: s, start, peak }: { summary: Summary; start?: Balance; peak?: Balance }) {
   const facts: [string, ReactNode][] = [
     ['Tuning period', `${s.start} to ${s.end}`],
     ['Attempts', num(s.attempts)],
@@ -182,15 +194,17 @@ export function SummaryFacts({ summary: s }: { summary: Summary }) {
     ['P(pass and payout)', pct(s.p_pass_and_payout)],
     ['Gross per attempt', money(s.expected_gross_per_attempt)],
     ['Net per attempt', money(s.expected_net_per_attempt)],
+    ['Start balance', balanceText(start)],
+    ['Peak balance', balanceText(peak)],
     ['Liquidation level', dollars.format(s.liquidation_level)],
     ['Daily loss limit', s.dll_on ? 'On' : 'Off'],
-    ['Rules hash', <span title={s.rules_hash}>{short(s.rules_hash)}</span>],
-    ['Strategy hash', <span title={s.strategy_hash}>{short(s.strategy_hash)}</span>],
+    ['Rules hash', <Hash hash={s.rules_hash} />],
+    ['Strategy hash', <Hash hash={s.strategy_hash} />],
   ]
   return (
     <dl className="grid grid-cols-2 gap-x-6 gap-y-3 max-md:grid-cols-1">
       {facts.map(([label, value]) => (
-        <div key={label} className="grid gap-1">
+        <div key={label} className="grid content-start gap-1">
           <dt className="label">{label}</dt>
           <dd className="value">{value}</dd>
         </div>
@@ -248,11 +262,24 @@ const ntName = (a: NtAccount) => `${a.name === a.id ? a.id : `${a.name} (${a.id}
 
 type Pending = { body: ArmBody; summary: Summary; stale: boolean }
 
+/** Sends a mutation unless the last one sent through it is still in flight: `disabled` alone lets a fast double
+ * click through, as it only changes on the next render. */
+function useSingleFlight() {
+  const busy = useRef(false)
+  return <T,>(m: { mutate: (v: T, o: { onSettled: () => void }) => void }, v: T) => {
+    if (busy.current) return
+    busy.current = true
+    m.mutate(v, { onSettled: () => (busy.current = false) })
+  }
+}
+
 function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAccount[]; error: unknown } }) {
   const qc = useQueryClient()
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT)
   const [pending, setPending] = useState<Pending | null>(null)
   const [armed, setArmed] = useState<Armed | null>(null)
+  const send = useSingleFlight()
+  const cancelRef = useRef<HTMLButtonElement>(null)
   const set = (edits: Partial<Draft>) => setDraft((d) => ({ ...d, ...edits }))
   const post = (body: ArmBody) => apiFetch<Armed>('/api/arming/arm', { method: 'POST', body: JSON.stringify(body) })
   const done = (a: Armed) => {
@@ -265,13 +292,17 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
     onSuccess: done,
     onError: (e, body) => {
       const summary = needsConfirmation(e)
-      if (summary) setPending({ body, summary, stale: false })
+      if (summary) {
+        confirm.reset() // a new dialog never shows the last one's error
+        setPending({ body, summary, stale: false })
+      }
     },
   })
   const confirm = useMutation({
     mutationFn: post,
     onSuccess: (a) => {
       setPending(null)
+      arm.reset()
       done(a)
     },
     // the strategy, rules or dll_on changed since the summary: show what is true now
@@ -294,13 +325,19 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
   const shown = (e: unknown) => (e != null && needsConfirmation(e) === null ? armErrorText(e) : null)
   const armError = shown(arm.error)
   const confirmError = shown(confirm.error)
+  const ntHelp = ntError && (nt.data ? `${ntError} The list is from the last read that worked.` : `${ntError} Type the account id to arm a dry run.`)
+
+  // After a stale summary or a refused confirm, focus Cancel (as on open) so the keyboard stays in the dialog.
+  useEffect(() => {
+    if (!confirm.isPending && (pending?.stale || confirmError)) cancelRef.current?.focus()
+  }, [confirm.isPending, pending, confirmError])
 
   return (
     <>
       <form
         onSubmit={(e) => {
           e.preventDefault()
-          if (ready) arm.mutate(armBody(draft, target))
+          if (ready) send(arm, armBody(draft, target))
         }}
       >
         <Field
@@ -314,7 +351,7 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
         />
         <Field
           label="NinjaTrader account"
-          help={ntError ? `${ntError} Type the account id to arm a dry run.` : undefined}
+          help={ntHelp || undefined}
           control={(p) =>
             nt.data ? (
               <Choice
@@ -381,17 +418,19 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
                   Changed since you looked: the strategy, the rules or the daily loss limit setting is different now. Check the figures again.
                 </p>
               )}
-              <SummaryFacts summary={pending.summary} />
+              <SummaryFacts summary={pending.summary} start={pending.body.start_balance} peak={pending.body.peak_balance} />
               {confirmError && (
                 <p role="alert" className="text-red">
                   {confirmError}
                 </p>
               )}
               <AlertDialogFooter>
-                <Button variant="caution" disabled={confirm.isPending} onClick={() => confirm.mutate(confirmBody(pending.body, pending.summary))}>
+                <Button variant="caution" disabled={confirm.isPending} onClick={() => send(confirm, confirmBody(pending.body, pending.summary))}>
                   Arm live
                 </Button>
-                <AlertDialogCancel disabled={confirm.isPending}>Cancel</AlertDialogCancel>
+                <AlertDialogCancel ref={cancelRef} disabled={confirm.isPending}>
+                  Cancel
+                </AlertDialogCancel>
               </AlertDialogFooter>
             </>
           )}
@@ -405,11 +444,15 @@ function ArmForm({ strategies, nt }: { strategies: Strategy[]; nt: { data?: NtAc
 function Disarm({ account }: { account: string }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
+  const send = useSingleFlight()
+  const refresh = () => void qc.invalidateQueries({ queryKey: ['arming'], exact: true })
   const disarm = useMutation({
     mutationFn: () => apiFetch<{ ok: boolean }>('/api/arming/disarm', { method: 'POST', body: JSON.stringify({ account }) }),
-    onSuccess: () => {
+    // ok: false (the kill switch or another tab disarmed it first) stays open to say so; closing refreshes
+    onSuccess: (r) => {
+      if (!r.ok) return
       setOpen(false)
-      void qc.invalidateQueries({ queryKey: ['arming'], exact: true })
+      refresh()
     },
   })
   return (
@@ -417,6 +460,7 @@ function Disarm({ account }: { account: string }) {
       open={open}
       onOpenChange={(o) => {
         if (disarm.isPending) return
+        if (!o && disarm.data?.ok === false) refresh()
         setOpen(o)
         disarm.reset()
       }}
@@ -431,13 +475,13 @@ function Disarm({ account }: { account: string }) {
           <AlertDialogTitle>Disarm {account}</AlertDialogTitle>
           <AlertDialogDescription>The runner stops trading this account within 5 seconds. An open position stays open with its broker-side stop and target.</AlertDialogDescription>
         </AlertDialogHeader>
-        {disarm.error != null && (
+        {(disarm.error != null || disarm.data?.ok === false) && (
           <p role="alert" className="text-red">
-            {errorText(disarm.error)}
+            {disarm.error != null ? errorText(disarm.error) : `${account} was not armed: nothing was disarmed.`}
           </p>
         )}
         <AlertDialogFooter>
-          <Button variant="destructive" disabled={disarm.isPending} onClick={() => disarm.mutate()}>
+          <Button variant="destructive" disabled={disarm.isPending} onClick={() => send(disarm, undefined)}>
             Disarm
           </Button>
           <AlertDialogCancel disabled={disarm.isPending}>Cancel</AlertDialogCancel>

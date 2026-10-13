@@ -215,6 +215,40 @@ def test_a_replay_after_a_reconnect_fills_the_gap_and_repeats_no_bar():
     ]
 
 
+def test_a_reconnect_mid_replay_counts_the_open_replayed_minute_once():
+    # review of #224: the SDK replays the same start again; the minute still open must restart
+    clock = [utc(14, 33)]
+
+    async def source():
+        for ts in (utc(14, 30, 5), utc(14, 31, 5), utc(14, 31, 30)):  # the link drops in 14:31
+            yield replayed(ts, 100.0)
+        for ts in (utc(14, 30, 5), utc(14, 31, 5), utc(14, 31, 30), utc(14, 32, 5)):
+            yield replayed(ts, 100.0)
+        yield Tick(utc(14, 33), 101.0, 1, "NQZ26")
+
+    assert [(b.ts, b.volume) for b in collect(source(), clock)] == [
+        (utc(14, 30), 1),
+        (utc(14, 31), 2),
+        (utc(14, 32), 1),
+    ]
+
+
+def test_a_reconnect_while_one_series_replays_counts_its_open_minute_once():
+    # ES's replayed minute is still open while NQ is live; the reconnect replays ES again
+    clock = [utc(14, 31, 10)]
+
+    async def source():
+        for ts in (utc(14, 30, 50), utc(14, 31, 5)):
+            yield replayed(ts, 6000.0, "ESZ26")  # ES: still replaying, 14:31 open
+        yield Tick(utc(14, 31, 10), 20000.0, 1, "NQZ26")  # NQ: live
+        for ts in (utc(14, 30, 50), utc(14, 31, 5), utc(14, 32, 1)):
+            yield replayed(ts, 6000.0, "ESZ26")  # the reconnect: ES again from the start
+
+    bars = collect(source(), clock)
+    es = [(b.ts, b.volume) for b in bars if b.contract == "ESZ26"]
+    assert es == [(utc(14, 30), 1), (utc(14, 31), 1)]
+
+
 # --- stream_ticks: the real SDK Tick through a fake client ---
 
 

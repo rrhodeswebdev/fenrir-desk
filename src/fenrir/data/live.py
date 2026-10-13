@@ -129,12 +129,15 @@ async def _bars_from(
     wall clock. When `ticks` ends, only bars already due are emitted, never a partial one.
 
     Replayed ticks (#79) build their own bars, each closed by the next minute's tick, never by
-    the wall clock, until the contract's first live tick takes over. A bar at or before the last
-    one emitted for its contract is never emitted again (a reconnect replays the day from the
-    same start). `on_live(contract)` is called on each live tick, before the bars it closes."""
+    the wall clock, until the contract's first live tick takes over. A replayed tick older than
+    the contract's last one starts its replay again (a reconnect): its open bar is dropped. A
+    bar at or before the last one emitted for its contract is never emitted again (a reconnect
+    replays the day from the same start). `on_live(contract)` is called on each live tick,
+    before the bars it closes."""
     state = empty_builder()
     replayed = empty_builder()  # never close_due: a replayed minute ends at a later tick
     last: dict[str, datetime] = {}  # the last bar emitted per contract
+    replay_at: dict[str, datetime] = {}  # the last replayed tick per contract
     dropped: Counter[str] = Counter()  # since the last warning: a clock off shows up here
     reported = now()
 
@@ -160,6 +163,12 @@ async def _bars_from(
                         yield bar
                     return
                 if tick.replay:
+                    c = tick.contract
+                    if tick.ts < replay_at.get(c, tick.ts):  # a reconnect: the replay began again
+                        replayed = replace(
+                            replayed, bars=tuple(b for b in replayed.bars if b.contract != c)
+                        )
+                    replay_at[c] = tick.ts
                     replayed, bars = feed(replayed, tick)
                 elif tick.ts > now() + MAX_AHEAD:
                     dropped["ahead of the clock"] += 1

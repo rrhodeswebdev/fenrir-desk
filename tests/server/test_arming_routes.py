@@ -446,6 +446,16 @@ def test_disarm_takes_flatten_only_as_a_strict_boolean(client, flatten):
     assert res.status_code == 422
 
 
+def test_a_misspelt_flatten_key_is_refused_not_dropped(client, settings, path):
+    """#230: an unknown key is a 422 and nothing is sent, never a plain disarm that ignored it."""
+    report(settings, path)
+    client.post("/api/arming/arm", json=body(path))
+    res = client.post("/api/arming/disarm", json={"account": "SIM1", "flaten": False})
+    assert res.status_code == 422
+    assert client.app.state.live.addon.flattened == []
+    assert [a["account"] for a in armed(client)] == ["SIM1"]
+
+
 def test_a_failed_disarm_journals_no_disarmed_row_and_keeps_the_row(client, settings, path):
     """The halt row and the delete are one transaction: both or neither."""
     report(settings, path)

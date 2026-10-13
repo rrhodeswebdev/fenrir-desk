@@ -244,7 +244,7 @@ test('an account the add-on no longer manages can be disarmed without flatten, o
   await expect(region).toContainText('Nothing armed.')
 })
 
-test('cancelling the second confirmation sends nothing more, and reopening asks from the start (#230)', async ({ page }) => {
+test('cancelling the second confirmation sends nothing more, and a new request or reopening asks from the start (#230)', async ({ page }) => {
   await mockApi(page)
   const disarms: unknown[] = []
   const armed = [{ account: 'Sim101', strategy_path: STRATEGY, strategy_hash: 'a'.repeat(64), rules_account: 'lucid-flex-50k', contract: 'MNQ', mode: 'sim', phase: 'evaluation', armed_at: '2026-10-13T13:30:00+00:00', dll_on: false, rules_hash: 'b'.repeat(64), instruments_hash: 'c'.repeat(64), start_balance: 50000, peak_balance: 50500 }]
@@ -258,14 +258,29 @@ test('cancelling the second confirmation sends nothing more, and reopening asks 
   const region = page.getByRole('region', { name: 'Armed accounts' })
   await region.getByRole('button', { name: 'Disarm Sim101' }).click()
   const dialog = page.getByRole('alertdialog', { name: 'Disarm Sim101' })
-  await dialog.getByRole('button', { name: 'Flatten and disarm', exact: true }).click()
-  await dialog.getByRole('checkbox').click()
+  const flattenAndDisarm = dialog.getByRole('button', { name: 'Flatten and disarm', exact: true })
+  const without = dialog.getByRole('button', { name: 'Disarm without flatten' })
+  const tick = dialog.getByRole('checkbox')
+  await flattenAndDisarm.click()
+  await tick.click()
+  await expect(without).toBeEnabled()
+  // a new request clears the tick: refused as unmanaged again, it asks again
+  await flattenAndDisarm.click()
+  await expect.poll(() => disarms.length).toBe(2)
+  await expect(tick).not.toBeChecked()
+  await expect(without).toBeDisabled()
+  await tick.click()
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toBeHidden()
   await region.getByRole('button', { name: 'Disarm Sim101' }).click()
-  await expect(dialog.getByRole('button', { name: 'Disarm without flatten' })).toHaveCount(0)
-  await expect(dialog.getByRole('checkbox')).toHaveCount(0)
-  expect(disarms).toEqual([{ account: 'Sim101' }])
+  await expect(without).toHaveCount(0)
+  await expect(tick).toHaveCount(0)
+  expect(disarms).toEqual([{ account: 'Sim101' }, { account: 'Sim101' }])
+  // refused again after reopening: the tick from before the cancel is gone
+  await flattenAndDisarm.click()
+  await expect(without).toBeDisabled()
+  await expect(tick).not.toBeChecked()
+  expect(disarms).toEqual([{ account: 'Sim101' }, { account: 'Sim101' }, { account: 'Sim101' }])
 })
 
 test('a disarm the server reports as not armed says so, and closing refreshes the table', async ({ page }) => {

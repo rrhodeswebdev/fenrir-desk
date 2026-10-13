@@ -510,16 +510,20 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
-        // A resize NinjaTrader refused leaves the stop smaller than what filled: close the difference.
+        // A resize NinjaTrader refused leaves the stop smaller than the position it guards: close the
+        // difference. Never more than the position actually held, so exits that partly filled (or
+        // an OCO NinjaTrader shrank after its target partly filled) are never closed twice.
         private void CheckStopSize(Working b, DateTime now)
         {
             if (b.Closing || b.StopOrder == null || now - b.ResizedAt < ResizeSettle) return;
             OrderState st = b.StopOrder.OrderState;
             if (st != OrderState.Accepted && st != OrderState.Working && st != OrderState.TriggerPending) return;
-            int covered = b.StopOrder.Quantity;
-            int expected = b.Protected - b.Closed;
-            if (covered >= expected) return;
-            CloseExactly(b, expected - covered, "stop " + b.ClientId + " covers " + covered + " of " + expected);
+            int held = Held(b.Account, b.Instrument);
+            if (b.Long ? held <= 0 : held >= 0) return;
+            int expected = b.Protected - b.Closed - b.StopOrder.Filled - b.TargetOrder.Filled;
+            int covered = b.StopOrder.Quantity - b.StopOrder.Filled;
+            int open = Math.Min(expected, Math.Abs(held)) - covered;
+            if (open > 0) CloseExactly(b, open, "stop " + b.ClientId + " covers " + covered + " of " + (covered + open));
         }
 
         // NinjaTrader's thread: never throw, never wait

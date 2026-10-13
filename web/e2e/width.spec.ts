@@ -1,6 +1,6 @@
 import { type Page, expect, test } from '@playwright/test'
 import type { Period, Report } from '../src/backtests/Report'
-import { account, status } from '../src/live/fixtures'
+import { account, deskJournal, status } from '../src/live/fixtures'
 
 // Set by global-setup.ts after it opened the launch link.
 test.use({ storageState: process.env.FENRIR_E2E_STATE })
@@ -52,6 +52,7 @@ const routes: [string, (page: Page) => Promise<void>][] = [
   [`/backtests/${KEY}`, (page) => expect(page.locator('canvas').first()).toBeVisible()],
   ['/strategies', (page) => expect(page.getByRole('cell', { name: 'e2e_bracket.py' })).toBeVisible()],
   ['/live', (page) => expect(page.getByText('Book · LFE 0911')).toBeVisible()],
+  ['/live/journal', (page) => expect(page.getByRole('main').getByRole('listitem').first()).toBeVisible()],
   ['/settings', (page) => expect(page.getByRole('button', { name: 'Save' })).toHaveCount(2)],
   ['/no-such-page', (page) => expect(page.getByRole('heading', { level: 1 })).toHaveText('Not found')],
 ]
@@ -64,6 +65,8 @@ for (const width of [340, 360, 390, 800, 1024, 1280]) {
     await page.route(`**/api/backtests/results/${KEY}`, (route) => route.fulfill({ json: report }))
     const live = status({ accounts: [account(), account({ account: 'LFE 0911', mode: 'sim', halted: true, halt_kind: 'reconcile', halt_reason: 'NT long 1, runner flat' })] })
     await page.route('**/api/live/status', (route) => route.fulfill({ json: live }))
+    const rows = Object.values(deskJournal()).flat()
+    await page.route('**/api/live/journal?*', (route) => route.fulfill({ json: rows }))
     for (const [path, ready] of routes) {
       await page.goto(path)
       await ready(page)

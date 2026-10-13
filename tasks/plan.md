@@ -45,7 +45,7 @@ Plans 01–03 and 05–08 are merged. Plan 09 is built on `feat/09-attempts-repo
 4. **Live limits.** Account starting state at arming; whether NinjaTrader balance/drawdown feeds "stricter of"; safety margin when DLL is off (no-op on every Flex account today); pin `dll_on` in `armed`; warm-up source for `Ctx.bars` and strategy state.
 5. **Add-on behaviour.** 16:40 flatten and flatten-all hit every NinjaTrader account; add-on-side flatten on lost link; partial entry fills; persist seen client ids across restarts.
 6. **Docker mounts.** Whole repo at `/app` vs the five bind mounts in SPEC.
-7. **Live data source** (only if data-gate items 3–4 fail).
+7. **Live data source** (only if data-gate items 3–4 fail). Not needed: item 3 passed on 2026-10-13.
 
 ## Task list (GitHub issue index)
 
@@ -58,9 +58,9 @@ Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links b
 - [x] #15 DEC-4 Live limit open points · ask-first
 - [x] #14 DEC-5 Add-on behaviour questions · ask-first
 - [x] #13 DEC-6 Docker mounts · ask-first
-- [ ] #16 GATE-3 Run data-gate item 3 in market hours · S
+- [x] #16 GATE-3 Run data-gate item 3 in market hours · S · PASS 2026-10-13
 - [ ] #17 GATE-4 Run data-gate item 4 over a full session · S · after GATE-3
-- [ ] #18 DEC-7 Live data source (if GATE-3/4 fail) · ask-first
+- [x] #18 DEC-7 Live data source (if GATE-3/4 fail) · ask-first · not needed (GATE-3 passed)
 - [ ] #19 RULES-1 Enter Lucid Pro rules · S · ask-first
 - [ ] #20 RULES-2 Enter Lucid Direct rules · S · ask-first
 - [ ] #21 RULES-3 Enter Lucid Daily rules · S · ask-first
@@ -137,13 +137,13 @@ Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links b
 
 ### Phase 6: Live trading (04, 21–24)
 - [ ] #72 04.1 Pure tick → 1m bar builder · S
-- [ ] #73 04.2 LSE live tick stream and `stream_bars` · M · blocked on GATE-3 / DEC-7
+- [ ] #73 04.2 LSE live tick stream and `stream_bars` · M
 - [ ] #74 04.3 Real stream check · S · manual · blocked
 - [ ] #75 21.1 Journal and armed tables in SQLite · S
 - [ ] #76 21.2 Pure runner core per bar · M · ask-first
 - [ ] #77 21.3 No entries in the roll window · S · ask-first
 - [ ] #78 21.4 Day roll, halts and stale-data pause · S · ask-first
-- [ ] #79 21.5 Warm-up of `Ctx.bars` and strategy state · M · after DEC-4, DEC-7
+- [ ] #79 21.5 Warm-up of `Ctx.bars` and strategy state · M · after DEC-4
 - [ ] #80 21.6 LiveHub shell and server lifespan · M
 - [ ] #81 21.7 Live status and journal API · S
 - [ ] #82 21.8 Dry run on live data · S · manual · blocked
@@ -173,13 +173,13 @@ Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links b
 - **Backtest lane:** 09 → 10 → 17; 14 needs 10 and 12.
 - **UI lane:** 11 → 12 → 13/15/16 (15 and 16 don't need 10).
 - **Broker lane:** 19 → 20 (Windows box needed for 19).
-- **Live lane:** needs the backtest, UI and broker lanes plus GATE-3 (or DEC-7).
+- **Live lane:** needs the backtest, UI and broker lanes plus GATE-3 (passed 2026-10-13).
 
 ## Risks and mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| LSE has no live futures on the current tier | High: blocks 04.2, 21.5, 21.8, 22.7 | GATE-3 first; DEC-7; `stream_bars` stays the only seam |
+| LSE has no live futures on the current tier | Resolved: GATE-3 passed 2026-10-13 on the owner's key | DEC-7 not needed; `stream_bars` stays the only seam |
 | Claude in the terminal reaches the token, `.env` or `armed` | High: breaks the arming boundary | DEC-1 before 13.2 ships and before 23.2 |
 | Fold memory: about 2.2 GB per worker × CPUs | High: OOM in Docker, UI grids unusable | 09.2 measures; 10.4 memoizes and reuses the pool |
 | Add-on 16:40 flatten silently never runs | High: positions held past flat-by | 19.6 starts the timer first and independently |

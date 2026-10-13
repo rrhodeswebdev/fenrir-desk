@@ -237,11 +237,13 @@ const conditionTone: Record<ConditionKind, 'caution' | 'alarm'> = {
   figures: 'caution',
 }
 
-/** The focus field's lines: every condition's reason in its own tone (a halt no cell names is an alarm), else the
- * brief unreconciled pause's reason, plain. */
+/** The focus field's lines: every condition holding entries back, its reason in its own tone (a halt no cell names is
+ * an alarm), else the brief unreconciled pause's reason, plain; then a `figures` condition, which holds nothing back. */
 export function reasons(a: AccountStatus): { tone: Tone; text: string }[] {
-  if (a.conditions.length) return a.conditions.map((c) => ({ tone: c.kind === null ? 'alarm' : conditionTone[c.kind], text: c.reason }))
-  return a.halt_reason ? [{ tone: 'normal', text: a.halt_reason }] : []
+  const line = (c: Condition) => ({ tone: c.kind === null ? 'alarm' : conditionTone[c.kind], text: c.reason })
+  const holding = a.conditions.filter((c) => c.kind !== 'figures').map(line)
+  const plain = !holding.length && a.halt_reason ? [{ tone: 'normal' as const, text: a.halt_reason }] : []
+  return [...holding, ...plain, ...a.conditions.filter((c) => c.kind === 'figures').map(line)]
 }
 
 /** The LSE feed's outage for the top strip: its reason, and when it is retried (`Restart needed` when only a restart

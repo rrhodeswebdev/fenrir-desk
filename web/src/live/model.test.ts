@@ -432,10 +432,25 @@ describe('each condition counts, whatever the halt (#212)', () => {
     expect(a.halted).toBe(false)
     expect(reasons(a)).toEqual([{ tone: 'caution', text: figures.reason }])
     expect(need(a)).toBeNull()
+    expect(alertTone(a)).toBeNull() // no outline: nothing is held back
     expect(strip(a)).toEqual(['Risk normal', 'Book normal'])
     expect(states(status({ accounts: [a] }))).toEqual(['normal', 'normal', 'normal'])
     expect(reasons(account(held(safety, figures)))).toEqual([
       { tone: 'caution', text: safety.reason },
+      { tone: 'caution', text: figures.reason },
+    ])
+  })
+
+  it('keeps the unreconciled pause in the focus under a figures condition, ahead of it (#220 review)', () => {
+    const figures = { kind: 'figures', reason: 'NinjaTrader reports a balance at or below 0, which is not a figure' } as const
+    const linkLost = 'NinjaTrader link lost: no new entries until reconciled'
+    expect(reasons(account({ halted: false, halt_reason: linkLost, conditions: [figures] }))).toEqual([
+      { tone: 'normal', text: linkLost },
+      { tone: 'caution', text: figures.reason },
+    ])
+    const warming = { kind: 'warming', reason: "warming up: today's NQ bars from LSE are not complete yet" } as const
+    expect(reasons(account({ halt_reason: warming.reason, conditions: [warming, figures] }))).toEqual([
+      { tone: 'caution', text: warming.reason },
       { tone: 'caution', text: figures.reason },
     ])
   })

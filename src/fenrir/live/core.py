@@ -229,7 +229,7 @@ def start(
                 until = h["until"] and date.fromisoformat(h["until"])
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
-    refused = _changed_since_arming(setup)
+    refused = changed_since_arming(setup)
     if refused:
         s, more = halt(replace(s, started=False), refused)
         return s, out + more
@@ -243,8 +243,9 @@ def start(
     return s, out
 
 
-def _changed_since_arming(setup: Setup) -> str | None:
-    """Why the account must not start on what it was armed with (DEC-4d), or None."""
+def changed_since_arming(setup: Setup) -> str | None:
+    """Why the account must not run on what it was armed with (DEC-4d), or None: `start`
+    halts on it, and the hub, with the files as they are at each bar, halts a running one."""
     a = setup.armed
     if setup.strategy_hash != a.strategy_hash:
         return "strategy file changed since arming; re-arm"

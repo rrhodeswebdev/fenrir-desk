@@ -322,6 +322,8 @@ def test_ninjatrader_down_is_502_for_sim_and_live_but_not_dry(client, settings, 
         {"mode": "Live"},
         {"phase": "eval"},
         {"start_balance": "nan"},
+        {"confirm": "yes"},  # strict booleans: no odd spellings of a live confirmation
+        {"dll_on": 0},
     ],
     ids=str,
 )

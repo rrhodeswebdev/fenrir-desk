@@ -76,6 +76,7 @@ def disarm(conn: sqlite3.Connection, account: str, now: datetime) -> bool:
     """Journal the `"halt"` row and delete the `armed` row in one transaction, so a failure
     leaves both or neither; False (nothing written) when the account is not armed."""
     with conn:
+        # the write lock before the check, so the check and the delete act on one row state
         conn.execute("BEGIN IMMEDIATE")
         if conn.execute("SELECT 1 FROM armed WHERE account = ?", (account,)).fetchone() is None:
             return False

@@ -19,6 +19,7 @@ import signal
 import sqlite3
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,7 @@ from fenrir.bridge.reconcile import NtOrder, NtPosition
 from fenrir.core.actions import Action, Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import (
+    INSTRUMENTS_MAX,
     Instruments,
     front_month,
     load_instruments,
@@ -44,7 +46,7 @@ from fenrir.live.arming import Armed, delete_armed, list_armed
 from fenrir.live.core import Log, RunnerState, Send, Setup
 from fenrir.live.step_child import ctx_json
 from fenrir.rules.account import with_dll
-from fenrir.rules.loader import read_account
+from fenrir.rules.loader import RULES_MAX, read_account, rules_path
 from fenrir.server import terminal
 from fenrir.server.isolation import as_user
 from fenrir.server.jobs_runner import strategy_user
@@ -57,6 +59,7 @@ CHILD = (sys.executable, "-P", "-m", "fenrir.live.step_child")
 LINE_MAX = 64 * 1024  # a longer reply fails the step
 ERROR_MAX = 2048
 STRATEGY_MAX = 1024 * 1024
+INSTRUMENTS = Path("instruments.yaml")  # as load_instruments reads it; pinned at arming
 LOAD_TIMEOUT = 60.0  # python start-up plus load_strategy and init
 TICK_EVERY = 5.0
 RESTORED = frozenset({"halt", "peak"})  # the kinds core.start reads back after a restart
@@ -117,10 +120,10 @@ def parse_reply(line: bytes) -> dict[str, Any]:
     raise ValueError(f"not a strategy reply: {line[:200]!r}")
 
 
-def _hash(path: str) -> str:
+def _hash(path: str | Path, limit: int = STRATEGY_MAX) -> str:
     """sha256 of the file's bytes, read without running them; "" when unreadable."""
     try:
-        return hashlib.sha256(read_regular(Path(path), STRATEGY_MAX)).hexdigest()
+        return hashlib.sha256(read_regular(Path(path), limit)).hexdigest()
     except (OSError, ValueError):
         return ""
 
@@ -161,7 +164,8 @@ class LiveHub:
         self.settings = settings
         self.addon = addon
         self.conn: sqlite3.Connection | None = None
-        self.instruments: Instruments | None = None
+        # per running account, the instruments it started with (and pinned): never another's
+        self.instruments: dict[str, Instruments] = {}
         self.states: dict[str, RunnerState] = {}
         self.broken: dict[str, tuple[Armed, str]] = {}  # alerted once; retried when the row changes
         self.unwritten: dict[str, tuple[Log, ...]] = {}  # RESTORED rows sqlite refused; retried
@@ -306,10 +310,12 @@ class LiveHub:
 
             async def one(account: str) -> None:
                 s = self.states[account]
-                # a running account means _start loaded the instruments
-                if bar.contract != front_month(self.instruments, s.setup.spec.series, day):
-                    return
                 try:
+                    # inside the try: a bar this account cannot even place halts it
+                    if bar.contract != front_month(
+                        self.instruments[account], s.setup.spec.series, day
+                    ):
+                        return
                     await self._apply(account, *await self._bar(account, s, bar))
                 except Exception as e:  # one account's failure must not stop the others' bar
                     log.exception("live account %s failed on a bar", account)
@@ -372,20 +378,33 @@ class LiveHub:
 
     def _nt(self, s: RunnerState, ts: datetime) -> str:
         """NinjaTrader's name for the account's front month on `ts`'s trading day."""
-        spec = s.setup.spec  # a running account means _start loaded the instruments
-        return nt_instrument(
-            spec.symbol, front_month(self.instruments, spec.series, trading_day(ts))
-        )
+        spec, instruments = s.setup.spec, self.instruments[s.setup.armed.account]
+        return nt_instrument(spec.symbol, front_month(instruments, spec.series, trading_day(ts)))
 
     async def _bar(self, account: str, s: RunnerState, bar: Bar) -> core.Step:
         out: tuple[Log, ...] = ()
-        if _hash(s.setup.armed.strategy_path) != s.setup.armed.strategy_hash:
-            s, out = core.halt(s, "strategy file changed since arming; re-arm")
+        changed = core.changed_since_arming(self._inputs_now(s.setup))
+        if changed:  # DEC-4d: halted while armed, not only at start
+            s, out = core.halt(s, changed)
         s, more = core.on_bar(s, bar)
         if not core.runs_step(bar):  # roll window: on_bar journalled the bar
             return s, out + more
         s, last = await self._step(account, s)
         return s, out + more + last
+
+    def _inputs_now(self, setup: Setup) -> Setup:
+        """`setup` with the pinned inputs as the files hold them now (unreadable: ""); a broken
+        accounts.yaml raises, which halts the account (`handle_bar`)."""
+        a = setup.armed
+        return replace(
+            setup,
+            strategy_hash=_hash(a.strategy_path),
+            rules_hash=_hash(rules_path(a.rules_account, self.settings.rules_dir), RULES_MAX),
+            instruments_hash=_hash(INSTRUMENTS, INSTRUMENTS_MAX),
+            dll_on=load_account_choices(self.settings.data_dir)
+            .get(a.rules_account, AccountChoice())
+            .dll_on,
+        )
 
     def status(self) -> dict[str, Any]:
         """The `GET /api/live/status` body."""
@@ -513,6 +532,7 @@ class LiveHub:
             self.unwritten.pop(account, None)  # disarmed: its halts must not reach a new arming
             self.retry.pop(account, None)
             self.drift_ticks.pop(account, None)
+            self.instruments.pop(account, None)
             await self._kill(account)
         for account in [x for x, (a, _) in self.broken.items() if rows.get(x) != a]:
             del self.broken[account]
@@ -523,7 +543,7 @@ class LiveHub:
     async def _start(self, a: Armed, now: datetime) -> None:
         try:
             # hashed from the very bytes in use: core.start halts on a change since arming
-            self.instruments, instruments_hash = read_instruments()
+            instruments, instruments_hash = read_instruments(INSTRUMENTS)
             choice = load_account_choices(self.settings.data_dir).get(
                 a.rules_account, AccountChoice()
             )
@@ -533,12 +553,13 @@ class LiveHub:
                 _hash(a.strategy_path),
                 # the DLL choice armed with: core.start halts when accounts.yaml's differs
                 with_dll(rules, bool(a.dll_on)),
-                spec(self.instruments, a.contract),
+                spec(instruments, a.contract),
                 self.settings.safety_margin_pct,
                 rules_hash=rules_hash,
                 instruments_hash=instruments_hash,
                 dll_on=choice.dll_on,
             )
+            self.instruments[a.account] = instruments
         except Exception as e:  # a bad rules id, contract or file: report once, run the rest
             error = f"{type(e).__name__}: {e}"
             self.broken[a.account] = (a, error)

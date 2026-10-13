@@ -202,6 +202,30 @@ def test_two_writers_migrating_at_once_both_open(tmp_path):
     assert arming.list_armed(second) == (PINNED,)
 
 
+def test_a_writer_that_migrated_meanwhile_is_not_migrated_again(tmp_path, monkeypatch):
+    """B migrates between A's first look and A's lock: A looks again under the lock and adds
+    nothing (without BEGIN IMMEDIATE and the second look: "duplicate column name")."""
+    path = tmp_path / "fenrir.db"
+    with closing(sqlite3.connect(path)) as old, old:
+        old.execute(OLD_ARMED)
+    real, seen = journal._missing, []
+
+    def racing(conn):
+        got = real(conn)
+        seen.append(len(got))
+        if len(seen) == 1:  # A saw the old table; B opens (and migrates) before A's lock
+            monkeypatch.setattr(journal, "_missing", real)
+            journal.open_db(path).close()
+            monkeypatch.setattr(journal, "_missing", racing)
+        return got
+
+    monkeypatch.setattr(journal, "_missing", racing)
+    conn = journal.open_db(path)
+    assert seen == [5, 0]
+    arming.insert_armed(conn, PINNED)
+    assert arming.list_armed(conn) == (PINNED,)
+
+
 def test_disarm_journals_the_halt_and_deletes_the_row_in_one_transaction(conn):
     arming.insert_armed(conn, PINNED)
     # a delete that fails after the halt row went in must take the halt row with it

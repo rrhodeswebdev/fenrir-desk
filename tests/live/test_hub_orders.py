@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from live_helpers import ARMED_AT, RULES, fill, pinned, reconciled
+from live_helpers import ARMED_AT, RULES, fill, pinned, reconciled, stored
 
 from fenrir.bridge.client import Ack, AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
@@ -67,7 +67,9 @@ def mnq_fill(qty, price, ts, cid="other", **kw):
 
 @pytest.fixture
 def settings(tmp_path) -> Settings:
-    return Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    s = Settings(data_dir=tmp_path / "data", private_dir=tmp_path / "private")
+    stored(s.data_dir)  # warm-up (#79) needs the store up to the last trading day
+    return s
 
 
 @pytest.fixture

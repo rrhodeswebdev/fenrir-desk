@@ -1,12 +1,23 @@
 """Shared constants for live tests. Imported by name via pytest `pythonpath` (importlib mode)."""
 
+import atexit
+import shutil
+import tempfile
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 from backtest_helpers import NQ
 
-from fenrir.core.instruments import ContractSpec, read_instruments
+from fenrir.core.bars import Bar
+from fenrir.core.instruments import (
+    ContractSpec,
+    front_month,
+    in_roll_window,
+    load_instruments,
+    read_instruments,
+)
+from fenrir.data.store import SERIES, write_bars
 from fenrir.live import core
 from fenrir.live.arming import Armed
 from fenrir.live.core import DayStart, Setup, Start
@@ -14,6 +25,7 @@ from fenrir.rules.loader import read_account
 from fenrir.rules.schema import AccountRules
 
 ARMED_AT = datetime(2026, 10, 12, 13, 0, tzinfo=UTC)
+STORED = (date(2026, 9, 1), date(2027, 2, 26))  # `stored` holds these trading days
 RULES = Path(__file__).parents[2] / "rules"
 INSTRUMENT = "NQ 12-25"  # NinjaTrader's name for the tests' NQ front month
 
@@ -92,3 +104,30 @@ def fill(qty, price, ts, commission=0.0, cid="other"):
 def reconciled(s):
     """A sim or live runner that NinjaTrader's book matches (flat, no orders): entries open."""
     return core.on_reconcile(s, INSTRUMENT, (), (), s.last_seen)[0]
+
+
+_store: list[Path] = []  # built once per process, copied into each test's data dir
+
+
+def stored(data_dir: Path) -> None:
+    """The bar store `data_dir` with one 14:00 UTC bar per weekday in `STORED` outside the roll
+    window, per series, on its front month: warm-up (#79) finds the previous trading day there."""
+    if not _store:
+        built = Path(tempfile.mkdtemp(prefix="fenrir-store-"))
+        atexit.register(shutil.rmtree, built, True)
+        instruments, day = load_instruments(), STORED[0]
+        bars: dict[tuple[str, str], list[Bar]] = {}
+        while day <= STORED[1]:
+            if day.weekday() < 5 and not in_roll_window(day):
+                for series in SERIES:
+                    c = front_month(instruments, series, day)
+                    price = 20000.0 if series == "NQ" else 6000.0
+                    ts = datetime.combine(day, time(14), UTC)
+                    bars.setdefault((series, c), []).append(
+                        Bar(ts, price, price, price, price, 1, c)
+                    )
+            day += timedelta(days=1)
+        for (series, c), rows in bars.items():
+            write_bars(built, series, c, rows)
+        _store.append(built)
+    shutil.copytree(_store[0] / "bars", data_dir / "bars", dirs_exist_ok=True)

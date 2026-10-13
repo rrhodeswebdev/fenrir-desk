@@ -507,3 +507,200 @@ async def test_a_kept_row_waiting_for_ninjatrader_shows_the_reason_and_loads_not
         assert hub.states["Sim102"].halted is None and set(hub.children) == {"Sim102"}
     finally:
         await hub.stop()
+
+
+async def test_a_second_double_fault_on_a_running_row_still_says_not_journalled_yet(
+    hub, conn, armed, client, monkeypatch
+):
+    """#230: a second double fault with another error. The account is already halted by the
+    first (so no new halt row), whose halt row is still queued: the answer still says the halt
+    is not journalled yet, and the next tick writes the first one."""
+    await hub.tick(T0)
+    write = journal.write
+    monkeypatch.setattr(journal, "write", _locked)
+    monkeypatch.setattr(client, "flatten", _unreachable)
+    first = flatten_failed("ConnectError: add-on unreachable")
+    assert (await hub.disarm("Sim101"))["error"] == f"{first}; {NOT_JOURNALLED_YET}: {LOCKED}"
+    monkeypatch.setattr(client, "flatten", lambda *a: _ack_refused())
+    second = flatten_failed("refused")
+    assert await hub.disarm("Sim101") == {
+        "ok": False,
+        "error": f"{second}; {NOT_JOURNALLED_YET}: {LOCKED}",
+    }
+    assert hub.states["Sim101"].halted == first
+    monkeypatch.setattr(journal, "write", write)
+    await hub.tick(T0 + timedelta(seconds=5))
+    assert [r.payload for r in rows(conn, "halt")] == [
+        {"reason": first, "kind": None, "until": None}
+    ]
+
+
+async def test_a_landed_disarm_clears_only_its_own_accounts_held_halt(
+    settings, conn, armed, client, monkeypatch
+):
+    """#230 (mutant Y9): Sim101 waits for NinjaTrader, double-faulted (its halt only `held`);
+    a disarm of Sim102 that lands leaves Sim101's held halt alone, so Sim101 still starts halted
+    on its account message, loading nothing."""
+    balances = {"start_balance": 50_000.0, "peak_balance": 50_500.0}
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(conn, replace(armed, **balances))
+    arming.insert_armed(conn, replace(armed, account="Sim102", **balances))
+    hub = LiveHub(settings, addon=client)
+    try:
+        await hub.tick(T0)
+        assert set(hub.waiting) == {"Sim101", "Sim102"}
+        flatten, write = client.flatten, journal.write
+        monkeypatch.setattr(client, "flatten", _unreachable)
+        monkeypatch.setattr(journal, "write", _locked)
+        why = flatten_failed("ConnectError: add-on unreachable")
+        assert await hub.disarm("Sim101") == {
+            "ok": False,
+            "error": f"{why}; {NOT_JOURNALLED}: {LOCKED}",
+        }
+        monkeypatch.setattr(client, "flatten", flatten)
+        monkeypatch.setattr(journal, "write", write)
+        assert await hub.disarm("Sim102") == {"ok": True, "error": None}
+        assert set(hub.held) == {"Sim101"}
+        await hub.handle_stream(account("Sim101"))
+        assert hub.states["Sim101"].halted == why and hub.children == {}
+    finally:
+        await hub.stop()
+
+
+# #230: disarm without flatten, only for an account the add-on no longer manages
+
+UNMANAGED = "unmanaged_account"  # the add-on's refusal for an account not in managed_accounts
+SKIPPED = (
+    "disarmed without its flatten: the NinjaTrader add-on no longer manages this account"
+    " (unmanaged_account); any position or working order there must be closed in NinjaTrader"
+)
+
+
+async def test_an_unmanaged_accounts_refused_flatten_keeps_it_and_says_it_is_unmanaged(
+    hub, conn, armed, fake
+):
+    """A plain disarm still fails closed; the answer adds `unmanaged`, so the dialog can offer
+    the confirmed disarm without flatten."""
+    await hub.tick(T0)
+    fake.rejects = [UNMANAGED, UNMANAGED]
+    why = flatten_failed(UNMANAGED)
+    assert await hub.disarm("Sim101") == {"ok": False, "error": why, "unmanaged": True}
+    assert [a.account for a in arming.list_armed(conn)] == ["Sim101"]
+    assert hub.states["Sim101"].halted == why
+
+
+@pytest.mark.parametrize("mode", ["sim", "live"])
+@pytest.mark.parametrize("running", [True, False], ids=["running", "not running yet"])
+async def test_disarm_without_flatten_disarms_an_account_the_addon_no_longer_manages(
+    hub, conn, armed, fake, running, mode
+):
+    """Refused as unmanaged and kept, then confirmed without flatten: both flattens are still
+    posted, and refused as unmanaged, so the row is disarmed (its halt row and delete) with an
+    alert naming the skipped flatten; the runner is stopped and any held halt dropped. Live too:
+    a funded or evaluation account taken out of managed_accounts is the realistic case."""
+    arming.insert_armed(conn, replace(armed, mode=mode))
+    if running:
+        await hub.tick(T0)
+        assert hub.states["Sim101"].setup.armed.mode == mode
+    fake.rejects = [UNMANAGED, UNMANAGED]
+    kept_why = flatten_failed(UNMANAGED)
+    assert (await hub.disarm("Sim101"))["unmanaged"] is True
+    fake.rejects = [UNMANAGED, UNMANAGED]
+    assert await hub.disarm("Sim101", flatten=False) == {"ok": True, "error": None}
+    assert posts(fake) == ["/flatten"] * 4
+    assert arming.list_armed(conn) == () and hub.states == {} and hub.children == {}
+    assert hub.held == {}
+    assert [r.payload for r in rows(conn, "halt")] == [
+        {"reason": kept_why, "kind": None, "until": None},
+        service.DISARMED,
+    ]
+    assert [r.payload for r in rows(conn, "alert")][-1] == {"message": SKIPPED}
+
+
+@pytest.mark.parametrize("mode", ["sim", "live"])
+@pytest.mark.parametrize("rejects", [[], [UNMANAGED]], ids=["both land", "second lands"])
+async def test_disarm_without_flatten_still_flattens_a_managed_account(
+    hub, conn, armed, fake, mode, rejects
+):
+    """The flag never skips a flatten that lands: a managed account is flattened, under the
+    lock too, and disarmed as by a plain disarm."""
+    arming.insert_armed(conn, replace(armed, mode=mode))
+    if mode == "sim":
+        await hub.tick(T0)
+    fake.rejects = list(rejects)
+    assert await hub.disarm("Sim101", flatten=False) == {"ok": True, "error": None}
+    assert posts(fake) == ["/flatten", "/flatten"] and arming.list_armed(conn) == ()
+    assert [r.payload for r in rows(conn, "alert")] == [
+        {"message": "disarmed; flattened, working orders cancelled"}
+    ]
+
+
+async def _unreachable_unmanaged(client_id, account):
+    raise httpx.ConnectError(UNMANAGED)
+
+
+async def _ack_unmanaged_landed():
+    return Ack(True, False, UNMANAGED)
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("refused", BROKER),
+        ("unknown account", "unknown account"),
+        ("refused, no reason", "refused"),
+        ("unreachable", "ConnectError: add-on unreachable"),
+        ("unreachable, unmanaged text", f"ConnectError: {UNMANAGED}"),
+        ("not configured", NOT_CONFIGURED),
+    ],
+)
+async def test_disarm_without_flatten_fails_closed_on_any_other_failure(
+    settings, conn, armed, fake, client, monkeypatch, failure, error
+):
+    """Only the add-on's own `unmanaged_account` refusal lets the flatten be skipped: any other
+    refusal or failure (an error text that merely says it included) keeps the row and halts the
+    account, as a plain disarm does, with no `unmanaged` in the answer."""
+    if failure in ("refused", "unknown account"):
+        fake.rejects = [error, error]
+    elif failure == "refused, no reason":
+        monkeypatch.setattr(client, "flatten", lambda *a: _ack_refused())
+    elif failure == "unreachable":
+        monkeypatch.setattr(client, "flatten", _unreachable)
+    elif failure == "unreachable, unmanaged text":
+        monkeypatch.setattr(client, "flatten", _unreachable_unmanaged)
+    hub = LiveHub(settings, addon=None if failure == "not configured" else client)
+    try:
+        await hub.tick(T0)
+        why = flatten_failed(error)
+        assert await hub.disarm("Sim101", flatten=False) == {"ok": False, "error": why}
+        assert [a.account for a in arming.list_armed(conn)] == ["Sim101"]
+        assert hub.states["Sim101"].halted == why
+        assert service.DISARMED not in [r.payload for r in rows(conn, "halt")]
+    finally:
+        await hub.stop()
+
+
+async def test_an_accepted_flatten_is_never_read_as_unmanaged(
+    hub, conn, armed, client, monkeypatch
+):
+    """`accepted` with an `unmanaged_account` error text landed: a plain flattened disarm."""
+    monkeypatch.setattr(client, "flatten", lambda *a: _ack_unmanaged_landed())
+    assert await hub.disarm("Sim101", flatten=False) == {"ok": True, "error": None}
+    assert [r.payload for r in rows(conn, "alert")] == [
+        {"message": "disarmed; flattened, working orders cancelled"}
+    ]
+
+
+async def test_a_dry_run_disarm_without_flatten_is_a_plain_dry_disarm(
+    settings, conn, armed, fake, client
+):
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
+    hub = LiveHub(settings, addon=client)
+    try:
+        await hub.tick(T0)
+        assert await hub.disarm("Dry1", flatten=False) == {"ok": True, "error": None}
+    finally:
+        await hub.stop()
+    assert fake.requests == [] and arming.list_armed(conn) == ()
+    assert [r.kind for r in rows(conn, account="Dry1")] == ["halt"]

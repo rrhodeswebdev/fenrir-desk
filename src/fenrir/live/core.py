@@ -55,7 +55,8 @@ NO_CLOSE = (
 )
 CONFIRM_LIQUIDATED = (
     "confirm balances: NinjaTrader's balance {balance:.2f} is at or below the liquidation level"
-    " {level:.2f} from the armed balances; re-arm with the confirmed balances"
+    " {level:.2f} from the armed balances and the journalled peaks; re-arm with the confirmed"
+    " balances"
 )
 GAP = "confirm balances: a gap at the end-of-day session close"
 CONFIRM_GAP = GAP + (

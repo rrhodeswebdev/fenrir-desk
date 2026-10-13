@@ -395,6 +395,6 @@ async def test_the_liquidation_level_comes_from_the_journalled_peak_not_the_pin(
     s = hub.states["Sim101"]
     assert s.halted.startswith(
         "confirm balances: NinjaTrader's balance 48800.00 is at or below the liquidation level"
-        " 49000.00"
+        " 49000.00 from the armed balances and the journalled peaks;"
     )
     assert not s.started and hub.children == {}

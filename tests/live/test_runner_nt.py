@@ -442,7 +442,8 @@ def test_a_first_balance_at_or_below_the_liquidation_level_cannot_start():
     assert kinds(effects) == ["halt"] and not s.started and s.halt_kind is None
     assert s.halted == (
         "confirm balances: NinjaTrader's balance 48000.00 is at or below the liquidation level"
-        " 48000.00 from the armed balances; re-arm with the confirmed balances"
+        " 48000.00 from the armed balances and the journalled peaks; re-arm with the confirmed"
+        " balances"
     )
     s, effects = core.on_bar(core.on_account(s, account(48_000.0), T.ts)[0], T)
     assert s.halt_kind is None and "halt" not in kinds(effects)  # never a breach

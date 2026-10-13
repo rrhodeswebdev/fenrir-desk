@@ -17,7 +17,8 @@ def _names(command):
 
 
 def test_no_cli_command_arms_or_disarms():
-    """SPEC: arming is user-only, so Claude in the terminal can neither arm nor disarm."""
+    """SPEC: arming is user-only, so Claude in the terminal can neither arm nor disarm, nor
+    press the kill switch (it disarms) or Resolve (22.6: UI-only)."""
     words = {w for n in _names(typer.main.get_command(app)) for w in n.lower().split("-")}
     assert "backtest" in words  # the walk reaches the commands
-    assert not words & {"arm", "disarm", "arming", "armed"}
+    assert not words & {"arm", "disarm", "arming", "armed", "kill", "resolve"}

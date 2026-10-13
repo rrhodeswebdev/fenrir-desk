@@ -8,6 +8,7 @@ import pytest
 from live_helpers import ARMED_AT, RULES, pinned
 
 from fenrir.core.bars import Bar
+from fenrir.data.live import FeedStopped
 from fenrir.live import arming, core, journal, service
 from fenrir.live.arming import Armed
 from fenrir.live.service import LiveHub, run_bars
@@ -410,6 +411,191 @@ async def test_run_bars_feeds_the_hub_and_connects_on_the_first_bar(hub, conn, a
         assert kinds(conn) == ["bar", "action"]
     finally:
         task.cancel()
+
+
+async def test_run_bars_closes_the_old_stream_before_the_next_day_subscribes(
+    hub, clock, monkeypatch
+):
+    # LSE allows one socket per key: the new day's subscription must find the old one closed
+    monkeypatch.setattr(service, "TICK_EVERY", 0)
+    closed: list[bool] = []
+    seen: list[list[bool]] = []
+    second = asyncio.Event()
+
+    async def fake_stream(settings, contracts):
+        seen.append(list(closed))
+        if len(seen) > 1:
+            second.set()
+            await asyncio.sleep(3600)
+        try:
+            clock["t"] = T0 + timedelta(days=1)  # the trading day rolls with this bar
+            yield bar(T0)
+            await asyncio.sleep(3600)
+        finally:
+            await asyncio.sleep(0.05)  # closing a socket takes a moment
+            closed.append(True)
+
+    task = asyncio.create_task(run_bars(hub, fake_stream))
+    try:
+        await asyncio.wait_for(second.wait(), 120)
+        assert seen == [[], [True]]
+    finally:
+        task.cancel()
+
+
+def lse_alerts(conn, account="Sim101"):
+    rows = journal.rows(conn, account=account)
+    return [r.payload["message"] for r in rows if r.kind == "alert" and "LSE" in str(r.payload)]
+
+
+async def test_run_bars_backs_off_after_feed_stopped_and_resets_on_a_bar(hub, monkeypatch):
+    monkeypatch.setattr(service, "TICK_EVERY", 0)
+    monkeypatch.setattr(service, "FEED_RETRY", 0.01)
+    monkeypatch.setattr(service, "FEED_RETRY_MAX", 0.04)
+    downs: list[float] = []
+    feed_down = hub.feed_down
+    monkeypatch.setattr(
+        hub, "feed_down", lambda r, at: (downs.append((at - T0).total_seconds()), feed_down(r, at))
+    )
+    script = ["stop"] * 4 + ["bar"] + ["stop"] * 2 + ["hang"]
+    done = asyncio.Event()
+
+    async def fake_stream(settings, contracts):
+        step = script.pop(0)
+        if step == "stop":
+            raise FeedStopped("LSE stream stopped: Max 1 concurrent websocket connection(s)")
+        if step == "bar":
+            yield bar(T0)
+            return
+        done.set()
+        await asyncio.sleep(3600)
+
+    task = asyncio.create_task(run_bars(hub, fake_stream))
+    try:
+        await asyncio.wait_for(done.wait(), 5)
+    finally:
+        task.cancel()
+    assert downs == [0.01, 0.02, 0.04, 0.04, 0.01, 0.02]  # doubling, capped, reset by the bar
+    assert hub.lse_error is not None and hub.lse_connected is False
+
+
+async def test_run_bars_ends_on_a_permanent_feed_stop(hub, monkeypatch, caplog):
+    monkeypatch.setattr(service, "TICK_EVERY", 0)
+    calls = []
+
+    async def fake_stream(settings, contracts):
+        calls.append(contracts)
+        raise FeedStopped("FENRIR_LSE_API_KEY is not set", permanent=True)
+        yield  # an async generator, like stream_bars
+
+    await asyncio.wait_for(run_bars(hub, fake_stream), 5)
+    assert len(calls) == 1
+    assert hub.status()["lse"] == {
+        "connected": False,
+        "last_bar_ts": None,
+        "error": "FENRIR_LSE_API_KEY is not set",
+        "retry_at": None,
+    }
+    errors = [r.getMessage() for r in caplog.records if r.name == "fenrir.live.service"]
+    assert len(errors) == 1 and "restarts" in errors[0]
+
+
+async def test_an_empty_key_at_startup_alerts_each_armed_account(hub, conn, armed):
+    arming.insert_armed(conn, armed)
+    hub.feed_down("FENRIR_LSE_API_KEY is not set", None)  # before the first tick starts accounts
+    await hub.tick(T0)
+    await hub.tick(T0 + timedelta(seconds=5))
+    assert lse_alerts(conn) == [
+        "LSE feed down: FENRIR_LSE_API_KEY is not set; no live bars until the server restarts"
+    ]
+
+
+async def test_a_feed_outage_alerts_each_account_once_and_shows_in_status(hub, conn, armed):
+    arming.insert_armed(conn, armed)
+    arming.insert_armed(conn, replace(armed, account="Sim102"))
+    await hub.tick(T0)
+    reason = "LSE stream stopped: Max 1 concurrent websocket connection(s)"
+    for n in range(3):  # three refused retries: one outage
+        hub.feed_down(reason, T0 + timedelta(minutes=2**n))
+        await hub.tick(T0 + timedelta(seconds=5 * (n + 1)))
+    assert hub.status()["lse"] == {
+        "connected": False,
+        "last_bar_ts": None,
+        "error": reason,
+        "retry_at": (T0 + timedelta(minutes=4)).isoformat(),
+    }
+    expected = (
+        f"LSE feed down: {reason}; retrying with a backoff (1 to 15 min); see the live status"
+    )
+    assert lse_alerts(conn) == lse_alerts(conn, "Sim102") == [expected]
+    hub.feed_up()  # a bar arrived: the outage is over
+    assert hub.status()["lse"]["error"] is None and hub.status()["lse"]["retry_at"] is None
+    hub.feed_down(reason, T0 + timedelta(minutes=1))  # a new outage alerts again
+    await hub.tick(T0 + timedelta(seconds=30))
+    assert lse_alerts(conn) == [expected, expected]
+
+
+async def test_run_bars_recovers_from_a_refused_reconnect_on_the_real_sdk(hub, monkeypatch):
+    """A local fake LSE socket: the first connection streams a tick and drops; the SDK's
+    reconnect is refused before auth (the server still holds the half-open socket), which the
+    SDK treats as fatal; run_bars backs off and the third connection streams again."""
+    import functools
+    import json
+
+    import lse
+    from websockets.asyncio.server import serve
+
+    from fenrir.data.live import stream_bars
+
+    monkeypatch.setattr(service, "FEED_RETRY", 0.05)
+    hub.settings = replace(hub.settings, lse_api_key="k")
+    connections: list[int] = []
+    bars_seen: list[Bar] = []
+    recovered = asyncio.Event()
+
+    async def handler(ws):
+        n = len(connections) + 1
+        connections.append(n)
+        await ws.send(json.dumps({"type": "welcome"}))
+        await ws.recv()  # auth
+        if n == 2:
+            message = "Max 1 concurrent websocket connection(s) for this API key"
+            await ws.send(json.dumps({"type": "error", "message": message}))
+            await ws.wait_closed()
+            return
+        await ws.send(json.dumps({"type": "authenticated", "tier": "t", "symbols": []}))
+        await ws.recv()  # subscribe
+        await ws.recv()
+        ts = f"2026-10-12T14:0{n}:01Z"  # long past: each tick's bar closes at once
+        tick = {"type": "tick", "symbol": "NQ.F", "price": 20000.0, "volume": 1, "ts": ts}
+        await ws.send(json.dumps(tick))
+        if n == 1:
+            await asyncio.sleep(0.2)
+            ws.transport.abort()  # the network drops
+            return
+        await ws.wait_closed()
+
+    handle_bar = hub.handle_bar
+
+    async def seen(b):
+        bars_seen.append(b)
+        if len(bars_seen) == 2:
+            recovered.set()
+        await handle_bar(b)
+
+    monkeypatch.setattr(hub, "handle_bar", seen)
+    async with serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(lse, "LSE", functools.partial(lse.LSE, url=f"ws://127.0.0.1:{port}"))
+        task = asyncio.create_task(run_bars(hub, stream_bars))
+        try:
+            await asyncio.wait_for(recovered.wait(), 30)  # the SDK waits 3 s before reconnecting
+        finally:
+            task.cancel()
+            await asyncio.wait({task})
+    assert connections == [1, 2, 3]
+    assert [b.ts.minute for b in bars_seen] == [1, 3]
+    assert hub.lse_error is None and hub.lse_connected is True
 
 
 async def test_an_overflowing_number_halts_only_that_account(hub, conn, armed, tmp_path):

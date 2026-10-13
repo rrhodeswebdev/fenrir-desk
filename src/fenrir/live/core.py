@@ -945,7 +945,10 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
-        out += (Log("alert", {"message": f"{reason} (was halted: {s.halted})"}),)
+        # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
+        # account message, then that bar's own Mark breaches: review of #231)
+        own = ", on the app's own figures, not the gap" if s.halted.startswith(GAP) else ""
+        out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 
 

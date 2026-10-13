@@ -924,3 +924,39 @@ def test_a_dry_replay_raises_no_peak():
     exit_ = {**fill_at(T.ts + timedelta(seconds=10), qty=-1), "price": 20050.0}
     s = core.replay(s, [("fill", fill_at(T.ts + timedelta(seconds=5), qty=1)), ("fill", exit_)])
     assert s.acct.peak == 0.0
+
+
+def alerts(effects):
+    return [e.payload["message"] for e in effects if isinstance(e, Log) and e.kind == "alert"]
+
+
+def test_a_same_bar_breach_after_an_intraday_gap_halt_is_not_put_down_to_the_gap():
+    """Review of #231, nit: the app holds a long marked at 0 when NinjaTrader's +2,100 open (a
+    spike within the bar) puts its floor at 100, at or above the app's equity: the gap's halt.
+    The bar's own high-first Mark then breaches on the app's own figures, which replaces it; the
+    alert says so, not that the breach followed a gap."""
+    s = reconciled(core.start(sim(trailing="intraday"), T.ts)[0])
+    now = T.ts + timedelta(seconds=30)
+    held = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, held, stop, now)
+    s, _ = core.on_bar(s, bar("09:30", 20000.0, 20000.0, 20000.0, 20000.0))
+    s, _ = core.on_account(s, account(50_000.0, unrealized=2100.0), now)
+    gap = s.halted
+    assert gap.startswith(GAP_INTRADAY + "52100.00 puts the drawdown floor at 50100.00, ")
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20105.0, 20000.0, 20100.0))
+    breach = "breach max_drawdown: equity 0.00 at or below drawdown floor 100.00"
+    assert (s.halted, s.halt_kind) == (breach, "breach")
+    assert alerts(effects) == [
+        f"{breach}, on the app's own figures, not the gap (was halted: {gap})"
+    ]
+
+
+def test_a_breach_that_replaces_another_open_ended_halt_alerts_with_its_reason():
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(is_sim=False), T.ts)
+    was = s.halted
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=1, seconds=5), qty=1))
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19895.0, 19895.0))
+    breach = "breach max_drawdown: equity -2100.00 at or below drawdown floor -2000.00"
+    assert s.halted == breach and alerts(effects)[0] == f"{breach} (was halted: {was})"

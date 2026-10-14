@@ -628,6 +628,49 @@ def test_a_restart_after_a_no_close_roll_keeps_its_floor(roll, floor):
     assert r.session_floor == floor and peaks(out) == []
 
 
+NO_CLOSE_ROLLS = {
+    "zero": lambda: no_close_over_a_held_loss("zero"),
+    "lost link": lambda: no_close_over_a_held_loss("lost link"),
+    "zero, stale gap": lambda: no_close_over_a_held_loss("zero", 53_000.0),
+    "zero, stale 50,700": lambda: no_close_over_a_held_loss("zero", 50_700.0),
+}
+
+
+def restart_after(roll, now, nt_balance):
+    """`start` from the roll's own journalled rows, armed before D1, NinjaTrader at
+    `nt_balance`."""
+    s, effects, close = roll()
+    rows = [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    halts, opens = ([p for k, p in rows if k == kind] for kind in ("halt", "day_start"))
+    setup = replace(sim(), start=Start(50_000.0, 50_000.0, nt_balance), day_start=None)
+    setup = armed_at(setup, at("08:00").ts)
+    r, out = core.start(setup, now, halts, [], opens)
+    return s, r, out, close
+
+
+@pytest.mark.parametrize("nt_balance", [50_150.0, 50_200.0])
+@pytest.mark.parametrize("roll", NO_CLOSE_ROLLS.values(), ids=NO_CLOSE_ROLLS.keys())
+def test_a_restart_at_or_below_a_no_close_floor_cannot_start(roll, nt_balance):
+    """#220 review (round 5, blocking): the start's liquidation check counts today's open's peak,
+    so a same-day restart with NinjaTrader at or below the running floor (200) cannot start,
+    never breaching (or flattening) on NinjaTrader's figure alone."""
+    s, r, _, close = restart_after(roll, bar("10:00", 0, 0, 0, 0, D2).ts, nt_balance)
+    assert s.acct.floor == 200.0
+    assert not r.started and r.halt_kind is None
+    r, effects = core.on_bar(r, bar("10:01", close, close, close, close, D2))
+    assert r.halt_kind != "breach" and sends(effects) == []
+
+
+@pytest.mark.parametrize("roll", NO_CLOSE_ROLLS.values(), ids=NO_CLOSE_ROLLS.keys())
+def test_a_later_day_restart_keeps_a_no_close_floor(roll):
+    """#220 review (round 5, NB1): down over the next roll too, so no open journalled for today:
+    the highest open journalled since arming bounds the peak, so a D3 restart keeps the floor the
+    D2 no-close roll raised (main, from that roll's stale "peak" row, 200), with no "peak" row."""
+    s, r, out, _ = restart_after(roll, bar("10:00", 0, 0, 0, 0, D3).ts, 52_200.0)
+    assert (r.acct.peak, r.acct.floor) == (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    assert r.halted.startswith("confirm balances: ") and peaks(out) == []
+
+
 def test_the_no_close_floor_trails_the_apps_balance_under_a_gap_halt_too():
     """#220 review (round 4, M12): a gap halt at the D2 roll with a long of 2 held, whose Flatten
     fills only 1 (at +600) before the link drops again over the next close. The D3 roll's

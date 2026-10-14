@@ -231,7 +231,7 @@ def start(
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
     journalled since then; the highest of them and `start.peak` is the peak (DEC-4a), and for
-    `end_of_day` at least today's journalled open's (#220). `opens`: the "day_start" payloads
+    `end_of_day` at least every journalled open's (#220). `opens`: the "day_start" payloads
     journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
     none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
@@ -244,8 +244,13 @@ def start(
     replays = (
         False  # today's open is journalled: `replay` sets the app's balance, not NinjaTrader's
     )
+    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
     if begin is not None:
-        begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
+        # end_of_day: each roll journals its open with the peak it raised to, even a roll that
+        # took no close and so journalled no "peak" row (#220); within an arming the peak never
+        # falls, so the highest open since arming bounds it too (counted by the liquidation check)
+        opened_peaks = [o["peak"] for o in opens] if trailing == "end_of_day" else []
+        begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks), *opened_peaks]))
         if setup.day_start is None:
             today = trading_day(now).isoformat()
             rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
@@ -293,12 +298,6 @@ def start(
                 until = h["until"] and date.fromisoformat(h["until"])
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
-    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
-    if replays and trailing == "end_of_day":
-        # today's journalled open holds the peak the day opened with, raised by its roll even when
-        # that took no close and so journalled no "peak" row (#220): never looser than it ran, and
-        # no row here either, so a later restart still asks (`_missed_close`)
-        s = replace(s, acct=_raised(setup, s.acct, day.peak))
     refused = changed_since_arming(setup)
     if refused:
         s, more = halt(replace(s, started=False), refused)

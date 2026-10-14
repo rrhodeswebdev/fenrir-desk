@@ -1634,7 +1634,7 @@ HELD_STOP = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0
 def refused_long(changed, trailing="intraday"):
     """A start refused on `changed` that adopts a bracketed long (stop 19,000) from NinjaTrader,
     as a restart's replayed position is, with no strategy to exit it."""
-    s, _ = core.start(replace(sim(trailing=trailing), **changed), T.ts)
+    s, _ = core.start(refused(sim(trailing=trailing), changed), T.ts)
     return core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))[0]
 
 
@@ -1735,23 +1735,55 @@ def test_a_running_account_halted_on_a_changed_input_is_not_flattened():
     assert s.started and sends(effects) == []
 
 
-@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
-def test_a_breach_never_replaces_a_refused_start(changed):
-    """C2 of PR #240: a breach is read from the same figures as a gap, which are not the
-    account's (inputs that may have been edited since arming; the status shows none of them),
+LOW = bar("09:30", 20000.0, 20000.0, 19895.0, 20000.0)  # the long's worst: -2,100
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"rules_hash": "r2"}, {"rules_hash": "r1"}],  # RULES_CHANGED: rules, unpinned
+    ids=["rules", "unpinned"],
+)
+def test_a_breach_on_changed_rules_never_replaces_a_refused_start(changed):
+    """C2 of PR #240: with the rules file changed (or never pinned), a breach is read from the
+    same figures as a gap, which may not be the account's (and the status shows none of them),
     so it never replaces the refusal either: no "halt" row, no breach alert, the refusal's
     reason stays. The long is flattened on the refusal itself, not on the breach."""
-    low = bar("09:30", 20000.0, 20000.0, 19895.0, 20000.0)  # the long's worst: -2,100
-    started, _ = core.on_bar(held_long(), low)
+    started, _ = core.on_bar(held_long(), LOW)
     assert started.halt_kind == "breach"  # the same bar breaches a start that ran
     s = refused_long(changed)
     refused, why = s.halted, refused_why(s)
-    s, effects = core.on_bar(s, low)
+    s, effects = core.on_bar(s, LOW)
     assert (s.halted, s.halt_kind, s.halt_day) == (refused, None, None)
     assert "halt" not in kinds(effects) and alerts(effects) == [f"flattening: {why}"]
     assert [a["reason"] for a in actions(effects)] == [why]
     s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19800.0, 19900.0))
     assert s.halted == refused and "halt" not in kinds(effects)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"strategy_hash": "h2"}, {"instruments_hash": "i2"}, {"dll_on": True}],  # ARMED_RULES
+    ids=["strategy", "instruments", "dll_on"],
+)
+def test_a_breach_under_the_armed_rules_replaces_a_refused_starts_halt(changed):
+    """Review of #242 (round 2), item 2: under the armed rules the figures are the account's, so
+    a breach is real and is recorded as on main: its "halt" row and an alert naming the refusal
+    it replaced. The refusal's flatten still goes out, as nothing runs the long. A restart
+    restores the breach over the refusal."""
+    started, ran = core.on_bar(held_long(), LOW)
+    breach = started.halted
+    s = refused_long(changed)
+    refusal = s.halted
+    s, effects = core.on_bar(s, LOW)
+    assert (s.halted, s.halt_kind, s.halt_day, s.started) == (breach, "breach", None, False)
+    rows = [e.payload for e in effects if isinstance(e, Log) and e.kind == "halt"]
+    assert rows == [e.payload for e in ran if isinstance(e, Log) and e.kind == "halt"]
+    why = f"position 1 held by a refused start: {breach}"
+    assert alerts(effects) == [f"{breach} (was halted: {refusal})", f"flattening: {why}"]
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+    refusal_row = {"reason": refusal, "kind": None, "until": None}
+    again, _ = core.start(refused(sim(trailing="intraday"), changed), T.ts, [refusal_row, *rows])
+    assert (again.halted, again.halt_kind, again.started) == (breach, "breach", False)
 
 
 def peak_rows(setup):

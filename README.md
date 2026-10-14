@@ -30,11 +30,11 @@ git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
 docker compose up
 ```
 
-Open the launch link it prints and enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+Open the launch link it prints (`docker compose logs` shows it again) and enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
 
 Day to day, `docker compose up` (or `up -d`) is the command you run; data pulls, backtests and arming are in the browser.
 
-- **Signed in once per browser.** The link sets a cookie for 400 days that keeps working across restarts and rebuilds (it holds the session key, kept in the `fenrir-private` volume; only `docker compose down -v` loses it). Each start prints a new one-time link and only the newest unused one works, so for a second browser run `docker compose restart`, then open the link `docker compose logs` shows last.
+- **Signed in once per browser.** The link sets a cookie for 400 days that keeps working across restarts and rebuilds (it holds the session key, kept in the `fenrir-private` volume; `docker compose down -v` deletes it, with the settings and the trade journal). Each start prints a new one-time link and only the newest unused one works, so for a second browser run `docker compose restart` while nothing is armed (a restart sends an armed account through warm-up and reconcile again), then open the link `docker compose logs` shows last.
 - **In the background.** `docker compose up -d` runs it without a terminal, and `restart: unless-stopped` starts it again after a reboot (Docker Desktop: once it starts at sign-in). Ctrl+C on a foreground `up` stops it until the next `up`.
 - **This machine only.** The app includes a shell. Keep the `127.0.0.1:8000:8000` and `[::1]:8000:8000` port mappings in `compose.yaml`; never change them to `8000:8000`.
 - **Terminal.** It runs as an unprivileged `claude` user in `/app` (your clone), and cannot read the secrets, the session key or the server. Run CLI commands there, e.g. `uv run fenrir backtest strategies/orb.py --account lucid-flex-50k`. Each backtest worker holds a full price series (up to about 2 GB), and workers are capped to fit the container's memory, so a larger Docker Desktop memory limit runs more of them.

@@ -74,6 +74,10 @@ NO_BALANCE = (
     " have loaded): ignored, and no new entries until one above 0"
 )
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
+FIGURES_LOST = (
+    "NinjaTrader's account figures were lost with the link: no new entries until an account"
+    " message with a balance above 0"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,7 +166,8 @@ class RunnerState:
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
     # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
     warming: str | None = None
-    # NinjaTrader's last balance was at or below 0 (#220): no new entries while it lasts (a pause)
+    # NinjaTrader's last balance was at or below 0 (#220), or none since a lost link (#243): no
+    # new entries until one above 0 (a pause)
     no_balance: str | None = None
     no_balance_alerted: bool = False  # one alert per run
     # NinjaTrader's intraday peak an intraday gap halt did not take, relative to phase start, as
@@ -566,15 +571,19 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 
 def on_disconnect(s: RunnerState, error: str) -> Step:
     """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
-    one "alert" per outage, and NinjaTrader's figures are dropped as stale until its next account
-    message, a zero balance's `figures` condition with them (#220). Positions keep their
-    broker-side stop and target (the add-on's `flatten_on_disconnect_seconds` may flatten them:
-    DEC-5). Dry runs ignore it."""
+    one "alert" per outage, and NinjaTrader's figures are dropped as stale. Until its next account
+    message with a balance above 0 the account also has a `figures` pause (`FIGURES_LOST`, #243),
+    which the reconcile leaves, so no Bracket goes out on the app's own figures alone; a zero
+    reported before the drop is no balance either. Positions keep their broker-side stop and
+    target (the add-on's `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs
+    ignore it."""
     if s.setup.armed.mode == "dry":
         return s, ()
+    # without start figures `on_account` never takes a balance, so nothing would lift it
+    lost = None if s.setup.start is None else FIGURES_LOST
     if s.unreconciled == LINK_LOST:  # still the same outage: no second alert, figures dropped
-        return replace(s, nt=None, no_balance=None), ()
-    return replace(s, unreconciled=LINK_LOST, nt=None, no_balance=None), (
+        return replace(s, nt=None, no_balance=lost), ()
+    return replace(s, unreconciled=LINK_LOST, nt=None, no_balance=lost), (
         Log("alert", {"message": f"{LINK_LOST} ({error})"}),
     )
 
@@ -905,9 +914,9 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause, a drift pause, NinjaTrader's balance at or below 0 ("figures", #220: a pause too) and
-    warming up (#79; not a halt: `halted` stays false for it alone). The brief unreconciled pause
-    is not one (only `halt_reason`)."""
+    pause, a drift pause, no NinjaTrader balance above 0 ("figures": a zero, #220, or none since
+    a lost link, #243; a pause too) and warming up (#79; not a halt: `halted` stays false for it
+    alone). The brief unreconciled pause is not one (only `halt_reason`)."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),

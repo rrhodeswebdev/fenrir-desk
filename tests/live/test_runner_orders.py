@@ -554,3 +554,36 @@ def test_a_zero_balance_never_holds_back_an_exit():
     s, _ = core.on_account(s, nt_account(0.0), late.ts)
     s, effects = core.on_bar(s, late)
     assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]
+
+
+@pytest.mark.parametrize("before", [50_000.0, 0.0], ids=["figures", "zero"])
+def test_a_reconnect_pauses_entries_until_a_balance_above_0(before):
+    """#243: after a lost link the reconcile alone lets no Bracket out. NinjaTrader's figures
+    went with the link (and a zero before the drop is no balance either), so entries wait for
+    its next account message with a balance above 0; exits still go out."""
+    s = started(sim(), at("09:30"))
+    s, _ = core.on_account(s, nt_account(50_000.0), at("09:30").ts)
+    s, _ = core.on_account(s, nt_account(before), at("09:30").ts)
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s = reconciled(s)
+    s, _ = core.on_bar(s, at("09:31"))
+    assert s.unreconciled is None
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "rejection"]
+    assert effects[1].payload["reason"] == f"paused: {core.FIGURES_LOST}"
+    s, _ = core.on_account(s, nt_account(0.0), at("09:31").ts)  # still no balance
+    s, _ = core.on_bar(s, at("09:32"))
+    _, effects = decide_now(s, [LONG])
+    assert effects[1].payload["reason"] == f"paused: {core.NO_BALANCE}"
+    s, _ = core.on_account(s, nt_account(50_000.0), at("09:32").ts)
+    s, _ = core.on_bar(s, at("09:33"))
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "action", "send"]
+
+
+def test_a_lost_link_never_holds_back_an_exit():
+    s = entered(sim())
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s, _ = core.on_bar(s, at("09:32"))
+    _, effects = decide_now(s, [Flatten()])
+    assert [type(e.action) for e in sends(effects)] == [Flatten]

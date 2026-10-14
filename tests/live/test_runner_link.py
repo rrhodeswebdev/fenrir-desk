@@ -15,6 +15,15 @@ from fenrir.live.core import DayStart, Log, Send, Start
 LONG = Bracket("long", 1, 19990.0, 20020.0)
 START = Start(phase_start=50_000.0, peak=50_000.0, balance=50_000.0)
 OPEN = DayStart(balance=50_000.0, peak=50_000.0)
+ACCOUNT = {  # an add-on "account" message: NinjaTrader's figures, absolute $
+    "type": "account",
+    "id": "Sim101",
+    "name": "Sim101",
+    "is_sim": True,
+    "balance": 50_000.0,
+    "realized_pnl_today": 0.0,
+    "unrealized_pnl": 0.0,
+}
 
 
 def at(hhmm, day=D1, c=20000.0):
@@ -84,6 +93,8 @@ def test_one_alert_per_outage():
     s, effects = core.on_disconnect(s, "connection refused")  # the stream retries
     assert effects == ()
     s, _ = core.on_reconcile(s, INSTRUMENT, (), (), at("09:31").ts)
+    assert reason(s) == f"paused: {core.FIGURES_LOST}"  # #243: until NinjaTrader's figures
+    s, _ = core.on_account(s, ACCOUNT, at("09:31").ts)
     assert reason(s) is None
     s, effects = core.on_disconnect(s, "no heartbeat for 6 s")  # a new outage
     assert kinds(effects) == ["alert"]
@@ -264,6 +275,7 @@ def test_unreconciled_position_at_flat_by_and_the_roll_pauses_instead_of_breachi
     s, _ = core.on_reconcile(s, INSTRUMENT, (), (), at("09:31", D2).ts)
     assert s.position == core.FLAT
     s, _ = core.resolve(s, INSTRUMENT, (), (), at("09:31", D2).ts)
+    s, _ = core.on_account(s, ACCOUNT, at("09:31", D2).ts)  # #243: NinjaTrader's figures again
     s = core.on_bar(s, at("09:31", D2))[0]
     assert s.halted is None and reason(s) is None
 

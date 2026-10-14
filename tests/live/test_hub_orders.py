@@ -663,6 +663,28 @@ async def test_disconnected_pauses_until_reconnected(hub, conn, armed, fake):
     assert hub.states["Sim101"].unreconciled is None
 
 
+async def test_a_reconnect_waits_for_ninjatraders_figures_before_an_entry(
+    hub, conn, armed, fake, clock
+):
+    """#243: the reconnect's reconcile lifts the unreconciled pause, but entries wait for
+    NinjaTrader's next account message with a balance above 0 (its figures went with the link)."""
+    await hub.handle_stream({"type": "connected"})
+    await hub.tick(T0)
+    await hub.handle_stream(LOST)
+    await hub.handle_stream({"type": "connected"})
+    assert hub.states["Sim101"].unreconciled is None
+    [status] = hub.status()["accounts"]
+    assert status["conditions"] == [{"kind": "figures", "reason": core.FIGURES_LOST}]
+    await hub.handle_bar(bar(T0))
+    assert fake.requests == []
+    [rejection] = rows(conn, "rejection")
+    assert rejection.payload["reason"] == f"paused: {core.FIGURES_LOST}"
+    await hub.handle_stream(ACCOUNT)
+    clock["t"] = T0 + timedelta(minutes=1)
+    await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
+    assert [path for path, _ in fake.requests] == ["/bracket"]
+
+
 async def test_a_mismatch_halts_until_resolved(hub, conn, armed, fake):
     await hub.tick(T0)
     fake.orders = [STRAY]

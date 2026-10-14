@@ -4,10 +4,14 @@ Reads a sim account's journal (`<private_dir>/fenrir.db`, read-only): its `fill`
 add-on's fills) and its `bar` rows (the LSE 1-minute bars the runner journalled). Each fill is
 compared with the bar of the minute holding the fill time: how many ticks the fill price lies
 outside that bar's [low, high]. No LSE call: the bars are the ones the runner traded on.
+Bars and fills meet on the full contract code (`MNQ 12-26` -> `NQZ26`), so a month mismatch is
+unmatched, not compared. Any unmatched fill FAILs unless `--allow-unmatched N` accepts up to N;
+each one accepted must be explained in docs/data-gate.md Item 5.
 
 Run (repo root, where `instruments.yaml` is):
      uv run python scripts/gate_item5.py Sim101 --day 2026-10-15 2026-10-16
      uv run python scripts/gate_item5.py Sim101 --day 2026-10-15 --db /path/to/fenrir.db
+     uv run python scripts/gate_item5.py Sim101 --day 2026-10-15 --allow-unmatched 1
 """
 
 import argparse
@@ -43,17 +47,32 @@ def minute(ts: datetime) -> datetime:
     return ts.astimezone(UTC).replace(second=0, microsecond=0)
 
 
-def series_of(contract: str) -> str:
-    """`NQZ26` -> `NQ` (our contract codes: series + month letter + two-digit year)."""
-    return contract[:-3]
+def seconds_in(ts: datetime) -> float:
+    """Seconds past the minute: an entry fill lands about :02-:05 after the bar it was sent on,
+    so a fill near :00 on a FAIL line points at a clock offset between NinjaTrader and LSE."""
+    return (ts - minute(ts)).total_seconds()
+
+
+_MONTH_CODES = {"03": "H", "06": "M", "09": "U", "12": "Z"}
+
+
+def contract_of(instrument: str, specs: Mapping[str, ContractSpec]) -> tuple[str, ContractSpec]:
+    """NinjaTrader's name to our bar's contract code and the fill's own spec: `MNQ 12-26` ->
+    (`NQZ26`, MNQ), the inverse of `fenrir.bridge.names.nt_instrument`."""
+    symbol, _, expiry = instrument.partition(" ")
+    month, _, year = expiry.partition("-")
+    if symbol not in specs or month not in _MONTH_CODES or len(year) != 2 or not year.isdigit():
+        raise ValueError(
+            f"fill on instrument {instrument!r}: not a quarterly contract of instruments.yaml"
+        )
+    spec = specs[symbol]
+    return f"{spec.series}{_MONTH_CODES[month]}{year}", spec
 
 
 def bars_by_minute(bars: Iterable[Mapping]) -> dict[tuple[str, datetime], tuple[float, float]]:
-    """Journalled `bar` payloads keyed by (series, bar-open minute in UTC) -> (low, high).
+    """Journalled `bar` payloads keyed by (contract code, bar-open minute in UTC) -> (low, high).
     A bar covers [ts, ts + 1 min)."""
-    return {
-        (series_of(b["contract"]), minute(parse_ts(b["ts"]))): (b["low"], b["high"]) for b in bars
-    }
+    return {(b["contract"], minute(parse_ts(b["ts"]))): (b["low"], b["high"]) for b in bars}
 
 
 def ticks_outside(price: float, low: float, high: float, tick: float) -> float:
@@ -73,7 +92,8 @@ class Compared:
 class Result:
     seen: int
     compared: tuple[Compared, ...]
-    unmatched: tuple[Mapping, ...]  # fills with no bar for their minute
+    unmatched: tuple[Mapping, ...]  # fills with no bar of their contract for their minute
+    skipped: int = 0  # qty-0 fills: no trade, never compared nor counted toward MIN_FILLS
 
 
 def compare_fills(
@@ -82,46 +102,64 @@ def compare_fills(
     specs: Mapping[str, ContractSpec],
 ) -> Result:
     """`specs` by symbol; a fill's instrument is NinjaTrader's name (`MNQ 12-26`)."""
-    seen, compared, unmatched = 0, [], []
+    seen, skipped, compared, unmatched = 0, 0, [], []
     for f in fills:
         seen += 1
-        spec = specs[f["instrument"].split()[0]]
-        bar = bars.get((spec.series, minute(parse_ts(f["ts"]))))
+        if f["qty"] == 0:  # the runner journals and ignores it: no trade to compare
+            skipped += 1
+            continue
+        contract, spec = contract_of(f["instrument"], specs)
+        bar = bars.get((contract, minute(parse_ts(f["ts"]))))
         if bar is None:
             unmatched.append(f)
             continue
         low, high = bar
         compared.append(Compared(f, low, high, ticks_outside(f["price"], low, high, spec.tick)))
-    return Result(seen, tuple(compared), tuple(unmatched))
+    return Result(seen, tuple(compared), tuple(unmatched), skipped)
 
 
 def beyond(result: Result) -> list[Compared]:
     return [c for c in result.compared if c.ticks > TOLERANCE_TICKS + EPS]
 
 
-def passed(result: Result) -> bool:
-    return len(result.compared) >= MIN_FILLS and not beyond(result)
+def passed(result: Result, allow_unmatched: int = 0) -> bool:
+    """An unmatched fill is one the gate could not check, so any FAILs unless the owner accepts
+    up to `allow_unmatched` of them, each explained in docs/data-gate.md Item 5."""
+    return (
+        len(result.compared) >= MIN_FILLS
+        and not beyond(result)
+        and len(result.unmatched) <= allow_unmatched
+    )
 
 
-def report(result: Result) -> list[str]:
+def _at(f: Mapping) -> str:
+    return f"{f['ts']} (+{seconds_in(parse_ts(f['ts'])):.3f}s)"
+
+
+def report(result: Result, allow_unmatched: int = 0) -> list[str]:
     worst = f"{max(c.ticks for c in result.compared):.2f}" if result.compared else "n/a"
     lines = [
         f"fills seen={result.seen} compared={len(result.compared)}"
-        f" unmatched={len(result.unmatched)} worst={worst} ticks"
+        f" unmatched={len(result.unmatched)} skipped={result.skipped} worst={worst} ticks"
         f" (tolerance {TOLERANCE_TICKS} tick)"
     ]
     lines += [
-        f"   no bar: {f['ts']} {f['instrument']} qty={f['qty']} price={f['price']}"
+        f"   no bar: {_at(f)} {f['instrument']} qty={f['qty']} price={f['price']}"
         for f in result.unmatched
     ]
     lines += [
-        f"   beyond: {c.fill['ts']} {c.fill['instrument']} qty={c.fill['qty']}"
+        f"   beyond: {_at(c.fill)} {c.fill['instrument']} qty={c.fill['qty']}"
         f" price={c.fill['price']} bar low={c.low} high={c.high} -> {c.ticks:.2f} ticks"
         for c in beyond(result)
     ]
+    if result.unmatched:
+        lines.append(
+            f"   {len(result.unmatched)} unmatched, {allow_unmatched} allowed:"
+            " explain each in docs/data-gate.md Item 5"
+        )
     if len(result.compared) < MIN_FILLS:
         lines.append(f"   {len(result.compared)} fills compared, need {MIN_FILLS}")
-    lines.append("PASS" if passed(result) else "FAIL")
+    lines.append("PASS" if passed(result, allow_unmatched) else "FAIL")
     return lines
 
 
@@ -144,14 +182,27 @@ def main() -> None:
     )
     p.add_argument("account", help="the NinjaTrader sim account, as armed (e.g. Sim101)")
     p.add_argument("--day", nargs="+", required=True, type=date.fromisoformat, help="trading days")
-    p.add_argument("--db", type=Path, help="default: <private_dir>/fenrir.db")
+    p.add_argument(
+        "--db", type=Path, help="default: <private_dir>/fenrir.db as this shell's settings read it"
+    )
+    p.add_argument(
+        "--allow-unmatched",
+        type=int,
+        default=0,
+        metavar="N",
+        help="accept up to N fills with no bar (default 0); explain each in data-gate Item 5",
+    )
     p.add_argument("--instruments", type=Path, default=Path("instruments.yaml"))
     args = p.parse_args()
     db = args.db or load_settings().private_dir / "fenrir.db"
     fills, bars = load(db, args.account, args.day)
     specs = {s.symbol: s for s in load_instruments(args.instruments).specs}
     print(f"journal {db} account {args.account} days {', '.join(map(str, args.day))}")
-    for line in report(compare_fills(fills, bars_by_minute(bars), specs)):
+    try:
+        result = compare_fills(fills, bars_by_minute(bars), specs)
+    except ValueError as e:  # e.g. a fill on an instrument instruments.yaml does not list
+        raise SystemExit(f"FAIL: {e}") from None
+    for line in report(result, args.allow_unmatched):
         print(line)
 
 

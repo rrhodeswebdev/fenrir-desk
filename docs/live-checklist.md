@@ -3,7 +3,8 @@
 SPEC Testing Strategy: "dry run on live LSE data before sim; sim before live". Checkpoint F
 (`tasks/plan.md`) needs SC4 and SC5 in all three stages. Tick a line only after it was run, with
 the date. The add-on's own checklist (SC6: bracket, flatten, cancel, dedupe, 16:40 flatten, token
-rejection, Python stopped) is `addon/CHECKLIST.md` (#68); it comes before stage 2.
+rejection, Python stopped) is [`addon/CHECKLIST.md`](../addon/CHECKLIST.md) (#68; SC6 passes
+when its I1, I2, I4 and I7 pass); it comes before stage 2.
 
 ## Stage 1 — dry run on live data (#82)
 
@@ -54,11 +55,13 @@ reconciles, but an `end_of_day` account then halts with "confirm balances" for t
 
 ### SC5 from the journal
 
-Every Bracket sent has a stop on the losing side of its target, no position was left without a
-known stop, and any Bracket rejected is journalled with its reason. `fills under them` counts the
-fills carrying a sent Bracket's client id (its entry, stop and target: the add-on names them
-`F|<id>|E/S/T`; a Flatten's fills carry none).
-From the repo root, read-only (pass every day traded):
+SPEC SC5 has two halves. First, every Bracket sent has a stop: here, a stop on the losing side of
+the price its entry filled at (the first fill carrying its client id; the add-on names the entry,
+stop and target `F|<id>|E/S/T`, and a Flatten's fills carry none), and no position was left
+without a known stop. Second, a Bracket whose stop-out would breach a limit is rejected and
+journalled: `pretrade.check` gives those the reason `stop-out loss … at or below drawdown floor …`
+or `… daily loss limit …`. Other Bracket rejections (paused, flat-by, entry still working,
+contract limit) are listed apart. From the repo root, read-only (pass every day traded):
 
 ```bash
 uv run python - Sim101 2026-10-15 2026-10-16 <<'EOF'
@@ -72,32 +75,51 @@ conn = journal.open_ro(load_settings().private_dir / "fenrir.db")
 rows = [r for d in days for r in journal.rows(conn, account, d)]
 sent = [r.payload for r in rows if r.kind == "action" and r.payload["type"] == "Bracket"
         and r.payload["sent"]]
-bad = [a for a in sent if not (a["stop"] < a["target"] if a["side"] == "long"
-                               else a["stop"] > a["target"])]
-ids = {a["client_id"] for a in sent}
-under = [r for r in rows if r.kind == "fill" and r.payload["client_id"] in ids]
+entry = {}  # client id -> its first fill's price: the entry
+for r in rows:
+    if r.kind == "fill" and r.payload["client_id"]:
+        entry.setdefault(r.payload["client_id"], r.payload["price"])
+filled = [a for a in sent if a["client_id"] in entry]
+bad = [a | {"entry_fill": entry[a["client_id"]]} for a in filled
+       if not (a["stop"] < entry[a["client_id"]] if a["side"] == "long"
+               else a["stop"] > entry[a["client_id"]])]
 stopless = [r.payload["message"] for r in rows if r.kind == "alert"
             and "has no known stop" in r.payload["message"]]
 rejected = [r.payload for r in rows if r.kind == "rejection"
             and r.payload["action"]["type"] == "Bracket"]
-print(f"brackets sent={len(sent)} stop on the wrong side={len(bad)} fills under them={len(under)}"
-      f" no-known-stop alerts={len(stopless)} brackets rejected={len(rejected)}")
-for x in [*bad, *stopless, *rejected]:
-    print("  ", x)
+limit = [x for x in rejected if x["reason"].startswith("stop-out loss ")]
+other = [x for x in rejected if x not in limit]
+print(f"brackets sent={len(sent)} filled={len(filled)} stop not past the entry fill={len(bad)}"
+      f" no-known-stop alerts={len(stopless)}")
+print(f"rejected for a limit={len(limit)} rejected otherwise={len(other)}")
+for x in [*bad, *stopless]:
+    print("   stop:", x)
+for x in limit:
+    print("   limit:", x)
+for x in other:
+    print("   other:", x)
 EOF
 ```
 
-- [ ] `stop on the wrong side=0` and `no-known-stop alerts=0`; each rejection's reason read.
+- [ ] `stop not past the entry fill=0` and `no-known-stop alerts=0`.
 - [ ] Every entry's stop was seen working at NinjaTrader (above): the journal holds what was sent,
   not what NinjaTrader placed.
+- [ ] Each `limit:` rejection read; with `rejected for a limit=0`, record "SC5 rejection half not
+  exercised in stage 2": it is exercised only when a Bracket's stop-out would breach a limit.
 
 ### Gate item 5
 
-- [ ] `uv run python scripts/gate_item5.py Sim101 --day <each day traded>` (add `--db PATH` when
-  `FENRIR_PRIVATE_DIR` is not set in `.env`). It reads only the journal: each fill against the
-  journalled LSE bar of its minute, PASS at 10 or more fills compared, none more than 1 tick
-  outside its bar's [low, high]. Unmatched fills (no bar that minute, e.g. the server was down)
-  are listed and not compared.
+- [ ] `uv run python scripts/gate_item5.py Sim101 --day <each day traded>`, from the repo root.
+  Without `--db` it reads `<private_dir>/fenrir.db` as this shell's settings resolve it
+  (`FENRIR_PRIVATE_DIR`, else `data/private`): pass `--db PATH` when that is not the journal the
+  server wrote (another working directory or `.env`, or the Docker volume). It reads only the
+  journal: each fill against the journalled LSE bar of its contract (`MNQ 12-26` → `NQZ26`) and
+  minute. PASS needs 10 or more fills compared, none more than 1 tick outside its bar's
+  [low, high], and no unmatched fill (no bar of its contract that minute: the server down, the
+  feed replaying, a clock or month mismatch). Qty-0 fills are skipped.
+- [ ] Any unmatched fill FAILs the gate. Each is listed with its seconds past the minute; once it is
+  explained (e.g. the server was stopped that minute), re-run with `--allow-unmatched N` for the N
+  explained, and write each explanation in `docs/data-gate.md` Item 5.
 - [ ] The printed counts, worst distance and PASS/FAIL recorded in `docs/data-gate.md` Item 5,
   with the dates, account, strategy and contract.
 

@@ -85,15 +85,18 @@ Result: PASS (2026-10-14).
 
 Result: not run yet (#99). Needs the add-on and a sim account: `docs/live-checklist.md` stage 2.
 - Run: `uv run python scripts/gate_item5.py <sim account> --day <trading day> [<trading day> …]`
-  (`--db PATH` when the journal is not `<private_dir>/fenrir.db`). It reads the account's journal
-  read-only and calls no LSE: each `fill` row (the add-on's fill) against the journalled `bar` row
-  (the LSE 1-minute bar the runner traded on) of the minute holding the fill time, both parsed with
-  `datetime.fromisoformat` and keyed by the minute in UTC.
-- PASS: at least 10 fills compared, and none more than 1 tick outside its bar's [low, high] (item
-  4's tolerance; a sim market fill prints at the ask or bid while LSE's `price` may be the bid,
-  Item 3). Fills with no bar for their minute are listed as unmatched and not compared.
-- To record here: fills seen, compared, unmatched, worst distance in ticks, PASS/FAIL, the days,
-  account, strategy and contract.
+  from the repo root (`--db PATH` when this shell's `<private_dir>/fenrir.db` is not the journal
+  the server wrote; `--allow-unmatched N`, below). It reads the account's journal read-only and
+  calls no LSE: each `fill` row (the add-on's fill) against the journalled `bar` row (the LSE
+  1-minute bar the runner traded on) of the same contract (`MNQ 12-26` → `NQZ26`) and the minute
+  holding the fill time, both parsed with `datetime.fromisoformat` and keyed by the minute in UTC.
+- PASS: at least 10 fills compared, none more than 1 tick outside its bar's [low, high] (item 4's
+  tolerance; a sim market fill prints at the ask or bid while LSE's `price` may be the bid, Item
+  3), and no unmatched fill (no bar of its contract for its minute), unless `--allow-unmatched N`
+  accepts up to N. Each unmatched fill is listed with its seconds past the minute, and each one
+  accepted is explained here. Qty-0 fills are skipped and do not count toward the 10.
+- To record here: fills seen, compared, unmatched (and why, for each one accepted), worst distance
+  in ticks, PASS/FAIL, the days, account, strategy and contract.
 
 ## Dry run on live data (#82)
 

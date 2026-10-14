@@ -112,7 +112,7 @@ def test_ten_fills_compared_inside_their_bars_pass():
     result = gate.compare_fills(ten, bars, SPECS)
     assert gate.passed(result)
     assert gate.report(result) == [
-        "fills seen=10 compared=10 unmatched=0 worst=0.00 ticks (tolerance 1 tick)",
+        "fills seen=10 compared=10 unmatched=0 skipped=0 worst=0.00 ticks (tolerance 1 tick)",
         "PASS",
     ]
 
@@ -123,7 +123,9 @@ def test_nothing_compared_fails_even_with_fills_seen():
     result = gate.compare_fills(fills, bars, SPECS)
     assert (result.seen, len(result.compared), len(result.unmatched)) == (12, 0, 12)
     lines = gate.report(result)
-    assert lines[0] == "fills seen=12 compared=0 unmatched=12 worst=n/a ticks (tolerance 1 tick)"
+    assert lines[0] == (
+        "fills seen=12 compared=0 unmatched=12 skipped=0 worst=n/a ticks (tolerance 1 tick)"
+    )
     assert lines[-1] == "FAIL"
 
 
@@ -157,8 +159,8 @@ def test_one_tick_out_passes_and_two_fail_listed_with_the_worst():
     assert [c.ticks for c in gate.beyond(result)] == [2.0]
     assert not gate.passed(result)
     assert gate.report(result) == [
-        "fills seen=12 compared=12 unmatched=0 worst=2.00 ticks (tolerance 1 tick)",
-        "   beyond: 2026-10-12T13:11:30.000Z MNQ 12-26 qty=-1 price=29999.5"
+        "fills seen=12 compared=12 unmatched=0 skipped=0 worst=2.00 ticks (tolerance 1 tick)",
+        "   beyond: 2026-10-12T13:11:30.000Z (+30.000s) MNQ 12-26 qty=-1 price=29999.5"
         " bar low=30000.0 high=30010.0 -> 2.00 ticks",
         "FAIL",
     ]
@@ -180,8 +182,71 @@ def test_a_fill_with_no_bar_is_unmatched_and_listed(tmp_path):
     assert len(result.compared) == 10
     assert result.unmatched == (gap,)
     lines = gate.report(result)
-    assert "   no bar: 2026-10-12T13:45:10.500Z MNQ 12-26 qty=1 price=30005.0" in lines
-    assert lines[-1] == "PASS"  # listed, but 10 others were compared within tolerance
+    assert lines[1:] == [
+        "   no bar: 2026-10-12T13:45:10.500Z (+10.500s) MNQ 12-26 qty=1 price=30005.0",
+        "   1 unmatched, 0 allowed: explain each in docs/data-gate.md Item 5",
+        "FAIL",  # an unchecked fill is not a pass, though 10 others were within tolerance
+    ]
+    assert not gate.passed(result)
+
+
+def test_most_fills_unmatched_fails_however_far_off_they_are():
+    # review of #253: 10 fills inside their bars and 30 at 99999 with no bar printed PASS
+    bars = gate.bars_by_minute([bar(m, 30000.0, 30010.0) for m in range(10)])
+    inside = [fill(f"2026-10-12T13:{m:02d}:30.000Z", 30005.0) for m in range(10)]
+    wild = [fill(f"2026-10-12T14:{m:02d}:30.000Z", 99999.0) for m in range(30)]
+    result = gate.compare_fills([*inside, *wild], bars, SPECS)
+    assert (result.seen, len(result.compared), len(result.unmatched)) == (40, 10, 30)
+    assert not gate.passed(result)
+    assert not gate.passed(result, allow_unmatched=29)
+    assert gate.report(result)[-1] == "FAIL"
+
+
+def test_allow_unmatched_accepts_up_to_n_and_still_lists_each():
+    bars = gate.bars_by_minute([bar(m, 30000.0, 30010.0) for m in range(10)])
+    inside = [fill(f"2026-10-12T13:{m:02d}:30.000Z", 30005.0) for m in range(10)]
+    gaps = [fill(f"2026-10-12T14:0{m}:01.000Z", 30005.0) for m in range(2)]
+    result = gate.compare_fills([*inside, *gaps], bars, SPECS)
+    assert not gate.passed(result, allow_unmatched=1)
+    assert gate.passed(result, allow_unmatched=2)
+    lines = gate.report(result, allow_unmatched=2)
+    assert lines[1:] == [
+        "   no bar: 2026-10-12T14:00:01.000Z (+1.000s) MNQ 12-26 qty=1 price=30005.0",
+        "   no bar: 2026-10-12T14:01:01.000Z (+1.000s) MNQ 12-26 qty=1 price=30005.0",
+        "   2 unmatched, 2 allowed: explain each in docs/data-gate.md Item 5",
+        "PASS",
+    ]
+
+
+def test_a_fill_matches_only_its_own_contract_month():
+    # NQH27 bars never stand in for an MNQ 12-26 fill: a month mismatch is unmatched
+    bars = gate.bars_by_minute([bar(m, 30000.0, 30010.0, "NQH27") for m in range(10)])
+    fills = [fill(f"2026-10-12T13:{m:02d}:30.000Z", 30005.0) for m in range(10)]
+    result = gate.compare_fills(fills, bars, SPECS)
+    assert (len(result.compared), len(result.unmatched)) == (0, 10)
+    assert not gate.passed(result, allow_unmatched=10)  # and nothing compared
+
+
+def test_contract_of_maps_ninjatraders_name_to_our_code():
+    assert gate.contract_of("MNQ 12-26", SPECS) == ("NQZ26", SPECS["MNQ"])
+    assert gate.contract_of("ES 03-27", SPECS) == ("ESH27", SPECS["ES"])
+    assert gate.contract_of("MES 06-27", SPECS)[0] == "ESM27"
+    assert gate.contract_of("NQ 09-26", SPECS)[0] == "NQU26"
+
+
+@pytest.mark.parametrize("instrument", ["YM 12-26", "MNQ 11-26", "MNQ", "MNQ 12-2026"])
+def test_an_unknown_instrument_is_a_clear_error(instrument):
+    with pytest.raises(ValueError, match="not a quarterly contract of instruments.yaml"):
+        gate.compare_fills([fill("2026-10-12T13:31:30.000Z", 1.0, instrument)], {}, SPECS)
+
+
+def test_qty_0_fills_are_skipped_and_never_count_toward_ten():
+    bars = gate.bars_by_minute([bar(m, 30000.0, 30010.0) for m in range(10)])
+    fills = [fill(f"2026-10-12T13:{m:02d}:30.000Z", 30005.0) for m in range(9)]
+    fills += [fill("2026-10-12T13:09:30.000Z", 30005.0, qty=0)]
+    result = gate.compare_fills(fills, bars, SPECS)
+    assert (result.seen, len(result.compared), result.skipped) == (10, 9, 1)
+    assert not gate.passed(result)
 
 
 def test_a_fill_matches_only_its_own_series():
@@ -218,7 +283,10 @@ def test_main_prints_the_verdict(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", [*argv, "--instruments", str(_root / "instruments.yaml")])
     gate.main()
     out = capsys.readouterr().out.splitlines()
-    assert out[1] == "fills seen=10 compared=10 unmatched=0 worst=0.00 ticks (tolerance 1 tick)"
+    assert (
+        out[1]
+        == "fills seen=10 compared=10 unmatched=0 skipped=0 worst=0.00 ticks (tolerance 1 tick)"
+    )
     assert out[-1] == "PASS"
 
 
@@ -226,3 +294,13 @@ def test_fills_and_bars_key_by_the_minute_in_utc_whatever_the_offset():
     bars = gate.bars_by_minute([bar(31, 30000.0, 30010.0)])
     result = gate.compare_fills([fill("2026-10-12T09:31:30.000-04:00", 30005.0)], bars, SPECS)
     assert len(result.compared) == 1
+
+
+def test_main_fails_cleanly_on_an_unknown_instrument(tmp_path, monkeypatch):
+    db = journalled(
+        tmp_path, [bar(31, 1.0, 2.0)], [fill("2026-10-12T13:31:30.000Z", 1.5, "YM 12-26")]
+    )
+    argv = ["gate_item5.py", "Sim101", "--day", "2026-10-12", "--db", str(db)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--instruments", str(_root / "instruments.yaml")])
+    with pytest.raises(SystemExit, match="FAIL: fill on instrument 'YM 12-26'"):
+        gate.main()

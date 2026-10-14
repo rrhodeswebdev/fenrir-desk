@@ -11,6 +11,7 @@ from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import anyio
 import pytest
 from backtest_helpers import D1, D2, D3, NQ, bar, et, make_rules
 from live_helpers import ARMED_AT, decide_now, fill, make_setup, pinned, reconciled, stored
@@ -986,6 +987,55 @@ async def test_a_stop_whose_caller_is_cancelled_still_waits_for_the_close(
         feed.release.set()
         with pytest.raises(asyncio.CancelledError):
             await caller
+    feed_stopped(hub, feed, task)
+    assert not hub._lock.locked()
+
+
+@pytest.mark.anyio
+async def test_a_stop_cancelled_again_and_again_still_waits_for_the_close(
+    hub, conn, tmp_path, monkeypatch
+):
+    # #257: a second cancel, or an anyio cancel scope (it cancels again on every await), must
+    # not release the lock either while the old stream closes
+    feed = FakeFeed(slow_close=True)
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    task = hub._feed
+    arming.disarm(conn, "Sim101", T0)
+    scopes: list[anyio.CancelScope] = []
+
+    async def scoped_tick():
+        with anyio.CancelScope() as scope:
+            scopes.append(scope)
+            await hub.tick(T0)
+
+    async with asyncio.timeout(5):
+        twice = asyncio.create_task(hub.tick(T0))
+        await until(lambda: feed.closing == 1)
+        twice.cancel()
+        await asyncio.sleep(0.02)
+        twice.cancel()
+        await asyncio.sleep(0.05)
+        assert not twice.done() and hub._lock.locked()
+        feed.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await twice
+        feed_stopped(hub, feed, task)
+        assert not hub._lock.locked()
+
+        hub.start()  # a second run: armed again, then a disarm cancelled by a scope
+        a = arm(conn, tmp_path, ALWAYS)
+        await hub.tick(T0)
+        await until(lambda: feed.subscribed == 2)
+        task = hub._feed
+        feed.release.clear()
+        arming.disarm(conn, a.account, T0)
+        scoped = asyncio.create_task(scoped_tick())
+        await until(lambda: feed.closing == 2)
+        scopes[0].cancel()
+        await asyncio.sleep(0.05)
+        assert not scoped.done() and hub._lock.locked()
+        feed.release.set()
+        await scoped  # the scope takes its own cancel
     feed_stopped(hub, feed, task)
     assert not hub._lock.locked()
 

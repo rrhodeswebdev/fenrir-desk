@@ -401,6 +401,20 @@ def test_a_new_series_drops_the_idle_workers_before_loading(settings, monkeypatc
     assert spy_pool["cancel"] == [True] and spy_pool["pools"] == 2
 
 
+def test_memory_is_measured_once_per_series_with_no_workers_alive(settings, monkeypatch, spy_pool):
+    measured = []
+
+    def limit():
+        measured.append(run_module._pool)
+        return 64 * GIB - len(measured) * GIB  # live workers would shrink MemAvailable
+
+    monkeypatch.setattr(run_module, "_memory_limit", limit)
+    for contract in ("MNQ", "NQ"):
+        run_backtest(ORB, ACCOUNT, contract, settings, include_holdout=False)
+    assert measured == [None]  # before the parent's load, and the grid's second item reused it
+    assert spy_pool["pools"] == 1
+
+
 def test_a_worker_loads_each_series_once_across_items(settings, monkeypatch):
     items = [(ORB, ACCOUNT, contract, settings, False) for contract in ("MNQ", "NQ")]
     seen = [run_module._plan(a, settings.holdout_months)[2] for a in items]  # keeps no bars
@@ -444,15 +458,81 @@ def test_worker_cap_fits_memory(memory, cpus, bars, cap):
 
 
 def test_too_little_memory_warns_and_runs_one(monkeypatch, capsys):
-    monkeypatch.setattr(run_module, "_memory_limit", lambda: 2 * GIB)
-    assert run_module._workers(FULL_NQ) == 1
-    assert "0.7 GB more than 70% of the 2.1 GB memory limit" in capsys.readouterr().err
+    assert run_module._workers(FULL_NQ, 2 * GIB, {}) == 1
+    assert "0.7 GB more than 70% of the 2.1 GB of memory available" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("text", "limit"), [("6442450944\n", 6 * GIB), ("max\n", None)])
-def test_memory_limit_prefers_the_cgroup(tmp_path, monkeypatch, text, limit):
-    cgroup = tmp_path / "memory.max"
-    cgroup.write_text(text)
-    monkeypatch.setattr(run_module, "CGROUP_MEMORY_MAX", cgroup)
+MEMINFO = "MemTotal:       65011712 kB\nMemFree:         1000000 kB\nMemAvailable:   20971520 kB\n"
+
+
+@pytest.mark.parametrize(
+    ("text", "available"),
+    [
+        (MEMINFO, 20 * GIB),  # kB
+        ("MemTotal: 1 kB\n", None),  # a kernel before 3.14 has no MemAvailable
+        ("MemAvailable: lots kB\n", None),
+        ("", None),
+    ],
+)
+def test_mem_available_reads_meminfo(text, available):
+    assert run_module.mem_available(text) == available
+
+
+def memory_files(tmp_path, cgroup: str | None, meminfo: str | None) -> tuple[Path, Path]:
+    paths = tmp_path / "memory.max", tmp_path / "meminfo"
+    for path, text in zip(paths, (cgroup, meminfo), strict=True):
+        if text is not None:
+            path.write_text(text)
+    return paths
+
+
+@pytest.mark.parametrize(
+    ("cgroup", "meminfo", "limit"),
+    [
+        ("6442450944\n", MEMINFO, 6 * GIB),  # a container limit below what the host has free
+        ("68719476736\n", MEMINFO, 20 * GIB),  # in a container MemAvailable is the host's
+        ("max\n", MEMINFO, 20 * GIB),  # Docker on Linux without a limit (#260)
+        (None, MEMINFO, 20 * GIB),  # native: no cgroup file at the root
+        ("6442450944\n", None, 6 * GIB),
+        ("max\n", "MemTotal: 1 kB\n", 1024 * 1024),  # neither: physical memory
+        (None, None, 1024 * 1024),
+        ("garbage\n", None, 1024 * 1024),
+    ],
+)
+def test_memory_limit_is_what_is_available(tmp_path, monkeypatch, cgroup, meminfo, limit):
     monkeypatch.setattr(run_module.os, "sysconf", lambda name: 1024)
-    assert run_module._memory_limit() == (limit or 1024 * 1024)
+    assert run_module._memory_limit(*memory_files(tmp_path, cgroup, meminfo)) == limit
+
+
+def test_memory_limit_unknown_is_none(tmp_path, monkeypatch):
+    def unknown(name):
+        raise ValueError(name)
+
+    monkeypatch.setattr(run_module.os, "sysconf", unknown)
+    assert run_module._memory_limit(*memory_files(tmp_path, None, None)) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "workers"),
+    [
+        (None, 16),
+        ("", 16),  # empty = unset, as for the settings
+        ("4", 4),
+        (" 4 ", 4),
+        ("64", 16),  # a cap, never more than memory and cores allow
+    ],
+)
+def test_workers_env_caps_the_count(monkeypatch, capsys, raw, workers):
+    monkeypatch.setattr(run_module.os, "cpu_count", lambda: 16)
+    env = {} if raw is None else {"FENRIR_BACKTEST_WORKERS": raw}
+    assert run_module._workers(1_000, 64 * GIB, env) == workers
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("raw", ["0", "-2", "four", "2.5"])
+def test_an_invalid_workers_env_is_ignored_with_a_warning(monkeypatch, capsys, raw):
+    monkeypatch.setattr(run_module.os, "cpu_count", lambda: 16)
+    assert run_module._workers(1_000, 64 * GIB, {"FENRIR_BACKTEST_WORKERS": raw}) == 16
+    err = capsys.readouterr().err
+    assert f"ignoring FENRIR_BACKTEST_WORKERS={raw!r}" in err
+    assert "positive whole number" in err

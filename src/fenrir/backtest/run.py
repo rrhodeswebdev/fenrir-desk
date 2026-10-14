@@ -29,9 +29,13 @@ CHUNK = 16  # attempts per task: amortizes pickling without starving cores
 # measured (SPEC Open Question 5): a worker holding the full 3.4M-bar NQ series is about 1.9 GB
 PROCESS_BYTES = 200_000_000  # interpreter, polars and the fenrir imports
 BYTES_PER_BAR = 520
-BUDGET_PCT = 70  # of the memory limit: headroom for load peaks, the OS and other processes
-# cgroup v2 only (Docker Desktop's); a v1 limit is not read and physical memory is used instead
+# of the memory available at start, which already leaves out other processes (a VM, #260): the
+# rest is for load peaks, the page cache MemAvailable counts as free, and others growing later
+BUDGET_PCT = 70
+# cgroup v2 only (Docker's): a v1 limit is not read. Natively there is no such file
 CGROUP_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
+MEMINFO = Path("/proc/meminfo")
+WORKERS_ENV = "FENRIR_BACKTEST_WORKERS"  # process env only, like FENRIR_PTY_USER: a cap
 
 # per process: name -> (key, value). One value per name, so a new series replaces the old one
 _memo: dict[str, tuple] = {}
@@ -94,30 +98,69 @@ def worker_cap(memory: int | None, cpus: int, bars: int) -> tuple[int, int]:
     return max(1, min(cpus, free // per_worker)), max(0, per_worker - free)
 
 
-def _memory_limit() -> int | None:
-    """The container's cgroup limit when there is one, else physical memory; None if unknown."""
+def mem_available(text: str) -> int | None:
+    """Bytes of `MemAvailable` in /proc/meminfo text (in kB there); None when absent. Pure."""
+    for line in text.splitlines():
+        name, _, rest = line.partition(":")
+        if name == "MemAvailable":
+            value = rest.split()[:1]
+            return int(value[0]) * 1024 if value and value[0].isdecimal() else None
+    return None
+
+
+def _cgroup_limit(path: Path) -> int | None:
     try:
-        text = CGROUP_MEMORY_MAX.read_text().strip()
-        if text != "max":
-            return int(text)
+        text = path.read_text().strip()
+        return None if text == "max" else int(text)
     except (OSError, ValueError):
-        pass
+        return None
+
+
+def _available(path: Path) -> int | None:
+    try:
+        return mem_available(path.read_text())
+    except OSError:
+        return None
+
+
+def _memory_limit(cgroup: Path = CGROUP_MEMORY_MAX, meminfo: Path = MEMINFO) -> int | None:
+    """Memory available at start: the smaller of the cgroup limit and MemAvailable (in a container
+    MemAvailable is the host's), else physical memory; None if unknown."""
+    known = [m for m in (_cgroup_limit(cgroup), _available(meminfo)) if m is not None]
+    if known:
+        return min(known)
     try:
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (OSError, ValueError):
         return None
 
 
-def _workers(bars: int) -> int:
-    memory = _memory_limit()
+def _workers_cap(env: Mapping[str, str]) -> int | None:
+    """`FENRIR_BACKTEST_WORKERS` as a positive int; unset or empty is None, anything else warns."""
+    raw = env.get(WORKERS_ENV, "")
+    if raw == "":
+        return None
+    try:
+        cap = int(raw)
+    except ValueError:
+        cap = 0
+    if cap >= 1:
+        return cap
+    print(f"warning: ignoring {WORKERS_ENV}={raw!r}: not a positive whole number", file=sys.stderr)
+    return None
+
+
+def _workers(bars: int, memory: int | None, env: Mapping[str, str] = os.environ) -> int:
     workers, short = worker_cap(memory, os.cpu_count() or 1, bars)
     if short:
         print(
             f"warning: one backtest worker for {bars:,} bars needs about {short / 1e9:.1f} GB more "
-            f"than {BUDGET_PCT}% of the {memory / 1e9:.1f} GB memory limit; running 1 anyway",
+            f"than {BUDGET_PCT}% of the {memory / 1e9:.1f} GB of memory available; "
+            "running 1 anyway",
             file=sys.stderr,
         )
-    return workers
+    cap = _workers_cap(env)
+    return workers if cap is None else min(workers, cap)
 
 
 def _once(name: str, key, make: Callable):
@@ -236,16 +279,19 @@ def _plan(load_args, holdout_months: int):
 
     def split():
         _drop_pool()  # idle workers hold the old series: free it before the parent's load peak
+        # measured once per series, with no workers alive and before the load: live workers
+        # holding the bars would shrink MemAvailable, and a smaller count a new pool (#260)
+        memory = _memory_limit()
         bars = _load_bars(bars_key)
         if not bars:
             raise ValueError(
                 f"no {strategy.market} bars in {load_args[3].data_dir}; run `fenrir data pull`"
             )
-        return *periods(bars, holdout_months), len(bars)
+        return *periods(bars, holdout_months), len(bars), memory
 
-    tuning, holdout, count = _once("plan", (bars_key, holdout_months), split)
+    tuning, holdout, count, memory = _once("plan", (bars_key, holdout_months), split)
     seen = (strategy.hash, rules_hash, bars_key[2], count)
-    return strategy, rules, seen, tuning, holdout
+    return strategy, rules, seen, tuning, holdout, memory
 
 
 def run_backtest(
@@ -270,7 +316,7 @@ def run_backtest(
         dll_on,
     )  # workers get the same choice
     with _lock:
-        strategy, rules, seen, tuning, holdout = _plan(load_args, settings.holdout_months)
+        strategy, rules, seen, tuning, holdout, memory = _plan(load_args, settings.holdout_months)
         try:
             json.dumps(dict(strategy.params))
         except TypeError as e:
@@ -280,7 +326,7 @@ def run_backtest(
             [r for p in run_periods for r in p.ranges],
             load_args,
             seen,
-            _workers(seen[3]),
+            _workers(seen[3], memory),
             on_progress,
         )
 

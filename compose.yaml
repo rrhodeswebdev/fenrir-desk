@@ -16,9 +16,6 @@ services:
       - ./strategies:/app/strategies
       - fenrir-private:/var/lib/fenrir
       - claude-config:/home/claude/.claude-config
-    extra_hosts:
-      # Docker Desktop's name for the host, on Docker for Linux too (a NinjaTrader forward on it)
-      - "host.docker.internal:host-gateway"
     init: true
     security_opt:
       - no-new-privileges:true

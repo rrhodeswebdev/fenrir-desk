@@ -1128,6 +1128,102 @@ def test_an_intraday_gap_never_replaces_a_refused_start(changed):
     assert s.halted == refused and sends(effects) == []
 
 
+# #241: one rule for a refused start. Nothing replaces its halt, as no figures it reads are the
+# account's, and since it runs no strategy, a position it holds or adopts is flattened once
+
+REFUSALS = {"strategy": {"strategy_hash": "h2"}, "rules": {"rules_hash": "r2"}}
+HELD = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+HELD_STOP = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+
+
+def refused_long(changed, trailing="intraday"):
+    """A start refused on `changed` that adopts a bracketed long (stop 19,000) from NinjaTrader,
+    as a restart's replayed position is, with no strategy to exit it."""
+    s, _ = core.start(replace(sim(trailing=trailing), **changed), T.ts)
+    return core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))[0]
+
+
+def refused_why(s):
+    return f"position {s.position.qty} held by a refused start: {s.halted}"
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_refused_start_flattens_the_position_it_holds_once(changed):
+    """No step child is spawned, so only the long's stop, its target or the add-on's 16:40
+    flatten would ever close it. The next bar flattens it, whatever the figures say, with an
+    alert and the refusal in its reason; once: nothing while that Flatten is out, nor once flat."""
+    s = refused_long(changed)
+    refused, why = s.halted, refused_why(s)
+    assert not s.started and refused.endswith("changed since arming; re-arm")
+    s, effects = core.on_bar(s, bar("09:30", 20000.0, 20000.0, 20000.0, 20000.0))
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"] and s.halted == refused
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == [] and alerts(effects) == []
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=2, seconds=5), qty=-1))
+    s, effects = core.on_bar(s, at("09:32"))
+    assert (s.position.qty, sends(effects), s.halted) == (0, [], refused)
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_breach_never_replaces_a_refused_start(changed):
+    """C2 of PR #240: a breach is read from the same figures as a gap, which are not the
+    account's (inputs that may have been edited since arming; the status shows none of them),
+    so it never replaces the refusal either: no "halt" row, no breach alert, the refusal's
+    reason stays. The long is flattened on the refusal itself, not on the breach."""
+    low = bar("09:30", 20000.0, 20000.0, 19895.0, 20000.0)  # the long's worst: -2,100
+    started, _ = core.on_bar(held_long(), low)
+    assert started.halt_kind == "breach"  # the same bar breaches a start that ran
+    s = refused_long(changed)
+    refused, why = s.halted, refused_why(s)
+    s, effects = core.on_bar(s, low)
+    assert (s.halted, s.halt_kind, s.halt_day) == (refused, None, None)
+    assert "halt" not in kinds(effects) and alerts(effects) == [f"flattening: {why}"]
+    assert [a["reason"] for a in actions(effects)] == [why]
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19800.0, 19900.0))
+    assert s.halted == refused and "halt" not in kinds(effects)
+
+
+def peak_rows(setup):
+    """The "peak" rows of an intraday start at 50,300 (above its 50,000 peak), then NinjaTrader's
+    equity at 50,600, then a long adopted at 20,000 whose bar's high marks +$600 open."""
+    s, first = core.start(setup, T.ts)
+    s, second = core.on_account(reconciled(s), account(balance=50_500.0, unrealized=100.0), T.ts)
+    s, _ = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))
+    _, third = core.on_bar(s, at("09:30", hi=20030.0))
+    return [[p["peak"] for p in peaks(effects)] for effects in (first, second, third)]
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_refused_start_journals_no_peak_row(changed):
+    """None of the raises an intraday start journals: its start's to the balance, NinjaTrader's
+    on an account message, its own on a Mark. A restart that is not refused (the file put back,
+    not re-armed) starts as after the runner was down over that time."""
+    up = make_setup(
+        make_rules(trailing="intraday"),
+        mode="sim",
+        start=replace(START, balance=50_300.0),
+        day_start=DayStart(50_300.0, 50_000.0),
+    )
+    assert peak_rows(up) == [[50_300.0], [50_600.0], [50_900.0]]
+    assert peak_rows(replace(up, **changed)) == [[], [], []]
+
+
+def test_a_refused_starts_raise_never_hides_a_missed_close():
+    """Why: armed end_of_day on D1, down over D1's close, restarted on D2 with the rules file
+    edited to intraday (refused). A "peak" row from its raise to NinjaTrader's equity would be
+    read as a roll by an end_of_day restart (`_missed_close`), so with the file put back that
+    restart would never ask for the confirmed peak of the close it missed."""
+    armed = armed_at(sim(), at("08:00").ts)
+    edited = replace(armed, rules=make_rules(trailing="intraday"), rules_hash="r2")
+    now = at("09:30", D2).ts
+    s, effects = core.start(edited, now)
+    s, more = core.on_account(reconciled(s), account(balance=50_600.0), now)
+    assert not s.started
+    reverted, _ = core.start(armed, now + timedelta(minutes=5), peaks=peaks(effects + more))
+    assert reverted.halted == core.CONFIRM_BALANCES
+
+
 @pytest.mark.parametrize("other", ["strategy error", "warm-up diverged"])
 def test_a_gap_at_the_roll_under_another_open_ended_halt_replaces_it(other):
     """The same at an end_of_day roll (#219): the app flat at 0, NinjaTrader closes at 52,200

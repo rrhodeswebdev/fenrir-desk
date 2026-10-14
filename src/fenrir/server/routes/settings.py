@@ -1,20 +1,27 @@
-"""Settings API (contracts: Plan 24): the secrets file and the per-account choices."""
+"""Settings API (contracts: Plan 24): the secrets file, the per-account choices, and the restart
+that applies the secrets file in the image (#262)."""
 
 import asyncio
 import os
+import sqlite3
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from contextlib import closing
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from starlette.datastructures import State
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
+from fenrir.live.arming import list_armed
 from fenrir.rules.loader import list_accounts
-from fenrir.server.isolation import nested_git_in_image
+from fenrir.server.isolation import in_image, nested_git_in_image
+from fenrir.server.jobs import unfinished
 from fenrir.settings import (
+    Settings,
     env_file_path,
     mask_secret,
     parse_env_text,
@@ -68,6 +75,24 @@ def env_updates(update: Mapping[str, object], env: Mapping[str, str]) -> tuple[d
     return out, errors
 
 
+def restart_refusals(
+    image: bool, restarting: bool, armed: Sequence[str], pulling: bool, backtesting: bool
+) -> list[str]:
+    """Why `POST /api/settings/restart` must not restart now; empty means go."""
+    if not image:  # nothing would start it again
+        return ["Restart the server yourself: it runs natively, not in the Docker image."]
+    if restarting:
+        return ["The server is already restarting."]
+    out = []
+    if armed:
+        out.append(f"Disarm every account first (armed: {', '.join(armed)}).")
+    if pulling:
+        out.append("A data pull is running; wait for it to finish.")
+    if backtesting:
+        out.append("A backtest job is running; wait for it to finish.")
+    return out
+
+
 def _invalid(detail: str, errors: list[dict]) -> JSONResponse:
     return JSONResponse({"detail": detail, "errors": errors}, status_code=422)
 
@@ -111,17 +136,18 @@ def _read_env(path: Path | None) -> str:
         return ""
 
 
-def _settings_view(text: str, nested: list[str]) -> dict:
+def _settings_view(text: str, nested: list[str], pending: bool) -> dict:
     try:
         shown = view(parse_env_text(text))
     except ValueError as e:  # a bad value typed into the file by hand: name it
         raise HTTPException(status_code=500, detail=f"{_env_file()}: {e}") from e
-    return {**shown, "nested_git": nested}
+    return {**shown, "nested_git": nested, "can_restart": in_image(), "restart_pending": pending}
 
 
 @router.get("")
-def get_settings() -> dict:
-    return _settings_view(_read_env(_env_file()), nested_git_in_image())  # in the threadpool
+def get_settings(request: Request) -> dict:
+    nested = nested_git_in_image()  # in the threadpool
+    return _settings_view(_read_env(_env_file()), nested, request.app.state.settings_saved)
 
 
 @router.put("")
@@ -132,10 +158,53 @@ async def put_settings(request: Request):
             "Settings must be an object.", [{"loc": [], "msg": "body must be a JSON object"}]
         )
     # the walk off the event loop, before _save's no-await section
-    return _save(data, await asyncio.to_thread(nested_git_in_image))
+    return _save(request.app.state, data, await asyncio.to_thread(nested_git_in_image))
 
 
-def _save(data: dict, nested: list[str]):
+def _armed(settings: Settings) -> list[str]:
+    """The armed accounts, read under sqlite's write lock: an arm in flight commits first (and is
+    seen here) or takes the lock after `restarting` is set, and refuses."""
+    path = settings.private_dir / "fenrir.db"
+    if not path.exists():  # an arm creates the file before it checks `restarting`
+        return []  # nothing was ever armed
+    try:
+        # not journal.open_db: that would create a missing `armed` table rather than refuse
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return [a.account for a in list_armed(conn)]  # the close rolls back
+    except sqlite3.Error as e:  # fail closed: an unreadable `armed` never restarts
+        raise HTTPException(status_code=500, detail=f"cannot read the armed accounts: {e}") from e
+
+
+@router.post("/restart")
+async def restart(request: Request, background: BackgroundTasks) -> Response:
+    state = request.app.state
+    if why := restart_refusals(in_image(), state.restarting, [], False, False):
+        raise HTTPException(status_code=409, detail=" ".join(why))
+    # set before the reads, with no await since the check: arm, pull and job submit refuse from
+    # here on, and a second POST is "already restarting"
+    state.restarting = True
+    try:
+        armed = await asyncio.to_thread(_armed, state.settings)
+        why = restart_refusals(
+            True,
+            False,
+            armed,
+            state.pull.status()["state"] == "running",
+            any(unfinished(j) for j in state.jobs.jobs()),
+        )
+    except BaseException:
+        state.restarting = False
+        raise
+    if why:
+        state.restarting = False
+        raise HTTPException(status_code=409, detail=" ".join(why))
+    # runs after the response is sent; uvicorn's SIGTERM shutdown runs the lifespan's stop()
+    background.add_task(state.terminate)
+    return Response(status_code=202)
+
+
+def _save(state: State, data: dict, nested: list[str]):
     try:
         update = SettingsUpdate.model_validate(data).model_dump(exclude_unset=True)
     except ValidationError as e:
@@ -144,7 +213,7 @@ def _save(data: dict, nested: list[str]):
     if path is None:
         raise HTTPException(status_code=500, detail="no secrets file: FENRIR_ENV_FILE is not set")
     # no await from here on: read, merge and write cannot interleave with another save
-    text = _read_env(path)
+    text = old = _read_env(path)
     updates, errors = env_updates(update, parse_env_text(text))
     if errors:
         return _invalid("The settings do not validate.", errors)
@@ -153,10 +222,21 @@ def _save(data: dict, nested: list[str]):
             text = update_env_text(text, updates)
         except ValueError as e:  # a value with a line break
             return _invalid("The settings do not validate.", [{"loc": [], "msg": str(e)}])
-    response = _settings_view(text, nested)  # built first: a 500 here must not follow a write
+    changed = _parsed(text) != _parsed(old)  # a value written as it was changes nothing
+    # built first: a 500 here must not follow a write
+    response = _settings_view(text, nested, state.settings_saved or changed)
     if updates:
         _write(path, text.encode("utf-8"), 0o600)
+        # the running server still has the old values until it restarts
+        state.settings_saved = state.settings_saved or changed
     return response
+
+
+def _parsed(text: str) -> Settings | None:
+    try:
+        return parse_settings(parse_env_text(text))
+    except ValueError:  # a bad value typed into the file by hand
+        return None
 
 
 def _choices(data_dir: Path) -> dict[str, AccountChoice]:

@@ -30,9 +30,9 @@ git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
 docker compose up
 ```
 
-Open the launch link it prints (`docker compose logs` shows it again) and enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+Open the launch link it prints (`docker compose logs` shows it again) and enter the LSE key and the NinjaTrader address and token on the Settings page, then press **Apply and restart** there (the server restarts in a few seconds; no shell needed). They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
 
-Day to day, `docker compose up` (or `up -d`) is the command you run; data pulls, backtests and arming are in the browser.
+Day to day, `docker compose up` (or `up -d`) is the command you run; data pulls, backtests, arming and settings are in the browser.
 
 - **Signed in once per browser.** The link sets a cookie for 400 days that keeps working across restarts and rebuilds (it holds the session key, kept in the `fenrir-private` volume; `docker compose down -v` deletes it, with the settings and the trade journal). Each start prints a new one-time link and only the newest unused one works, so for a second browser run `docker compose restart` while nothing is armed (a restart sends an armed account through warm-up and reconcile again), then open the link `docker compose logs` shows last.
 - **In the background.** `docker compose up -d` runs it without a terminal, and `restart: unless-stopped` starts it again after a reboot (Docker Desktop: once it starts at sign-in). Ctrl+C on a foreground `up` stops it until the next `up`.
@@ -60,7 +60,7 @@ Fenrir trades through a C# add-on inside NinjaTrader 8 on Windows: the same mach
    ```
 
    With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
-4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM). The VM must be reachable from the host: on a Mac use bridged or shared networking; on a Linux host with VirtualBox, a NAT-only VM is not reachable without port forwarding, so add a host-only adapter ([addon/INSTALL.md](addon/INSTALL.md), section 3) and use the VM's `192.168.56.x` address. Settings apply after `docker compose restart`; the Live page's NinjaTrader field then shows the heartbeat.
+4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM). The VM must be reachable from the host: on a Mac use bridged or shared networking; on a Linux host with VirtualBox, a NAT-only VM is not reachable without port forwarding, so add a host-only adapter ([addon/INSTALL.md](addon/INSTALL.md), section 3) and use the VM's `192.168.56.x` address. Settings apply after **Apply and restart** on the Settings page (refused while an account is armed or a pull or backtest runs); the Live page's NinjaTrader field then shows the heartbeat.
 
 At 16:40 New York time the add-on flattens and cancels everything on its managed accounts by itself, whether Fenrir is running or not.
 

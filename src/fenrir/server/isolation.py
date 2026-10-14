@@ -93,9 +93,15 @@ def _git(name: str) -> bool:
 NESTED_GIT = "nested .git the terminal can write (your git there would run its config): %s"
 
 
+def in_image() -> bool:
+    """The Docker image (`FENRIR_BIND_ALL=1`, set by the image alone), where compose's restart
+    policy brings the server back after it exits."""
+    return os.environ.get("FENRIR_BIND_ALL") == "1"
+
+
 def nested_git_in_image() -> list[str]:
     """`nested_git(/app)` in the image; `[]` natively, where the terminal is the user anyway."""
-    return nested_git(APP_ROOT) if os.environ.get("FENRIR_BIND_ALL") == "1" else []
+    return nested_git(APP_ROOT) if in_image() else []
 
 
 def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:

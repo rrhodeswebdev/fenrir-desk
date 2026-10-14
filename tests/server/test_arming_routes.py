@@ -152,6 +152,29 @@ def test_needs_a_session_and_our_origin(client, path):
     )
 
 
+def test_an_arm_while_the_server_restarts_is_409(client, settings, path):
+    report(settings, path)
+    client.app.state.restarting = True  # POST /api/settings/restart passed (#262)
+    res = client.post("/api/arming/arm", json=body(path))
+    assert res.status_code == 409 and res.json() == {"error": "restarting", "summary": None}
+    assert armed(client) == []
+
+
+def test_a_restart_that_starts_mid_arm_is_seen_under_the_db_lock(client, settings, path):
+    report(settings, path)
+    addon = client.app.state.addon
+    real = addon.accounts
+
+    async def accounts():  # the restart sets its flag while the arm awaits NinjaTrader
+        client.app.state.restarting = True
+        return await real()
+
+    addon.accounts = accounts
+    res = client.post("/api/arming/arm", json=body(path))
+    assert res.status_code == 409 and res.json()["error"] == "restarting"
+    assert armed(client) == []
+
+
 def test_nothing_armed_before_the_db_exists(client, settings):
     assert armed(client) == []
     assert not (settings.private_dir / "fenrir.db").exists()

@@ -8,6 +8,7 @@ flatten only on the user's confirmation for an account the add-on no longer mana
 """
 
 import hashlib
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -121,7 +122,10 @@ async def accounts(request: Request) -> list[dict[str, Any]] | JSONResponse:
 
 @router.post("/arm", response_model=None)
 async def arm(body: ArmBody, request: Request) -> dict[str, Any] | JSONResponse:
-    settings = request.app.state.settings
+    state = request.app.state
+    if state.restarting:  # POST /api/settings/restart (#262); checked again under the db lock
+        return _refuse("restarting", 409)
+    settings = state.settings
     path = Path(body.strategy_path)
     if path.parent != settings.strategies_dir or path.suffix != ".py":
         raise HTTPException(400, f"{body.strategy_path!r} is not a .py file in strategies/")
@@ -132,11 +136,15 @@ async def arm(body: ArmBody, request: Request) -> dict[str, Any] | JSONResponse:
             return _refuse("nt_unavailable", 502)
         is_sim = next((a["is_sim"] for a in rows if a["id"] == body.account), None)
     # files and sqlite in the threadpool, off the hub's loop
-    return await run_in_threadpool(_arm, settings, body, path, is_sim)
+    return await run_in_threadpool(_arm, settings, body, path, is_sim, lambda: state.restarting)
 
 
 def _arm(
-    settings: Settings, body: ArmBody, path: Path, is_sim: bool | None
+    settings: Settings,
+    body: ArmBody,
+    path: Path,
+    is_sim: bool | None,
+    restarting: Callable[[], bool] = lambda: False,
 ) -> dict[str, Any] | JSONResponse:
     try:
         refuse_symlink(settings.strategies_dir)  # the terminal can swap it for a link (DEC-1)
@@ -167,6 +175,8 @@ def _arm(
         # sqlite's write lock across list -> decide -> insert: two arms never both pass
         # already_armed (insert_armed replaces); a refusal is rolled back by the close
         conn.execute("BEGIN IMMEDIATE")
+        if restarting():  # a restart set it before reading `armed` under this same lock (#262)
+            return _refuse("restarting", 409)
         try:
             result = decide(
                 req,

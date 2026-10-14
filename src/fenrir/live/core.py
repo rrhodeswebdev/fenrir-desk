@@ -315,9 +315,9 @@ def start(
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
     refused = changed_since_arming(setup)
-    if refused:
+    if refused:  # its raise only under the armed rules, as `_peaked` (#241)
         s, more = halt(replace(s, started=False), refused)
-        return s, out + more
+        return s, (out if _armed_rules(setup) else ()) + more
     if a.mode != "dry" and setup.start is None:
         reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
         return halt(replace(s, started=False), reason)
@@ -1112,9 +1112,14 @@ def _exit(s: RunnerState, bar: Bar) -> Step:
     """Flatten once while holding past flat-by (the backtest's `_flat_time`), after the daily loss
     limit (its `_dll_exit`), after a breach, under a gap halt (#219: the app cannot trust its
     figures, so it holds nothing; flat, while NinjaTrader shows open P&L, which `/flatten` closes
-    account-wide: #229), or with no known stop; the add-on also flattens at 16:40 on its own."""
+    account-wide: #229), or with no known stop; the add-on also flattens at 16:40 on its own.
+    First, on a refused start (#241), which runs no strategy, whatever its figures say."""
     if s.exiting:
         return s, ()
+    if s.position.qty and not s.started:  # no strategy runs it, on no figures of the account's
+        why = f"position {s.position.qty} held by a refused start: {s.halted}"
+        s, out = _flatten(s, bar.ts, "x", why)
+        return s, (Log("alert", {"message": f"flattening: {why}"}), *out)
     gap = s.halted is not None and s.halted.startswith(GAP)
     if s.position.qty == 0:
         if gap and s.nt is not None and round(s.nt.unrealized_pnl, 2) != 0:
@@ -1152,8 +1157,10 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     open_ended = s.halted is not None and s.halt_day is None
     # an open-ended halt is replaced only by a first breach, never downgraded; and by a first gap
     # halt when it is no breach: under a strategy error, say, the gap's own row, alert and flatten
-    # would be lost (#235); never a refused start's, whose figures are not the account's
-    first_breach = kind == "breach" and s.halt_kind != "breach"
+    # would be lost (#235); a gap never replaces a refused start's (`started` false), nor does a
+    # breach unless its figures are under the armed rules (`_armed_rules`, as every start that
+    # ran): `_exit` flattens what a refused start holds either way (#241)
+    first_breach = kind == "breach" and s.halt_kind != "breach" and _armed_rules(s.setup)
     gap, was_gap = reason.startswith(GAP), (s.halted or "").startswith(GAP)
     first_gap = gap and not was_gap and s.halt_kind != "breach" and s.started
     if s.halted == reason or (open_ended and not (first_breach or first_gap)):
@@ -1255,10 +1262,21 @@ def _raised(setup: Setup, a: AccountState, top: float) -> AccountState:
 
 
 def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
-    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it."""
+    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it. Only
+    under the armed rules (`_armed_rules`, #241)."""
     if s.setup.armed.mode == "dry" or s.setup.start is None or s.acct.peak <= was.acct.peak:
         return ()
+    if not _armed_rules(s.setup):
+        return ()
     return (_peak_log(s.setup, s.acct, ts),)
+
+
+def _armed_rules(setup: Setup) -> bool:
+    """Whether `setup.rules` are the rules file armed (pinned, unchanged): always for a start that
+    ran; for a refused one (#241) only when another pinned input caused it. A refused start with
+    other rules journals no "peak" row: their trailing rule may not be the armed one, and under an
+    end_of_day arming any row reads as a roll taken (`_missed_close`)."""
+    return setup.rules_hash == setup.armed.rules_hash
 
 
 def _gap_peaked(
@@ -1266,7 +1284,10 @@ def _gap_peaked(
 ) -> Step:
     """Under an intraday gap halt: `out`, then a "peak" row when the app's peak rose or
     NinjaTrader's `theirs` (relative), not taken, rose above the last one journalled, with it as
-    "nt_peak" (#225); a later message at or below it journals nothing."""
+    "nt_peak" (#225); a later message at or below it journals nothing. Only under the armed
+    rules, as `_peaked` (#241)."""
+    if not _armed_rules(s.setup):
+        return s, out
     if s.nt_peak is not None and theirs <= s.nt_peak:
         return s, out + _peaked(was, s, ts)
     s = replace(s, nt_peak=theirs)

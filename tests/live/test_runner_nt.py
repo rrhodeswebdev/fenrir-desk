@@ -494,15 +494,19 @@ def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
 
 def test_a_zero_balance_while_running_shows_a_condition_and_alerts_once_per_run():
     """#220: an ignored balance at or below 0 is no longer silent. While it lasts the account has
-    a "figures" condition, after any other (no halt: entries go on, on the last figures), and the
-    run alerts once, however often it comes back."""
+    a "figures" condition, a pause like the stale and drift ones (owner decision: no new entries),
+    and the run alerts once, however often it comes back."""
     s = running(sim(), account(50_400.0))
     figures = {"kind": "figures", "reason": core.NO_BALANCE}
     s, effects = core.on_account(s, account(0.0), T.ts)
     assert [(e.kind, e.payload) for e in effects] == [("alert", {"message": core.NO_BALANCE})]
     status = core.account_status(s)
     assert status["conditions"] == [figures]
-    assert (status["halted"], status["halt_kind"], status["halt_reason"]) == (False, None, None)
+    assert (status["halted"], status["halt_kind"], status["halt_reason"]) == (
+        True,
+        "figures",
+        core.NO_BALANCE,
+    )
     assert status["nt_balance"] == 50_400.0
     s, effects = core.on_account(s, account(-5.0), T.ts)
     assert effects == () and core.conditions(s) == [figures]
@@ -704,11 +708,16 @@ def test_a_zero_at_the_roll_replaces_a_day_halt_with_confirm_balances():
     assert peaks(effects) == []
 
 
-def test_a_zero_balance_is_listed_after_warming_up():
-    """#220 review (M8): `figures` is the last condition, after a `warming` one (#79) too."""
+def test_a_zero_balance_is_listed_with_the_pauses_before_warming_up():
+    """#220 review (M8), owner decision: `figures` is a pause, listed after the drift pause and
+    before a `warming` condition (#79), as `halt_reason` takes them; under a stale pause the
+    stale one is the account's `halt_kind`."""
     s = running(sim(), account(50_400.0))
     s, _ = core.on_account(replace(s, warming="warming up: replaying"), account(0.0), T.ts)
-    assert [c["kind"] for c in core.conditions(s)] == ["warming", "figures"]
+    assert [c["kind"] for c in core.conditions(s)] == ["figures", "warming"]
+    status = core.account_status(replace(s, stale="no NQ bar"))
+    assert [c["kind"] for c in status["conditions"]] == ["stale", "figures", "warming"]
+    assert (status["halt_kind"], status["halt_reason"]) == ("stale", "no NQ bar")
 
 
 def test_a_zero_balance_under_a_gap_halt_keeps_the_halt_and_its_flatten():

@@ -1,6 +1,6 @@
 // Status fixtures for the Live page's tests (Vitest and Playwright). Never imported by the app.
 import type { JournalRow } from './journal'
-import type { AccountStatus, Condition, HaltKind, LiveStatus } from './model'
+import type { AccountStatus, Condition, LiveStatus } from './model'
 
 /** An account; unless `conditions` is given, a halted one has the one condition its `halt_kind` and `halt_reason` name,
  * as the server reports a single condition. */
@@ -26,12 +26,13 @@ export function account(over: Partial<AccountStatus> = {}): AccountStatus {
   }
 }
 
-/** The status fields of an account under `conditions`: the first that holds entries back (never `figures`, #220) shows as
- * `halted`/`halt_kind`/`halt_reason`, as the server does. */
-export const held = (...conditions: Condition[]): Pick<AccountStatus, 'halted' | 'halt_kind' | 'halt_reason' | 'conditions'> => {
-  const first = conditions.find((c): c is { kind: HaltKind | null; reason: string } => c.kind !== 'figures')
-  return { halted: first !== undefined, halt_kind: first?.kind ?? null, halt_reason: first?.reason ?? null, conditions }
-}
+/** The status fields of an account under `conditions`: the first shows as `halt_kind`/`halt_reason`, as the server does. */
+export const held = (...conditions: Condition[]): Pick<AccountStatus, 'halted' | 'halt_kind' | 'halt_reason' | 'conditions'> => ({
+  halted: conditions.length > 0,
+  halt_kind: conditions[0]?.kind ?? null,
+  halt_reason: conditions[0]?.reason ?? null,
+  conditions,
+})
 
 export function status(over: Partial<LiveStatus> = {}): LiveStatus {
   return {

@@ -5,13 +5,11 @@ import type { Tone } from '@/components/state-text'
 import { errorText } from '@/errorText'
 
 export type Mode = 'dry' | 'sim' | 'live'
-export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach' | 'warming'
-/** `figures` (#220): NinjaTrader's balance is at or below 0, so it is ignored until one above 0; it holds nothing back. */
-export type ConditionKind = HaltKind | 'figures'
+/** `figures` (#220): a pause while NinjaTrader reports a balance at or below 0, as the stale and drift pauses. */
+export type HaltKind = 'safety' | 'reconcile' | 'stale' | 'drift' | 'breach' | 'warming' | 'figures'
 /** One condition holding new entries back; `kind` null is a halt no strip cell names (strategy error, cannot start, …).
- * `warming` (#79) is no halt: the account waits for today's bars or the bar store, with `halted` false.
- * `figures` holds nothing back and lights no cell: the focus shows it. */
-export type Condition = { kind: ConditionKind | null; reason: string }
+ * `warming` (#79) is no halt: the account waits for today's bars or the bar store, with `halted` false. */
+export type Condition = { kind: HaltKind | null; reason: string }
 
 type Limits = {
   drawdown_remaining: number
@@ -67,15 +65,17 @@ export type KillResult = { ok: boolean; error: string | null }
 export type Cell = { name: string; state: Tone }
 
 /** Whether the account is under a condition of this kind, whatever else holds it. */
-const has = (a: AccountStatus, kind: ConditionKind | null): boolean => a.conditions.some((c) => c.kind === kind)
+const has = (a: AccountStatus, kind: HaltKind | null): boolean => a.conditions.some((c) => c.kind === kind)
 
-/** Feed · Broker · Drift, shared by every account. Stale, warming-up and drift pauses light these, never an account. */
+/** Feed · Broker · Drift, shared by every account. Stale, warming-up, figures and drift pauses light these, never an account. */
 export function systemStrip(s: LiveStatus): Cell[] {
   const stale = s.accounts.some((a) => has(a, 'stale') || has(a, 'warming')) // under a halt too
   // With nothing armed nothing reads the feed (as Broker): unlit, not an alarm to learn to ignore.
   const feed: Tone = s.accounts.length === 0 ? 'idle' : !s.lse.connected ? 'alarm' : stale ? 'caution' : 'normal'
   // A missed heartbeat reaches us as nt.connected false. Dry runs never use the broker.
-  const broker: Tone = s.accounts.every((a) => a.mode === 'dry') ? 'idle' : s.nt.connected ? 'normal' : 'alarm'
+  // A balance at or below 0 from NinjaTrader (`figures`, #220) is caution, under a halt too.
+  const figures = s.accounts.some((a) => has(a, 'figures'))
+  const broker: Tone = s.accounts.every((a) => a.mode === 'dry') ? 'idle' : !s.nt.connected ? 'alarm' : figures ? 'caution' : 'normal'
   const drift: Tone = s.drift.ok ? 'normal' : 'caution'
   return [
     { name: 'Feed', state: feed },
@@ -227,7 +227,7 @@ export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
   return need(a)?.state ?? (a.halted || has(a, 'warming') ? 'caution' : null)
 }
 
-const conditionTone: Record<ConditionKind, 'caution' | 'alarm'> = {
+const conditionTone: Record<HaltKind, 'caution' | 'alarm'> = {
   reconcile: 'alarm',
   breach: 'alarm',
   safety: 'caution',
@@ -237,13 +237,11 @@ const conditionTone: Record<ConditionKind, 'caution' | 'alarm'> = {
   figures: 'caution',
 }
 
-/** The focus field's lines: every condition holding entries back, its reason in its own tone (a halt no cell names is
- * an alarm), else the brief unreconciled pause's reason, plain; then a `figures` condition, which holds nothing back. */
+/** The focus field's lines: every condition's reason in its own tone (a halt no cell names is an alarm), else the
+ * brief unreconciled pause's reason, plain. */
 export function reasons(a: AccountStatus): { tone: Tone; text: string }[] {
-  const line = (c: Condition) => ({ tone: c.kind === null ? 'alarm' : conditionTone[c.kind], text: c.reason })
-  const holding = a.conditions.filter((c) => c.kind !== 'figures').map(line)
-  const plain = !holding.length && a.halt_reason ? [{ tone: 'normal' as const, text: a.halt_reason }] : []
-  return [...holding, ...plain, ...a.conditions.filter((c) => c.kind === 'figures').map(line)]
+  if (a.conditions.length) return a.conditions.map((c) => ({ tone: c.kind === null ? 'alarm' : conditionTone[c.kind], text: c.reason }))
+  return a.halt_reason ? [{ tone: 'normal', text: a.halt_reason }] : []
 }
 
 /** The LSE feed's outage for the top strip: its reason, and when it is retried (`Restart needed` when only a restart

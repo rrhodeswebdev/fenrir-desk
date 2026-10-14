@@ -71,8 +71,7 @@ CONFIRM_GAP = GAP + (
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 NO_BALANCE = (
     "NinjaTrader reports a balance at or below 0, which is not a figure (its account data may not"
-    " have loaded): ignored until one above 0; the app's own figures and NinjaTrader's last ones"
-    " above 0, if any, still apply"
+    " have loaded): ignored, and no new entries until one above 0"
 )
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -163,7 +162,7 @@ class RunnerState:
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
     # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
     warming: str | None = None
-    # NinjaTrader's last balance was at or below 0 (#220): a condition while it lasts, no halt
+    # NinjaTrader's last balance was at or below 0 (#220): no new entries while it lasts (a pause)
     no_balance: str | None = None
     no_balance_alerted: bool = False  # one alert per run
 
@@ -890,16 +889,16 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause, a drift pause and warming up (#79; not a halt: `halted` stays false for it alone). The
-    brief unreconciled pause is not one (only `halt_reason`). Last, NinjaTrader's balance at or
-    below 0 ("figures", #220): shown, though it holds nothing back."""
+    pause, a drift pause, NinjaTrader's balance at or below 0 ("figures", #220: a pause too) and
+    warming up (#79; not a halt: `halted` stays false for it alone). The brief unreconciled pause
+    is not one (only `halt_reason`)."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),
         ("stale", s.stale),
         ("drift", s.drift),
-        ("warming", s.warming),
         ("figures", s.no_balance),
+        ("warming", s.warming),
     )
     return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
 
@@ -908,7 +907,17 @@ def account_status(s: RunnerState) -> dict[str, Any]:
     """One AccountStatus (Plans 21–24)."""
     a, rules, acct = s.setup.armed, s.setup.rules, s.acct
     p, v = phase_rules(rules, acct.phase), view(_strict(s), rules)
-    pause = "reconcile" if s.mismatch else "stale" if s.stale else "drift" if s.drift else None
+    pause = (
+        "reconcile"
+        if s.mismatch
+        else "stale"
+        if s.stale
+        else "drift"
+        if s.drift
+        else "figures"
+        if s.no_balance
+        else None
+    )
     head = {
         "account": a.account,
         "mode": a.mode,
@@ -916,10 +925,16 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "strategy": Path(a.strategy_path).stem,
         "rules_account": a.rules_account,
         "contract": a.contract,
-        "halted": bool(s.halted or s.mismatch or s.stale or s.drift),
+        "halted": bool(s.halted or s.mismatch or s.stale or s.drift or s.no_balance),
         "halt_kind": s.halt_kind if s.halted else pause,
         # the unreconciled and warming-up pauses show only here
-        "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.warming or s.unreconciled,
+        "halt_reason": s.halted
+        or s.mismatch
+        or s.stale
+        or s.drift
+        or s.no_balance
+        or s.warming
+        or s.unreconciled,
         "conditions": conditions(s),  # each one; halt_kind and halt_reason show the first
     }
     if not s.started:
@@ -1261,7 +1276,7 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"side must be long or short, got {a.side!r}"
     if s.halted:
         return f"halted: {s.halted}"
-    if paused := s.mismatch or s.unreconciled or s.stale or s.drift or s.warming:
+    if paused := s.mismatch or s.unreconciled or s.stale or s.drift or s.no_balance or s.warming:
         return f"paused: {paused}"
     if old:  # a late or replayed bar: never trade at its old close
         return old

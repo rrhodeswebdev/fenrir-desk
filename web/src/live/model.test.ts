@@ -426,33 +426,23 @@ describe('each condition counts, whatever the halt (#212)', () => {
     expect(reasons(account())).toEqual([])
   })
 
-  it("NinjaTrader's balance at or below 0 shows in the focus in caution, holding nothing back and lighting no cell (#220)", () => {
-    const figures = { kind: 'figures', reason: 'NinjaTrader reports a balance at or below 0, which is not a figure' } as const
+  it("NinjaTrader's balance at or below 0 pauses entries: caution in the focus, the outline and Broker (#220)", () => {
+    const figures = { kind: 'figures', reason: 'NinjaTrader reports a balance at or below 0: no new entries until one above 0' } as const
     const a = account(held(figures))
-    expect(a.halted).toBe(false)
+    expect([a.halted, a.halt_kind]).toEqual([true, 'figures'])
     expect(reasons(a)).toEqual([{ tone: 'caution', text: figures.reason }])
-    expect(need(a)).toBeNull()
-    expect(alertTone(a)).toBeNull() // no outline: nothing is held back
+    expect(need(a)).toBeNull() // the system strip carries it, as the stale and drift pauses
+    expect(alertTone(a)).toBe('caution')
     expect(strip(a)).toEqual(['Risk normal', 'Book normal'])
-    expect(states(status({ accounts: [a] }))).toEqual(['normal', 'normal', 'normal'])
+    expect(states(status({ accounts: [a] }))).toEqual(['normal', 'caution', 'normal'])
+    expect(states(status({ nt: { connected: false, last_heartbeat: null }, accounts: [a] }))[1]).toBe('alarm')
+    expect(states(status({ accounts: [account(held(safety, figures))] }))[1]).toBe('caution') // under a halt too
     expect(reasons(account(held(safety, figures)))).toEqual([
       { tone: 'caution', text: safety.reason },
       { tone: 'caution', text: figures.reason },
     ])
-  })
-
-  it('keeps the unreconciled pause in the focus under a figures condition, ahead of it (#220 review)', () => {
-    const figures = { kind: 'figures', reason: 'NinjaTrader reports a balance at or below 0, which is not a figure' } as const
-    const linkLost = 'NinjaTrader link lost: no new entries until reconciled'
-    expect(reasons(account({ halted: false, halt_reason: linkLost, conditions: [figures] }))).toEqual([
-      { tone: 'normal', text: linkLost },
-      { tone: 'caution', text: figures.reason },
-    ])
     const warming = { kind: 'warming', reason: "warming up: today's NQ bars from LSE are not complete yet" } as const
-    expect(reasons(account({ halt_reason: warming.reason, conditions: [warming, figures] }))).toEqual([
-      { tone: 'caution', text: warming.reason },
-      { tone: 'caution', text: figures.reason },
-    ])
+    expect(reasons(account(held(figures, warming))).map((r) => r.text)).toEqual([figures.reason, warming.reason])
   })
 })
 

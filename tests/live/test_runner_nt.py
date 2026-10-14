@@ -1252,6 +1252,17 @@ def test_ninjatraders_own_peak_rises_with_a_close_the_app_takes_too():
     assert alerts(effects) == [f"{caught} (still halted: {halts[0]['reason']})"]
 
 
+def test_ninjatraders_own_peak_never_rises_on_a_close_during_a_zero():
+    """#220 x #239: the same close during a zero is no close (its figures may be hours old), so
+    NinjaTrader's own peak stays the gap's 52,200."""
+    s, _, _, _ = shrunk()
+    s, _ = manual_loss(s, -1300.0)
+    s = core.on_account(s, account(balance=52_300.0, today=1300.0), at("09:32", D3).ts)[0]
+    s = core.on_account(s, account(balance=0.0), at("09:33", D3).ts)[0]
+    s, _ = core.on_bar(s, at("09:30", D4))
+    assert s.nt_peak == 2200.0
+
+
 def test_ninjatraders_own_peak_rises_with_an_intraday_raise_the_app_takes_too():
     """The intraday side: the gap at 52,200, then a manual +1,500 both book with NinjaTrader at
     52,500 (no gap: the app takes the raise to 2,500); -2,050 it alone books (50,450) is through

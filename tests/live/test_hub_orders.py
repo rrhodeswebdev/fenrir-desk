@@ -359,6 +359,75 @@ async def test_a_manual_add_while_the_flatten_is_out_is_flattened(hub, conn, arm
     assert [p for p, _ in fake.requests if p == "/flatten"] == ["/flatten"] * 2
 
 
+ENTRY_TS = T0 + timedelta(seconds=61)  # the entry of the bracket sent on bar(T0)
+
+
+async def test_a_manual_add_on_a_bracketed_position_is_flattened(hub, conn, armed, fake):
+    """#237: the bracket's stop covers its entry's lots only, so a manual add leaves the
+    position with no known stop and it gets its /flatten at once; a later part of the entry
+    (its bracket's client_id) is under that stop and sends nothing."""
+    await hub.handle_bar(bar(T0))
+    await hub.handle_fill(mnq_fill(1, 20000.0, ENTRY_TS, cid=CID))
+    await hub.handle_fill(mnq_fill(1, 20000.0, ENTRY_TS + timedelta(seconds=1), cid=CID))
+    assert hub.states["Sim101"].position == Position(2, 20000.0, 19990.0, 20020.0)
+    add = ENTRY_TS + timedelta(seconds=5)
+    await hub.handle_fill(mnq_fill(1, 20001.0, add))
+    flatten = core.client_id("Sim101", add, "f3", Flatten())
+    assert fake.requests == [
+        ("/bracket", BODY),
+        ("/flatten", {"client_id": flatten, "account": "Sim101"}),
+    ]
+    s = hub.states["Sim101"]
+    assert (s.position.qty, s.position.stop, s.exiting) == (3, None, flatten)
+    [alert] = rows(conn, "alert")
+    assert alert.payload == {"message": "flattening: position 3 has no known stop"}
+
+
+FLATTENER = """
+from fenrir.core.actions import Bracket, Flatten
+MARKET = "NQ"
+PARAMS = {}
+def init(params):
+    return 0
+def step(state, bar, ctx):
+    if ctx.position.qty:
+        return state, [Flatten()]
+    return state, [Bracket("long", 1, bar.close - 10, bar.close + 20)]
+"""
+
+
+async def test_a_manual_add_after_the_strategys_flatten_timed_out_is_flattened(
+    hub, conn, armed, fake, tmp_path
+):
+    """Review of #236, non-blocking 3: the strategy's Flatten of a bracketed long times out
+    (outcome unknown: the hub resends it while it is `exiting`), then a manual +1 fills. The add
+    ends that Flatten, so its resend is dropped, but the add has no known stop (#237): the
+    position gets its own /flatten at once, and the lot left after the strategy's Flatten fills
+    stays under it (before: no post at all, the bracket's stop kept for 2 lots)."""
+    path = tmp_path / "flattener.py"
+    path.write_text(FLATTENER)
+    arming.delete_armed(conn, "Sim101")
+    arming.insert_armed(
+        conn, pinned(replace(armed, strategy_path=str(path), strategy_hash=file_hash(path)))
+    )
+    await hub.handle_bar(bar(T0))
+    await hub.handle_fill(mnq_fill(1, 20000.0, ENTRY_TS, cid=CID))
+    fake.delays = [0.5, 0.5]  # past the client's 0.2 s, on both attempts
+    await hub.handle_bar(bar(T0 + timedelta(minutes=1)))
+    mine = core.client_id("Sim101", T0 + timedelta(minutes=1), "0", Flatten())
+    assert hub.retry["Sim101"].client_id == mine == hub.states["Sim101"].exiting
+    add = T0 + timedelta(minutes=2, seconds=10)
+    await hub.handle_fill(mnq_fill(1, 20001.0, add))
+    second = core.client_id("Sim101", add, "f2", Flatten())
+    flattens = [b["client_id"] for p, b in fake.requests if p == "/flatten"]
+    assert flattens == [mine, mine, second]
+    await hub.handle_fill(mnq_fill(-1, 20001.0, add + timedelta(seconds=1)))  # the strategy's
+    s = hub.states["Sim101"]
+    assert (s.position.qty, s.position.stop, s.exiting) == (1, None, second)
+    await hub.tick(add + timedelta(seconds=5))
+    assert [b["client_id"] for p, b in fake.requests if p == "/flatten"] == flattens
+
+
 async def test_only_this_accounts_instrument_reaches_on_fill(hub, conn, armed):
     await hub.tick(T0)
     await hub.handle_fill({**FOREIGN, "instrument": "MES 12-26"})

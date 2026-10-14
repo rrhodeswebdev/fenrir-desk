@@ -169,11 +169,48 @@ def test_a_fill_past_flat_by_while_unreconciled_is_still_a_breach():
     assert s.halt_kind == "breach" and s.acct.position == 1
 
 
+def part_filled_across_a_reconnect():
+    """A 2-lot entry whose first lot filled while the link was down: the reconcile adopts 1 lot
+    under the bracket's stop and target and keeps the entry NinjaTrader still works."""
+    b = at("09:30")
+    s, _ = decide_now(ready(sim(), b), [replace(LONG, qty=2)])
+    cid = s.working.client_id
+    s, _ = core.on_disconnect(s, "link lost")
+    now = b.ts + timedelta(seconds=61)
+    book = [
+        order("entry", "buy", 1, 0.0, cid=cid, oid="e1"),
+        order("stop", "sell", 1, 19990.0, cid=cid, oid="s1"),
+        order("target", "sell", 1, 20020.0, cid=cid, oid="t1"),
+    ]
+    s, _ = core.on_reconcile(s, INSTRUMENT, [held(1)], book, now)
+    assert s.position == core.Position(1, 20000.0, 19990.0, 20020.0)
+    assert s.working.client_id == cid
+    return s, cid, now
+
+
+def test_the_second_lot_of_an_entry_kept_working_by_a_reconcile_keeps_its_stop():
+    """Review of #240: the second lot carries the working entry's client_id, which the add-on
+    covers by resizing the bracket's stop and target, so it keeps the stop and sends nothing."""
+    s, cid, now = part_filled_across_a_reconnect()
+    s, effects = core.on_fill(s, fill(1, 20000.0, now + timedelta(seconds=1), cid=cid))
+    assert s.position == core.Position(2, 20000.0, 19990.0, 20020.0) and sends(effects) == []
+
+
+def test_a_manual_add_while_a_reconcile_keeps_the_entry_working_has_no_known_stop():
+    """The same book, but the add is NinjaTrader's manual fill (client_id ""): no known stop."""
+    s, _, now = part_filled_across_a_reconnect()
+    s, effects = core.on_fill(s, fill(1, 20000.0, now + timedelta(seconds=1), cid=""))
+    assert (s.position.qty, s.position.stop, s.position.target) == (2, None, None)
+    assert [e.action for e in sends(effects)] == [Flatten()]
+
+
 def test_held_qty_above_the_oco_qty_is_flagged_and_flattened():
     s = entered(sim(), at("09:30"))
-    # a manual buy adds to the bracketed long: the add-on resizes the OCO only for entry fills
+    # a manual buy adds to the bracketed long: the add-on resizes the OCO only for entry fills,
+    # so the add has no known stop and is flattened at once (#237)
     s, effects = core.on_fill(s, fill(1, 20001.0, at("09:32").ts))
-    assert s.position.qty == 2 and s.position.stop == 19990.0 and sends(effects) == []
+    assert s.position.qty == 2 and s.position.stop is None
+    assert [e.action for e in sends(effects)] == [Flatten()]
     oco = [order("stop", "sell", 1, 19990.0), order("target", "sell", 1, 20020.0, oid="o2")]
     now = at("09:33").ts
     s, effects = core.on_reconcile(s, INSTRUMENT, [held(2, 20000.5)], oco, now)

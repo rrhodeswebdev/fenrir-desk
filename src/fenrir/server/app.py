@@ -2,6 +2,7 @@
 
 import os
 import re
+import signal
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,11 @@ from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
 _HOST = re.compile(r"(localhost|127\.0\.0\.1)(:[0-9]{1,5})?")
+
+
+def _terminate() -> None:
+    # uvicorn shuts down gracefully on SIGTERM; in the image, compose starts it again
+    os.kill(os.getpid(), signal.SIGTERM)
 
 
 def host_action(host: str | None) -> Literal["ok", "redirect", "reject"]:
@@ -115,6 +121,10 @@ def create_app(
     app.state.addon = AddonClient(settings.nt_url, settings.nt_token) if settings.nt_token else None
     # opens nothing; started by _lifespan
     app.state.live = LiveHub(settings, secret=session_key, addon=app.state.addon)
+    # POST /api/settings/restart: tests replace `terminate`
+    app.state.settings_saved = False  # the secrets file changed through the page since start
+    app.state.restarting = False
+    app.state.terminate = _terminate
     app.add_middleware(HostGuard)
     unspent = [launch_code]
 

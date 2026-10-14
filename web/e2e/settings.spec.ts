@@ -23,6 +23,9 @@ test('a setting saves to the temp secrets file, survives a reload, and a bad val
   expect(readFileSync(process.env.FENRIR_E2E_ENV_FILE!, 'utf8')).toBe('FENRIR_STALE_SECONDS=45\n')
   await page.reload()
   await expect(stale).toHaveValue('45')
+  // natively nothing would start the server again: no Apply and restart, a line instead (#262)
+  await expect(form.getByText('Restart the server to apply the saved settings.')).toBeVisible()
+  await expect(form.getByRole('button', { name: 'Apply and restart' })).toHaveCount(0)
 
   await stale.fill('0')
   await save.click()

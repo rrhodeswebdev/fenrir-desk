@@ -3,6 +3,17 @@ import { createRoute } from '@tanstack/react-router'
 import { useId, useState, type ReactNode } from 'react'
 import { apiFetch } from '@/api'
 import { Page } from '@/components/page'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
@@ -21,8 +32,12 @@ export type Settings = {
   stale_seconds: number
   /** In Docker: `.git` entries the terminal planted below the repo root (#184). */
   nested_git: string[]
+  /** In Docker, where `POST /api/settings/restart` works: compose starts the server again. */
+  can_restart: boolean
+  /** The secrets file was changed through this page since the server started: a restart applies it. */
+  restart_pending: boolean
 }
-type Key = Exclude<keyof Settings, 'nested_git'>
+type Key = Exclude<keyof Settings, 'nested_git' | 'can_restart' | 'restart_pending'>
 /** `GET /api/settings/accounts`: account id → the user's own choices. */
 export type Choices = Record<string, { eval_price: number; dll_on: boolean }>
 
@@ -71,8 +86,8 @@ function Section({ legend, children }: { legend: string; children: ReactNode }) 
   )
 }
 
-/** The save row: Save, "Saved.", and on failure the error with each field error by loc. */
-function SaveRow({ dirty, save, errors, note }: { dirty: boolean; save: { isPending: boolean; isSuccess: boolean; error: unknown }; errors: FieldError[]; note: string }) {
+/** The save row: Save, "Saved.", `action` beside them, and on failure the error with each field error by loc. */
+function SaveRow({ dirty, save, errors, note, action }: { dirty: boolean; save: { isPending: boolean; isSuccess: boolean; error: unknown }; errors: FieldError[]; note: string; action?: ReactNode }) {
   return (
     <>
       <div className="mb-4 flex flex-wrap items-center gap-4">
@@ -86,6 +101,7 @@ function SaveRow({ dirty, save, errors, note }: { dirty: boolean; save: { isPend
         ) : (
           <p className="text-ink-3">{note}</p>
         )}
+        {action}
       </div>
       {save.error != null && (
         <div role="alert" className="mb-4 text-red">
@@ -98,6 +114,90 @@ function SaveRow({ dirty, save, errors, note }: { dirty: boolean; save: { isPend
             ))}
           </ul>
         </div>
+      )}
+    </>
+  )
+}
+
+export const RESTART_POLL_MS = 500
+export const RESTART_TIMEOUT_MS = 60_000
+export const RESTART_LATE = 'The server did not answer again within 60 s: check `docker compose logs`, or start it with `docker compose up`.'
+export const RESTART_TEXT =
+  'The server stops and Docker starts it again, usually within a few seconds, with the saved settings. The Workbench terminal session closes; this page stays signed in.'
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+/** `GET /api/health` answered ok; refused, failed or hung (2 s) is false. */
+async function healthy(): Promise<boolean> {
+  try {
+    return (await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(2000) })).ok
+  } catch {
+    return false
+  }
+}
+
+/** `POST /api/settings/restart` (an ApiError when refused: a 409 says why), then wait for the old server to stop
+ * answering and the new one to answer, or throw `RESTART_LATE`. */
+export async function restartServer(wait = sleep, now = Date.now): Promise<void> {
+  await apiFetch('/api/settings/restart', { method: 'POST' })
+  const end = now() + RESTART_TIMEOUT_MS
+  for (const up of [false, true]) {
+    while ((await healthy()) !== up) {
+      if (now() > end) throw new Error(RESTART_LATE)
+      await wait(RESTART_POLL_MS)
+    }
+  }
+}
+
+/** "Apply and restart" in Docker once the secrets file changed; natively a line saying to restart the server. */
+function Restart({ server }: { server: Settings }) {
+  const qc = useQueryClient()
+  const [done, setDone] = useState(false)
+  const restart = useMutation({
+    mutationFn: () => restartServer(),
+    // pending ("Restarting…") until the settings are read back, so the button never flashes back meanwhile
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ['settings'], exact: true })
+      setDone(true)
+      void qc.invalidateQueries() // every other query: the new server's answers
+    },
+  })
+  if (!server.can_restart) return server.restart_pending ? <p className="text-ink-2">Restart the server to apply the saved settings.</p> : null
+  if (restart.isPending)
+    return (
+      <p role="status" className="text-ink-2">
+        Restarting…
+      </p>
+    )
+  if (!server.restart_pending)
+    return done ? (
+      <p role="status" className="text-ink-2">
+        Restarted with the saved settings.
+      </p>
+    ) : null
+  return (
+    <>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button>Apply and restart</Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Apply and restart</AlertDialogTitle>
+            <AlertDialogDescription>{RESTART_TEXT}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogAction variant="caution" onClick={() => restart.mutate()}>
+              Restart the server
+            </AlertDialogAction>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {restart.error != null && (
+        <p role="alert" className="basis-full text-red">
+          {errorText(restart.error)}
+        </p>
       )}
     </>
   )
@@ -143,7 +243,13 @@ function SettingsForm({ server }: { server: Settings }) {
         if (draft) save.mutate(draft)
       }}
     >
-      <SaveRow dirty={draft !== null} save={save} errors={errors} note="Saved to the secrets file; applies after a server restart." />
+      <SaveRow
+        dirty={draft !== null}
+        save={save}
+        errors={errors}
+        note={server.can_restart ? 'Saved to the secrets file; applies after Apply and restart.' : 'Saved to the secrets file; applies after a server restart.'}
+        action={<Restart server={server} />}
+      />
       <Section legend="Connections">
         {text('nt_url', 'NinjaTrader address')}
         {secret('nt_token')}

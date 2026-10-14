@@ -30,7 +30,7 @@ git clone https://github.com/rrhodeswebdev/fenrir-desk.git && cd fenrir-desk
 docker compose up
 ```
 
-Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page. They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
+Open the launch link it prints (`docker compose logs` shows it again), then enter the LSE key and the NinjaTrader address and token on the Settings page and press **Apply and restart** there (the server restarts in a few seconds; no shell needed). They are kept in the `fenrir-private` Docker volume, never in the repo. The first time you run `claude` in the Workbench terminal, sign in; the login is kept in the `claude-config` volume and survives rebuilds.
 
 - **This machine only.** The app includes a shell. Keep the `127.0.0.1:8000:8000` and `[::1]:8000:8000` port mappings in `compose.yaml`; never change them to `8000:8000`.
 - **Terminal.** It runs as an unprivileged `claude` user in `/app` (your clone), and cannot read the secrets, the session key or the server. Run CLI commands there, e.g. `uv run fenrir backtest strategies/orb.py --account lucid-flex-50k`. Each backtest worker holds a full price series (up to about 2 GB), and workers are capped to fit the container's memory, so a larger Docker Desktop memory limit runs more of them.
@@ -56,7 +56,7 @@ Fenrir trades through a C# add-on inside NinjaTrader 8 on Windows: the same mach
    ```
 
    With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
-4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM). The VM must be reachable from the host: on a Mac use bridged or shared networking; on a Linux host with VirtualBox, a NAT-only VM is not reachable without port forwarding, so add a host-only adapter ([addon/INSTALL.md](addon/INSTALL.md), section 3) and use the VM's `192.168.56.x` address. Settings apply after `docker compose restart`; the Live page's NinjaTrader field then shows the heartbeat.
+4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM). The VM must be reachable from the host: on a Mac use bridged or shared networking; on a Linux host with VirtualBox, a NAT-only VM is not reachable without port forwarding, so add a host-only adapter ([addon/INSTALL.md](addon/INSTALL.md), section 3) and use the VM's `192.168.56.x` address. Settings apply after **Apply and restart** on the Settings page (refused while an account is armed or a pull or backtest runs); the Live page's NinjaTrader field then shows the heartbeat.
 
 At 16:40 New York time the add-on flattens and cancels everything on its managed accounts by itself, whether Fenrir is running or not.
 

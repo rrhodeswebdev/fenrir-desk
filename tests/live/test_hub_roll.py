@@ -601,3 +601,56 @@ async def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_peak(
         assert f"{s.halted}{NOT_THE_GAP} (was halted: {reason})" in alerts
     finally:
         await second.stop()
+
+
+# #239: NinjaTrader's own equity against its own floor while its peak stays above the app's
+WED = T0 + timedelta(days=2, hours=-0.5)  # Wednesday 09:30 ET, trading day 2026-10-14
+NT_FLOOR = "confirm balances: a gap halt journalled NinjaTrader's peak 52200.00: "
+
+
+async def test_a_loss_through_ninjatraders_own_floor_after_the_gap_shrank_is_caught(
+    settings, client, conn, armed, fake, clock
+):
+    """M13 (review of #238) on a real `LiveHub`: the gap halt at Tuesday's roll (NinjaTrader at
+    52,200, its floor 50,100), NinjaTrader closes Tuesday at 51,000 and Wednesday's roll takes
+    that raise (the app's floor 49,000). A manual 10 MNQ loss of -910 puts NinjaTrader at 50,090,
+    through its own floor, the app at -910 above its own. Running, the message alerts and the
+    room shown is NinjaTrader's (-10); a same-day restart does the same on its first message.
+    It used to say nothing, with the app's 90 of room shown."""
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_stream(account(52_200.0, realized=2200.0))
+        await first.handle_bar(bar(D2))  # the gap halt
+        reason = first.states["Sim101"].halted
+        await first.handle_stream(account(51_000.0, realized=-1200.0))
+        clock["t"] = WED
+        await first.handle_bar(bar(WED))  # the roll takes NinjaTrader's 51,000
+        await first.handle_stream(account(51_000.0))
+        s = first.states["Sim101"]
+        assert (s.halted, s.acct.peak, s.acct.floor) == (reason, 1000.0, -1000.0)
+        await first.handle_fill(fill(10, 20000.0, WED + timedelta(seconds=10)))
+        await first.handle_fill(fill(-10, 19955.0, WED + timedelta(seconds=20)))  # -900 - $10
+        await first.handle_stream(account(50_090.0, realized=-910.0))
+        s = first.states["Sim101"]
+        assert (s.halted, s.halt_kind, s.acct.balance) == (reason, None, -910.0)
+        [acc] = first.status()["accounts"]
+        assert acc["limits"]["drawdown_remaining"] == -10.0
+    finally:
+        await first.stop()
+    second = await restarted(settings, client, clock, WED + timedelta(hours=1), 50_090.0)
+    try:
+        s = second.states["Sim101"]
+        assert s.started and (s.halted, s.acct.balance, s.acct.floor) == (reason, -910.0, -1000.0)
+        [acc] = second.status()["accounts"]
+        assert acc["limits"]["drawdown_remaining"] == -10.0
+    finally:
+        await second.stop()
+    alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+    caught = [m for m in alerts if m.startswith(NT_FLOOR)]
+    assert len(caught) == 2  # once per run
+    assert caught[0].startswith(
+        f"{NT_FLOOR}NinjaTrader's equity 50090.00 is at or below its own drawdown floor 50100.00"
+    )
+    assert caught[0].endswith(f" (still halted: {reason})")
+    assert [r["reason"] for r in halts(conn)] == [reason]  # no other halt row, and no breach

@@ -1108,6 +1108,26 @@ def test_an_intraday_gap_under_another_open_ended_halt_replaces_it(other):
     assert [a["reason"] for a in actions(effects)] in ([], [s.halted])
 
 
+@pytest.mark.parametrize(
+    "changed", [{"strategy_hash": "h2"}, {"rules_hash": "r2"}], ids=["strategy", "rules"]
+)
+def test_an_intraday_gap_never_replaces_a_refused_start(changed):
+    """Review of #236, non-blocking 1: a start refused because a pinned input changed since
+    arming (`started=False`) keeps its own halt. Its figures are not the account's (they come
+    from inputs that may have been edited since arming, and the status shows none of them), so
+    no gap is read from them and nothing is flattened on them. The account stays halted until
+    re-armed either way, and the refusal's reason is the one that says what to do."""
+    s, effects = core.start(replace(sim(trailing="intraday"), **changed), T.ts)
+    refused = s.halted
+    assert not s.started and refused.endswith("changed since arming; re-arm")
+    gap_account = account(balance=52_100.0, today=2100.0, unrealized=-50.0)
+    s, effects = core.on_account(reconciled(s), gap_account, T.ts)
+    assert (s.halted, s.halt_kind, s.exiting) == (refused, None, None)
+    assert "halt" not in kinds(effects) and sends(effects) == []
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.halted == refused and sends(effects) == []
+
+
 @pytest.mark.parametrize("other", ["strategy error", "warm-up diverged"])
 def test_a_gap_at_the_roll_under_another_open_ended_halt_replaces_it(other):
     """The same at an end_of_day roll (#219): the app flat at 0, NinjaTrader closes at 52,200

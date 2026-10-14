@@ -1087,10 +1087,10 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     open_ended = s.halted is not None and s.halt_day is None
     # an open-ended halt is replaced only by a first breach, never downgraded; and by a first gap
     # halt when it is no breach: under a strategy error, say, the gap's own row, alert and flatten
-    # would be lost (#235)
+    # would be lost (#235); never a refused start's, whose figures are not the account's
     first_breach = kind == "breach" and s.halt_kind != "breach"
     gap, was_gap = reason.startswith(GAP), (s.halted or "").startswith(GAP)
-    first_gap = gap and not was_gap and s.halt_kind != "breach"
+    first_gap = gap and not was_gap and s.halt_kind != "breach" and s.started
     if s.halted == reason or (open_ended and not (first_breach or first_gap)):
         return s, ()
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}

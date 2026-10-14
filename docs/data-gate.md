@@ -68,7 +68,7 @@ Result: PASS (2026-10-13). The 2026-10-11 run below received no futures ticks. T
 
 Result: in progress
 - Recording started 2026-10-13 10:25 ET (`live ES.F NQ.F --minutes 1400`, systemd user unit `fenrir-gate4`), ends about 09:45 ET 2026-10-14: about 1,340 trading minutes across two sessions (the rest of Tuesday's, most of Wednesday's Globex), above the 1,242 `compare` needs. File `data/gate/ticks-2026-10-13T142537.jsonl`. Then `compare` against history.
-- `compare` checks open, high, low and close only; volume is not compared (#17 asks for it), so the per-trade reading of `volume` stays unconfirmed by this item as written.
+- `compare` passes or fails on open, high, low and close only. It also prints, per symbol, the mismatches and a `volume` line (minutes whose live and historical volumes are equal, and both totals), which checks the per-trade reading of `volume` (#17) without gating the verdict.
 - Day: `____`. Minutes compared: `____`. Mismatches beyond 1 tick: `____`.
 - Notes: ...
 

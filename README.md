@@ -2,7 +2,7 @@
 
 A local-only, browser-based workbench for prop traders. Fenrir Desk helps you design, backtest, and run trading strategies built around the rules of specific prop firm challenges, with the goal of passing evaluations and reaching payouts as quickly and safely as possible.
 
-> **Status:** early development. The core, rules, strategy contract, history pull and single-attempt backtest are built; the UI and live trading are not. Nothing here is usable yet.
+> **Status:** pre-release. Built: the rules library, strategy contract, history pull, backtests, the browser UI (Workbench, Rules, Data, Backtests, Strategies, Live, Settings), the live runner on LSE bars and the NinjaTrader add-on. Dry runs on live data work. Live trading is not cleared yet: it waits on the add-on's Sim checklist ([#68](https://github.com/rrhodeswebdev/fenrir-desk/issues/68)) and gate item 5, sim fills checked against live bars ([#99](https://github.com/rrhodeswebdev/fenrir-desk/issues/99)). Use dry or sim accounts only until then.
 
 The full v1 spec is [SPEC.md](SPEC.md).
 
@@ -18,7 +18,7 @@ The full v1 spec is [SPEC.md](SPEC.md).
 
 - **Backend and CLI:** Python 3.12, `uv`, FastAPI, Typer, Polars + Parquet.
 - **UI:** Vite, React, TypeScript, TanStack Router + Query, Tailwind, shadcn/ui.
-- **Market data:** London Strategic Edge (LSE) for history. LSE is also the intended live source: data gate item 3 (real-time futures) passed on 2026-10-13; live use waits on item 4 (live bars match history).
+- **Market data:** London Strategic Edge (LSE), for history and live bars. The data gate's live items passed: real-time futures on 2026-10-13, and live-built bars matching history on 2026-10-14 ([docs/data-gate.md](docs/data-gate.md)). A key allows one live connection: while an account is armed the app holds it, and it frees it once nothing is armed.
 - **Execution:** a C# NinjaScript add-on in NinjaTrader 8 (Windows), over local HTTP + WebSocket.
 
 ## Run
@@ -56,7 +56,7 @@ Fenrir trades through a C# add-on inside NinjaTrader 8 on Windows: the same mach
    ```
 
    With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
-4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM; use bridged or shared networking). Settings apply after `docker compose restart`; the Live page's NinjaTrader field then shows the heartbeat.
+4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM). The VM must be reachable from the host: on a Mac use bridged or shared networking; on a Linux host with VirtualBox, a NAT-only VM is not reachable, so add a host-only adapter ([addon/INSTALL.md](addon/INSTALL.md), section 3) and use the VM's `192.168.56.x` address. Settings apply after `docker compose restart`; the Live page's NinjaTrader field then shows the heartbeat.
 
 At 16:40 New York time the add-on flattens and cancels everything on its managed accounts by itself, whether Fenrir is running or not.
 

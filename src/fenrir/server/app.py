@@ -2,7 +2,9 @@
 
 import os
 import re
-from collections.abc import AsyncIterator
+import signal
+import threading
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -23,6 +25,27 @@ from fenrir.settings import Settings
 
 COOKIE_MAX_AGE = 400 * 86400  # browsers cap cookie lifetime at 400 days
 _HOST = re.compile(r"(localhost|127\.0\.0\.1)(:[0-9]{1,5})?")
+
+
+STOP_GRACE = 20.0  # seconds the graceful stop gets before the watchdog exits anyway
+
+
+def terminator(
+    kill: Callable[[int, int], None] = os.kill,
+    exit_now: Callable[[int], None] = os._exit,
+    grace: float = STOP_GRACE,
+) -> Callable[[], None]:
+    """`app.state.terminate`: SIGTERM to this process, which uvicorn takes as a graceful shutdown
+    (the lifespan's stop() runs); in the image compose starts it again. A daemon watchdog exits
+    with 1 if the stop still hangs after `grace`, so the restart never needs a shell."""
+
+    def terminate() -> None:
+        watchdog = threading.Timer(grace, exit_now, (1,))
+        watchdog.daemon = True  # a clean exit never waits for it
+        watchdog.start()
+        kill(os.getpid(), signal.SIGTERM)
+
+    return terminate
 
 
 def host_action(host: str | None) -> Literal["ok", "redirect", "reject"]:
@@ -115,6 +138,10 @@ def create_app(
     app.state.addon = AddonClient(settings.nt_url, settings.nt_token) if settings.nt_token else None
     # opens nothing; started by _lifespan
     app.state.live = LiveHub(settings, secret=session_key, addon=app.state.addon)
+    # POST /api/settings/restart: tests replace `terminate`
+    app.state.settings_saved = False  # the secrets file changed through the page since start
+    app.state.restarting = False
+    app.state.terminate = terminator()
     app.add_middleware(HostGuard)
     unspent = [launch_code]
 

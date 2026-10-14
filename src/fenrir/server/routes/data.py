@@ -42,6 +42,8 @@ def overview(request: Request) -> dict[str, Any]:
 
 @router.post("/pull")
 def pull(request: Request) -> Response:
+    if request.app.state.restarting:  # POST /api/settings/restart (#262)
+        raise HTTPException(status_code=409, detail="the server is restarting")
     try:
         started = request.app.state.pull.start()
     except ValueError as e:  # the image fails the DEC-1 isolation check: a server fault, not yours

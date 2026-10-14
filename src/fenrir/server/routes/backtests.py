@@ -96,6 +96,8 @@ def options(request: Request) -> dict[str, list[str]]:
 @router.post("/jobs")
 def submit_job(body: JobRequest, request: Request) -> dict[str, str]:
     # sync handler, so the threadpool waits out `expand` (up to 60 s), not the event loop
+    if request.app.state.restarting:  # POST /api/settings/restart (#262)
+        raise HTTPException(status_code=409, detail="the server is restarting")
     settings = request.app.state.settings
     for pattern in body.strategies:
         if not strategy_glob_ok(pattern, settings.strategies_dir):

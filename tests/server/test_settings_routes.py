@@ -1,15 +1,25 @@
 import os
+import signal
+import sqlite3
 import stat
+import threading
+from contextlib import closing
+from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from fenrir.live import journal
+from fenrir.live.arming import Armed, insert_armed
 from fenrir.rules.loader import list_accounts
 from fenrir.server import isolation
-from fenrir.server.app import create_app
+from fenrir.server.app import STOP_GRACE, create_app, terminator
 from fenrir.server.auth import SESSION_COOKIE
+from fenrir.server.jobs import Job, JobItem
+from fenrir.server.routes.settings import restart_refusals
 from fenrir.settings import Settings, parse_env_text
 
 KEY = "k" * 43
@@ -36,7 +46,8 @@ def env(tmp_path, monkeypatch) -> tuple[TestClient, Path, Path]:
     monkeypatch.setenv("FENRIR_ENV_FILE", str(env_file))
     monkeypatch.delenv("FENRIR_BIND_ALL", raising=False)
     data_dir = tmp_path / "data"
-    app = create_app(Settings(rules_dir=RULES, data_dir=data_dir), KEY, "c" * 22, None, port=8000)
+    settings = Settings(rules_dir=RULES, data_dir=data_dir, private_dir=env_file.parent)
+    app = create_app(settings, KEY, "c" * 22, None, port=8000)
     client = TestClient(app, base_url=BASE)
     client.cookies.set(SESSION_COOKIE, KEY)
     return client, env_file, data_dir
@@ -61,6 +72,8 @@ def test_get_masks_secrets_and_reads_the_file(env):
         "safety_margin_pct": 80.0,
         "stale_seconds": 180,
         "nested_git": [],
+        "can_restart": False,
+        "restart_pending": False,
     }
     assert LSE not in r.text and TOKEN not in r.text
 
@@ -68,7 +81,8 @@ def test_get_masks_secrets_and_reads_the_file(env):
 def test_masks_sent_back_leave_secrets_unchanged(env):
     client, env_file, _ = env
     page = client.get("/api/settings").json()
-    del page["nested_git"]  # reported, not a setting
+    for k in ("nested_git", "can_restart", "restart_pending"):  # reported, not settings
+        del page[k]
     r = client.put("/api/settings", json=page | {"stale_seconds": 30}, headers=WRITE)
     assert r.status_code == 200 and r.json()["stale_seconds"] == 30
     assert LSE not in r.text and TOKEN not in r.text
@@ -308,3 +322,158 @@ def test_a_directory_accounts_file_is_500_naming_it(env):
     (data_dir / "accounts.yaml").mkdir(parents=True)
     r = client.get("/api/settings/accounts")
     assert r.status_code == 500 and "accounts.yaml is not a regular file" in r.json()["detail"]
+
+
+class _Busy:
+    def __init__(self, pull="idle", jobs=()):
+        self.pull, self._jobs = pull, list(jobs)
+
+    def status(self) -> dict:
+        return {"state": self.pull}
+
+    def jobs(self) -> list[Job]:
+        return self._jobs
+
+
+@pytest.fixture
+def image(env, monkeypatch) -> tuple[TestClient, list[str]]:
+    client = env[0]
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    calls: list[str] = []
+    client.app.state.terminate = lambda: calls.append("terminate")
+    return client, calls
+
+
+def _arm(private_dir: Path, account: str) -> None:
+    at = datetime(2026, 10, 14, tzinfo=UTC)
+    with closing(journal.open_db(private_dir / "fenrir.db")) as conn:
+        insert_armed(
+            conn, Armed(account, "strategies/orb.py", "h", AID, "MESM6", "dry", "evaluation", at)
+        )
+
+
+def test_restart_refusals_name_every_reason():
+    assert restart_refusals(True, False, [], False, False) == []
+    assert "natively" in restart_refusals(False, False, ["A"], True, True)[0]
+    assert restart_refusals(True, True, ["A"], False, False) == [
+        "The server is already restarting."
+    ]
+    why = restart_refusals(True, False, ["A", "B"], True, True)
+    assert why[0] == "Disarm every account first (armed: A, B)."
+    assert len(why) == 3 and "data pull" in why[1] and "backtest job" in why[2]
+
+
+def test_restart_in_the_image_is_202_then_terminates_once(image):
+    client, calls = image
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 202 and r.content == b""
+    assert calls == ["terminate"]  # a background task: run after the response was sent
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 409 and r.json()["detail"] == "The server is already restarting."
+    assert calls == ["terminate"]
+
+
+def test_restart_natively_is_409_and_never_terminates(env):
+    client = env[0]
+    calls = []
+    client.app.state.terminate = lambda: calls.append(1)
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 409 and "restart the server yourself" in r.json()["detail"].lower()
+    assert calls == []
+
+
+def test_restart_while_armed_is_409(image, env):
+    client, calls = image
+    _arm(env[1].parent, "Sim101")
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 409
+    assert r.json()["detail"] == "Disarm every account first (armed: Sim101)."
+    assert calls == [] and client.app.state.restarting is False
+
+
+@pytest.mark.parametrize(
+    ("db", "error"),
+    [
+        (b"not a database, just bytes " * 100, "file is not a database"),
+        (None, "no such table: armed"),  # a real sqlite file without the table
+    ],
+)
+def test_an_unreadable_armed_table_is_500_and_never_restarts(image, env, db, error):
+    client, calls = image
+    path = env[1].parent / "fenrir.db"
+    if db is None:
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE other (x)")
+    else:
+        path.write_bytes(db)
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 500 and r.json()["detail"] == f"cannot read the armed accounts: {error}"
+    assert calls == [] and client.app.state.restarting is False
+
+
+def test_restart_during_a_pull_or_a_backtest_is_409(image):
+    client, calls = image
+    state = client.app.state
+    state.pull = _Busy(pull="running")
+    assert "data pull" in client.post("/api/settings/restart", headers=WRITE).json()["detail"]
+    assert state.restarting is False  # a refusal clears it: arming works again
+    state.pull = _Busy()
+    item = JobItem("strategies/orb.py", AID, "MESM6")
+    state.jobs = _Busy(jobs=[Job("j1", "2026-10-14T00:00:00Z", False, (item,))])
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 409 and "backtest job" in r.json()["detail"]
+    state.jobs = _Busy(
+        jobs=[Job("j1", "2026-10-14T00:00:00Z", False, (replace(item, status="done"),))]
+    )
+    assert client.post("/api/settings/restart", headers=WRITE).status_code == 202
+    assert calls == ["terminate"]
+
+
+def test_restart_needs_the_session_and_our_origin(image):
+    client, calls = image
+    assert client.post("/api/settings/restart").status_code == 403  # no Origin
+    evil = {"origin": "http://evil.example"}
+    assert client.post("/api/settings/restart", headers=evil).status_code == 403
+    cross = WRITE | {"sec-fetch-site": "cross-site"}
+    assert client.post("/api/settings/restart", headers=cross).status_code == 403
+    client.cookies.clear()
+    assert client.post("/api/settings/restart", headers=WRITE).status_code == 401
+    assert calls == []
+
+
+def test_pull_and_job_submit_refuse_while_restarting(env):
+    client = env[0]
+    client.app.state.restarting = True
+    r = client.post("/api/data/pull", headers=WRITE)
+    assert r.status_code == 409 and r.json()["detail"] == "the server is restarting"
+    job = {"strategies": ["orb.py"], "accounts": [AID], "contracts": None}
+    r = client.post("/api/backtests/jobs", json=job, headers=WRITE)
+    assert r.status_code == 409 and r.json()["detail"] == "the server is restarting"
+
+
+def test_terminate_sigterms_itself_then_a_watchdog_exits_if_the_stop_hangs():
+    kills, exits, done = [], [], threading.Event()
+
+    def exit_now(code: int) -> None:
+        exits.append(code)
+        done.set()
+
+    terminator(kill=lambda pid, sig: kills.append((pid, sig)), exit_now=exit_now, grace=0.05)()
+    assert kills == [(os.getpid(), signal.SIGTERM)] and exits == []  # not before the grace
+    assert done.wait(5) and exits == [1]
+    assert STOP_GRACE == 20.0
+
+
+def test_settings_say_whether_a_restart_applies_and_works(env, monkeypatch):
+    client = env[0]
+    page = client.get("/api/settings").json()
+    assert page["can_restart"] is False and page["restart_pending"] is False
+    r = client.put("/api/settings", json={"stale_seconds": 180}, headers=WRITE)  # unchanged
+    assert r.json()["restart_pending"] is False
+    r = client.put("/api/settings", json={"stale_seconds": 30}, headers=WRITE)
+    assert r.json()["restart_pending"] is True
+    assert client.get("/api/settings").json()["restart_pending"] is True
+    monkeypatch.setenv("FENRIR_BIND_ALL", "1")
+    assert client.get("/api/settings").json()["can_restart"] is True
+    bad = client.put("/api/settings", json={"restart_pending": False}, headers=WRITE)
+    assert bad.status_code == 422  # reported, not settings

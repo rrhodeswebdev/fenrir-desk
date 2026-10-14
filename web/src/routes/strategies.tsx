@@ -162,6 +162,7 @@ export const REFUSALS: Record<string, string> = {
   mode_mismatch: 'Wrong mode for this account: a sim account arms as sim, any other as live.',
   no_evaluation_phase: 'This account type has no evaluation phase. Arm it as funded.',
   nt_unavailable: 'NinjaTrader is unavailable: check that it runs with the add-on, and the address and token in Settings.',
+  restarting: 'The server is restarting to apply the settings. Arm again once it is back.',
 }
 
 /** A refusal in words, else `errorText`. */

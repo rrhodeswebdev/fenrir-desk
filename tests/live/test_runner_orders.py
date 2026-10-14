@@ -181,6 +181,20 @@ def test_partial_entry_fills_average_the_entry():
     assert s.position == core.Position(2, 20000.75, 19990.0, 20020.0) and sends(effects) == []
 
 
+def test_an_entry_filled_one_lot_at_a_time_keeps_its_stop():
+    """Review of #240: every later part of the entry keeps the stop, not only the first after
+    the fill that opened the position (`entry_id` stays the bracket's through them)."""
+    b = at("09:30")
+    s, _ = decide_now(started(sim(), b), [replace(LONG, qty=3)])
+    cid = s.working.client_id
+    t = b.ts + timedelta(minutes=1, seconds=1)
+    out = []
+    for k in range(3):
+        s, effects = core.on_fill(s, fill(1, 20000.0, t + timedelta(milliseconds=k), cid=cid))
+        out += sends(effects)
+    assert s.position == core.Position(3, 20000.0, 19990.0, 20020.0) and out == []
+
+
 def test_a_manual_add_on_a_bracketed_position_has_no_known_stop():
     """#237: a fill that adds and is not the entry's (a manual buy) is under no stop at
     NinjaTrader, which resizes the bracket's stop and target on entry fills only. The position

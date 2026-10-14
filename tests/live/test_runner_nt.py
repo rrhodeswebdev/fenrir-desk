@@ -1264,16 +1264,16 @@ def test_ninjatraders_own_peak_never_rises_on_a_close_during_a_zero():
 
 
 def test_ninjatraders_own_peak_rises_with_an_intraday_raise_the_app_takes_too():
-    """The intraday side: the gap at 52,200, then a manual +1,500 both book with NinjaTrader at
-    52,500 (no gap: the app takes the raise to 2,500); -2,050 it alone books (50,450) is through
-    its own floor 50,500."""
+    """The intraday side: the gap at 52,200, then a manual +1,500 both book with NinjaTrader's
+    equity at 52,500 (+200 of it open: no gap, the app takes the raise to 2,500); -2,050 it alone
+    books (50,450) is through its own floor 50,500."""
     s = running(sim(trailing="intraday"))
     s, _ = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
     gap = s.halted
     s, _ = manual_loss(reconciled(s), -1500.0, day=D1)
     now = at("09:32").ts
-    s, _ = core.on_account(s, account(balance=52_500.0, today=2500.0), now)
-    assert (s.acct.peak, s.acct.floor, s.nt_peak) == (2500.0, 500.0, 2500.0)
+    s, _ = core.on_account(s, account(balance=52_300.0, today=2300.0, unrealized=200.0), now)
+    assert (s.acct.peak, s.acct.floor, s.nt_peak) == (2500.0, 500.0, 2500.0)  # its equity
     s, effects = core.on_account(s, account(balance=50_450.0, today=450.0), now)
     caught = nt_floor(50_450.0, floor=50_500.0, peak=52_500.0)
     assert alerts(effects) == [f"{caught} (still halted: {gap})"]

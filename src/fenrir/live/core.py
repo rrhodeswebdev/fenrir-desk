@@ -428,9 +428,10 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         fills=(*s.fills, ts),
         working=None if mine else w,
         # an over-close that reversed the position ends that Flatten: the reversal gets its own;
-        # so does a fill from flat: a Flatten sent while flat (the gap's account-wide one, #229)
-        # cannot be closing it, and a second `/flatten` never over-closes (review of #231)
-        exiting=None if rest == 0 or flipped or pos.qty == 0 else s.exiting,
+        # so does a fill that opens or adds: a Flatten sent before it (while flat, the gap's
+        # account-wide one, #229; or for fewer lots, #234) may not close all of it, and a
+        # second `/flatten` never over-closes (review of #231)
+        exiting=None if rest == 0 or flipped or opening else s.exiting,
         held=s.held or (None if opening else (pos, before)),
     )
     s, more = _event(s, Fill(ts, qty, price, commission, realized))
@@ -495,7 +496,14 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
                 equity=base + equity,
             )
             s, out = halt(replace(s, acct=_raised(s.setup, a, base + a.balance)), gap)
-            return _gap_peaked(was, s, raised.peak, now, out)
+            s, out = _gap_peaked(was, s, raised.peak, now, out)
+            held = s.position.qty or round(nt.unrealized_pnl, 2) != 0
+            if s.halted != was.halted and held and not s.exiting:
+                # flattened now, as `_exit` would on the next LSE bar, which a feed outage may
+                # hold back; only on the message that raised it, so a refused send never storms
+                s, more = _flatten(s, now, f"g{now.timestamp()}", s.halted)
+                out += more
+            return s, out
         s = replace(s, acct=raised)
     return s, _peaked(was, s, now)
 
@@ -1071,14 +1079,20 @@ def _flatten(s: RunnerState, ts: datetime, suffix: str, why: str) -> Step:
 
 def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> Step:
     open_ended = s.halted is not None and s.halt_day is None
-    if s.halted == reason or (open_ended and (kind != "breach" or s.halt_kind == "breach")):
-        return s, ()  # an open-ended halt is replaced only by a first breach, never downgraded
+    # an open-ended halt is replaced only by a first breach, never downgraded; and by a first gap
+    # halt when it is no breach: under a strategy error, say, the gap's own row, alert and flatten
+    # would be lost (#235)
+    first_breach = kind == "breach" and s.halt_kind != "breach"
+    gap, was_gap = reason.startswith(GAP), (s.halted or "").startswith(GAP)
+    first_gap = gap and not was_gap and s.halt_kind != "breach"
+    if s.halted == reason or (open_ended and not (first_breach or first_gap)):
+        return s, ()
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
         # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
         # account message, then that bar's own Mark breaches: review of #231)
-        own = ", on the app's own figures, not the gap" if s.halted.startswith(GAP) else ""
+        own = ", on the app's own figures, not the gap" if was_gap else ""
         out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 

@@ -10,7 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from live_helpers import ARMED_AT, pinned
+from live_helpers import ARMED_AT, pinned, stored
 
 from fenrir.bridge.client import AddonClient
 from fenrir.bridge.fake_addon import FakeAddon, running
@@ -415,8 +415,8 @@ async def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened(
     hub = LiveHub(settings, addon=client)
     try:
         await started(hub)
-        await hub.handle_stream(figures | {"unrealized_pnl": -500.0})
         sent = len(fake.requests)
+        await hub.handle_stream(figures | {"unrealized_pnl": -500.0})  # intraday: flattens (#235)
         await hub.handle_bar(bar(roll))
         s = hub.states["Sim101"]
         assert s.halted.startswith("confirm balances: a gap ") and s.position.qty == 0
@@ -437,6 +437,70 @@ async def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened(
         assert flattens(fake, sent) == [two]
     finally:
         await hub.stop()
+
+
+BOOM = """
+MARKET = "NQ"
+PARAMS = {}
+def init(params):
+    return 0
+def step(state, bar, ctx):
+    raise RuntimeError("boom")
+"""
+
+
+async def test_an_intraday_gap_under_a_strategy_error_halts_alerts_and_flattens(
+    settings, client, conn, armed, fake, clock, tmp_path
+):
+    """#235, the review of #231 (round 2) probe on a Lucid Daily 50k: the strategy raises on the
+    first bar (an open-ended halt that is no breach), then NinjaTrader shows 52,700 with -500
+    open (a gap the app never saw). The gap halt replaces the strategy error: journalled, an
+    alert naming the error, and one account-wide /flatten with the gap's reason, on that message
+    with no bar since (item 2). A restart that day restores the gap halt, not the strategy
+    error."""
+    stored(settings.data_dir)  # warm-up (#79) finds yesterday, so the strategy runs
+    path = tmp_path / "boom.py"
+    path.write_text(BOOM)
+    boom = replace(armed, strategy_path=str(path), strategy_hash=file_hash(path))
+    arming.insert_armed(conn, pinned(replace(boom, rules_account="lucid-daily-50k")))
+    figures = account(52_700.0, realized=2700.0) | {"unrealized_pnl": -500.0}
+    first = LiveHub(settings, addon=client)
+    try:
+        await started(first)
+        await first.handle_bar(bar(T0 + timedelta(minutes=1)))
+        error = first.states["Sim101"].halted
+        assert error.startswith("strategy error: ") and "boom" in error
+        sent = len(fake.requests)
+        await first.handle_stream(figures)  # no bar since: a feed outage holds nothing back
+        [one] = flattens(fake, sent)
+        await first.handle_bar(bar(T0 + timedelta(minutes=2)))
+        s = first.states["Sim101"]
+        assert s.halted.startswith("confirm balances: a gap on NinjaTrader's account figures: ")
+        assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
+        assert [h["reason"] for h in halts(conn)] == [error, s.halted]
+        alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+        assert f"{s.halted} (was halted: {error})" in alerts
+        assert flattens(fake, sent) == [one]
+        rows = journal.rows(conn, account="Sim101", kind="action")
+        assert [r.payload["reason"] for r in rows if r.payload.get("client_id") == one] == [
+            s.halted
+        ]
+        for n in range(3, 6):  # not filled: no storm
+            await first.handle_bar(bar(T0 + timedelta(minutes=n)))
+            await first.handle_stream(figures)
+        assert flattens(fake, sent) == [one]
+    finally:
+        await first.stop()
+    clock["t"] = T0 + timedelta(hours=1)
+    second = LiveHub(settings, addon=client)
+    try:
+        await second.handle_stream({"type": "connected"})
+        await second.tick(clock["t"])
+        await second.handle_stream(figures)
+        s = second.states["Sim101"]
+        assert (s.halted, s.halt_kind) == (halts(conn)[1]["reason"], None)
+    finally:
+        await second.stop()
 
 
 THU = T0 + timedelta(days=3, hours=-0.5)  # Thursday 09:30 ET, trading day 2026-10-15

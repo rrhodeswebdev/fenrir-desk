@@ -120,7 +120,7 @@ Result: PASS (2026-10-14). SPEC Testing Strategy: a dry run on live LSE data com
   - Each time, the next bar, 13 s later, lifted the pause: the status went back to `halt_kind: null` with no conditions.
   - No journal row marks a resume: the next `bar` row and the status show it.
 - **Dry actions:** none were logged. ORB's 09:30–09:45 opening range (30497.75–30625.75, rebuilt from the item 4 recording) had already broken before the arm, and ORB trades once a day. The warm-up replays a breakout with its actions suppressed. Bars after the arm, such as 09:57, which closed at 30479.25 below the range, logged no action.
-- **Disarm:** at 10:18:46 ET, `POST /api/arming/disarm` returned `{"ok":true,"error":null}` and journalled a `halt` row with reason `disarmed`. Disarming does not close the LSE socket. Stopping the server (SIGINT, which ran the lifespan shutdown) did.
+- **Disarm:** at 10:18:46 ET, `POST /api/arming/disarm` returned `{"ok":true,"error":null}` and journalled a `halt` row with reason `disarmed`. Disarming did not close the LSE socket; stopping the server (SIGINT, which ran the lifespan shutdown) did. Since #251 the hub closes it once no account is armed.
 
 ## Values downstream plans need
 

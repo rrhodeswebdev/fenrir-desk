@@ -269,12 +269,13 @@ class LiveHub:
         self._tasks: list[asyncio.Task] = []
         self._follow_bars = False  # start() was called: the first armed row starts the bar feed
         self._store_retry: dict[str, datetime] = {}  # per account: no store load before then
-        self._feed: asyncio.Task | None = None  # run_bars, from then until stop()
+        self._feed: asyncio.Task | None = None  # run_bars, while a row is armed (#251)
 
     def start(self) -> None:
         """Start the clock ticks and, when configured, follow the add-on's event stream; call on
         the event loop. The LSE bar feed (`run_bars`) starts with the first armed row a sync
-        finds: nothing reads it before, and LSE allows one socket per key."""
+        finds and stops once a sync finds none (#251): nothing reads it meanwhile, and LSE
+        allows one socket per key; a re-arm's feed replays today from the open."""
         self._follow_bars = True
         self._tasks.append(asyncio.create_task(run_ticks(self)))
         if self.addon is not None:
@@ -894,6 +895,27 @@ class LiveHub:
         for account, a in rows.items():
             if account not in self.states | self.broken | self.waiting:
                 await self._start(a, now)
+        # nothing armed: free the key's one socket (#251). Not from a bar's sync, which runs in
+        # the feed task (it would await itself): the next tick, within TICK_EVERY, stops it
+        if not rows and self._feed is not None and self._feed is not asyncio.current_task():
+            await self._stop_feed()
+
+    async def _stop_feed(self) -> None:
+        """Cancel the bar feed and wait until it has ended, its stream closed (the socket free
+        before a re-arm subscribes again; it needs no hub lock to end, so a caller holding it
+        never deadlocks), then show it down without an outage. `today` goes with it: a re-arm's
+        feed replays the day from the open, so the bars missed meanwhile come back, and none of
+        a day gone by is kept while nothing is armed."""
+        feed, self._feed = self._feed, None
+        feed.cancel()
+        try:
+            await asyncio.wait({feed})  # never raises the feed's CancelledError, only the caller's
+        finally:  # the caller cancelled too: the feed ends all the same
+            self.lse_connected = False
+            self.lse_error = self.lse_retry_at = None
+            self.replaying = set()
+            self.today = {}
+        self._tasks.remove(feed)  # after: a stop() cancelling this wait still gathers the feed
 
     async def _start(self, a: Armed, now: datetime) -> None:
         try:

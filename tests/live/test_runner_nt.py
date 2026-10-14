@@ -750,6 +750,8 @@ def test_a_zero_balance_is_listed_with_the_pauses_before_warming_up():
     s = running(sim(), account(50_400.0))
     s, _ = core.on_account(replace(s, warming="warming up: replaying"), account(0.0), T.ts)
     assert [c["kind"] for c in core.conditions(s)] == ["figures", "warming"]
+    status = core.account_status(s)  # #243 (R6): `halt_reason` takes them in the same order
+    assert (status["halt_kind"], status["halt_reason"]) == ("figures", core.NO_BALANCE)
     status = core.account_status(replace(s, stale="no NQ bar"))
     assert [c["kind"] for c in status["conditions"]] == ["stale", "figures", "warming"]
     assert (status["halt_kind"], status["halt_reason"]) == ("stale", "no NQ bar")

@@ -2254,6 +2254,65 @@ def test_a_refused_starts_raise_never_hides_a_missed_close():
     assert reverted.halted == core.CONFIRM_BALANCES
 
 
+# #244: a refused start never ran the missed-close check, so its own end_of_day roll's "peak" row
+# (journalled under any rules: NinjaTrader's real close) is never read as every close up to it
+# taken; its peak still counts toward the floor, as on main
+
+EVERY_REFUSAL = {**ARMED_RULES, **RULES_CHANGED}
+
+
+def journalled(effects, kind):
+    return [e.payload for e in effects if isinstance(e, Log) and e.kind == kind]
+
+
+@pytest.mark.parametrize("changed", EVERY_REFUSAL.values(), ids=EVERY_REFUSAL)
+def test_a_refused_starts_roll_never_hides_a_close_missed_before_it(changed):
+    """The reviewer's probe (PR #242, approval item 1): armed end_of_day on D1 and down over D1's
+    close; restarted on D2 refused, NinjaTrader at 50,100, and linked over D2's close, whose roll
+    journals 50,100. With the file put back (not re-armed) the D3 restart must still ask to
+    confirm D1's close, which may have been higher; a start that ran over both closes need not."""
+    armed = armed_at(sim(), at("08:00").ts)
+    d2 = at("09:30", D2).ts
+    assert core.start(armed, d2)[0].halted == core.CONFIRM_BALANCES  # the control: D1's missed
+    s, rows = core.start(refused(armed, changed), d2)
+    assert not s.started
+    s, more = core.on_account(reconciled(s), account(balance=50_100.0), d2)
+    _, rolled_d3 = core.on_bar(s, at("09:30", D3))
+    rows += more + rolled_d3
+    assert [p["peak"] for p in peaks(rows)] == [50_100.0]  # its roll took D2's real close
+    back, _ = core.start(armed, at("09:31", D3).ts, (), peaks(rows), journalled(rows, "day_start"))
+    assert back.halted == core.CONFIRM_BALANCES
+    assert back.acct.peak == 100.0  # its close still counts toward the floor
+    # a start that ran over both closes: its rolls are proof
+    s = running(armed, account(balance=50_100.0), b=at("09:30"))
+    s, rows = core.on_bar(s, at("09:30", D2))
+    _, more = core.on_bar(core.on_account(s, account(balance=50_100.0), d2)[0], at("09:30", D3))
+    ran, _ = core.start(armed, at("09:31", D3).ts, (), peaks(rows + more))
+    assert ran.halted is None and ran.acct.peak == 100.0
+
+
+@pytest.mark.parametrize("changed", EVERY_REFUSAL.values(), ids=EVERY_REFUSAL)
+def test_a_refused_starts_roll_keeps_the_peak_rows_floor_a_start_that_ran_has(changed):
+    """Why its roll row is kept, not dropped: under #219's gap at the close (app 50,000,
+    NinjaTrader 52,200, which never replaces the refusal, #240), NinjaTrader's raised peak is in
+    that row only (the open holds the app's), so a later-day restart opening at NinjaTrader's
+    balance takes it, as after a start that ran: floor 50,200, not 48,000 (#225)."""
+
+    def gap_roll(setup):
+        s = running(setup, account(balance=52_200.0, today=2200.0))
+        return core.on_bar(s, at("09:30", D2))[1]
+
+    ran, rows = gap_roll(sim()), gap_roll(refused(sim(), changed))
+    assert [{**p, "refused": True} for p in peaks(ran)] == peaks(rows)
+    assert peaks(ran) == [{"peak": 50_000.0, "ts": iso(at("09:30", D2).ts), "nt_peak": 52_200.0}]
+    assert journalled(rows, "day_start") == journalled(ran, "day_start")
+    floors = [
+        restart(52_200.0, (), peaks(e), journalled(e, "day_start"))[0].acct.floor
+        for e in (ran, rows)
+    ]
+    assert floors == [200.0, 200.0]
+
+
 @pytest.mark.parametrize("other", ["strategy error", "warm-up diverged"])
 def test_a_gap_at_the_roll_under_another_open_ended_halt_replaces_it(other):
     """The same at an end_of_day roll (#219): the app flat at 0, NinjaTrader closes at 52,200

@@ -913,6 +913,22 @@ def test_the_halt_at_ninjatraders_own_floor_flattens_what_the_app_holds_once():
     assert alerts(effects) and sends(effects) == []
 
 
+def test_ninjatraders_own_floor_is_checked_on_an_intraday_gap_message_too():
+    """K2: the intraday gap halt at NinjaTrader's 52,200, then a manual -1,900 both book (the app
+    at -1,900, its floor -2,000). NinjaTrader at 50,300 is a gap again (the floor -1,700 from it is
+    above the app's equity), above its own floor 50,200; at 50,150, -150 the app never saw, still
+    a gap and through that floor: the halt."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    gap = s.halted
+    s, _ = manual_loss(reconciled(s), 1900.0, day=D1)
+    now = at("09:32").ts
+    s, effects = core.on_account(s, account(balance=50_300.0, today=300.0), now)
+    assert alerts(effects) == [] and (s.acct.floor, s.nt_peak) == (-2000.0, 2200.0)
+    s, effects = core.on_account(s, account(balance=50_150.0, today=150.0), now)
+    assert alerts(effects) == [f"{nt_floor(50_150.0)} (still halted: {gap})"]
+
+
 def held_over_the_close(gain, loss, nt_balance, unrealized, **rules):
     """The app books `gain` in fills, then adopts NinjaTrader's long with a known stop (19,000)
     and marks it `loss` open; the link drops over the close and NinjaTrader reports `nt_balance`

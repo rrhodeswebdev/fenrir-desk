@@ -282,6 +282,7 @@ class LiveHub:
             self._tasks.append(asyncio.create_task(run_stream(self)))
 
     async def stop(self) -> None:
+        self._follow_bars = False  # first: no sync while it stops starts a feed
         for t in self._tasks:
             t.cancel()
         for r in await asyncio.gather(*self._tasks, return_exceptions=True):
@@ -289,7 +290,6 @@ class LiveHub:
                 log.error("live task had failed: %s", type(r).__name__)
         self._tasks.clear()
         self._feed = None
-        self._follow_bars = False  # a sync after stop() starts no feed that nothing cancels
         for account in list(self.children):
             await self._kill(account)
         if self.conn is not None:
@@ -901,28 +901,34 @@ class LiveHub:
             await self._stop_feed()
 
     async def _stop_feed(self) -> None:
-        """Cancel the bar feed and wait until it has ended, its stream closed (the socket free
-        before a re-arm subscribes again; it needs no hub lock to end, so a caller holding it
-        never deadlocks), then show it down without an outage. `today` goes with it: a re-arm's
-        feed replays the day from the open, so the bars missed meanwhile come back, and none of
-        a day gone by is kept while nothing is armed. The lock is held through the close
-        handshake (up to websockets' close timeout on a half-open link): nothing is armed."""
+        """Cancel the bar feed and wait until it has ended (it needs no hub lock to end, so a
+        caller holding it never deadlocks), then show it down without an outage. A cancel of
+        the caller's is held until then and re-raised, so the lock is never released with the
+        old feed still running (#257); under an anyio scope, which cancels on every loop turn,
+        that wait spins a core for as long as the close takes (no scope wraps a hub caller).
+        Ended, the feed has closed its stream, usually its socket too: lse-data's
+        `stream_async` can leave its inner generator to the finalizer, whose own task runs the
+        close handshake, so it may end after the lock is released (#257). `today` goes with
+        it: a re-arm's feed replays the day from the open, so the bars missed meanwhile come
+        back, and none of a day gone by is kept while nothing is armed."""
         feed, self._feed = self._feed, None
         feed.cancel()
-        try:
-            await asyncio.wait({feed})  # never raises the feed's CancelledError, only the caller's
-        except asyncio.CancelledError:
-            # the caller was cancelled: still wait for the close, or the lock would be released
-            # with the old socket open and a re-arm's feed would open a second one
-            await asyncio.wait({feed})
-            raise
-        finally:
-            self.lse_connected = False
-            self.lse_error = self.lse_retry_at = None
-            self.replaying = set()
-            self.today = {}
-            if feed.done():  # else (cancelled twice) a stop() still gathers it
-                self._tasks.remove(feed)
+        cancelled: asyncio.CancelledError | None = None
+        # every cancel of the caller's too (a second one, an anyio scope's on each await): else
+        # the lock would be released with the old stream open and a re-arm would open a second
+        while not feed.done():
+            try:
+                await asyncio.wait({feed})  # never raises the feed's CancelledError
+            except asyncio.CancelledError as e:
+                cancelled = e
+        self.lse_connected = False
+        self.lse_error = self.lse_retry_at = None
+        self.replaying = set()
+        self.today = {}
+        if feed in self._tasks:  # a stop() may have cleared them meanwhile
+            self._tasks.remove(feed)
+        if cancelled is not None:
+            raise cancelled
 
     async def _start(self, a: Armed, now: datetime) -> None:
         try:

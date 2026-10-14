@@ -907,8 +907,8 @@ class LiveHub:
         old feed still running (#257); under an anyio scope, which cancels on every loop turn,
         that wait spins a core for as long as the close takes (no scope wraps a hub caller).
         Ended, the feed has closed its stream, usually its socket too: lse-data's
-        `stream_async` can leave its inner generator to the finalizer, which then starts the
-        close handshake a loop turn later, after the lock is released (#257). `today` goes with
+        `stream_async` can leave its inner generator to the finalizer, whose own task runs the
+        close handshake, so it may end after the lock is released (#257). `today` goes with
         it: a re-arm's feed replays the day from the open, so the bars missed meanwhile come
         back, and none of a day gone by is kept while nothing is armed."""
         feed, self._feed = self._feed, None

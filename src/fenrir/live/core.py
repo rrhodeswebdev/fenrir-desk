@@ -233,7 +233,8 @@ def start(
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
     journalled since then; the highest of them and `start.peak` is the peak (DEC-4a), with their
-    "nt_peak"s when today's open is not journalled, else with that open's peak (#225), and for
+    "nt_peak"s (and their opens', #220) when today's open is not journalled, else with that
+    open's peak (#225), and for
     `end_of_day` with every journalled open's (#220). `opens`: the "day_start" payloads
     journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
@@ -256,7 +257,8 @@ def start(
         # NinjaTrader's balance, which holds the gap, takes it too, so its floor is never looser
         # than NinjaTrader's; one that replays the app's own balance keeps the app's peak (theirs
         # would breach it), and at least today's open's, which a start may have set from theirs
-        theirs = [rows[-1].peak] if replays else [p["nt_peak"] for p in peaks if "nt_peak" in p]
+        noted = [*peaks, *opens]  # a roll during a zero notes it on its open (#220)
+        theirs = [rows[-1].peak] if replays else [p["nt_peak"] for p in noted if "nt_peak" in p]
         # end_of_day: each roll journals its open with the peak it raised to, even a roll that
         # took no close and so journalled no "peak" row (#220); within an arming the peak never
         # falls, so the highest open since arming bounds it too, on a later day as well
@@ -1167,6 +1169,7 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         return s, ()
     acct, unverified = _rules(s, DayClosed(s.acct.day, ts))
     s, out = _mismatched(s, unverified)
+    untaken = None  # NinjaTrader's raised peak under a gap at a close not taken (#220, #225)
     if isinstance(acct, Breach):
         s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
         acct = s.acct  # failed until disarmed: its figures stay as they were
@@ -1203,6 +1206,7 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
             # every roll, raised or not: see _missed_close
             out += (_peak_log(s.setup, acct, ts, theirs),)
         elif s.setup.start:  # none yet, lost with the link, or 0: this close is never taken
+            untaken = theirs if s.nt else None  # during a 0, a gap's: the open carries it
             s, more = halt(s, NO_CLOSE)
             out += more
             # the floor still trails the app's own closing balance, as under the gap, so an open
@@ -1224,7 +1228,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     )
     if s.setup.armed.mode != "dry" and (start := s.setup.start) and s.halt_kind != "breach":
         opens = DayStart(start.phase_start + acct.day_start_balance, start.phase_start + acct.peak)
-        out += (_open_log(day, opens, ts),)  # a restart today opens the day as this roll did
+        # a restart today opens the day as this roll did
+        out += (_open_log(day, opens, ts, s.setup.start.phase_start, untaken),)
     if s.halt_day is not None and day > s.halt_day:
         out += (Log("alert", {"message": f"halt lifted: {s.halted}"}),)
         s = replace(s, halted=None, halt_kind=None, halt_day=None)
@@ -1269,13 +1274,17 @@ def _peak_log(setup: Setup, a: AccountState, ts: datetime, theirs: float | None 
     return Log("peak", payload)
 
 
-def _open_log(day: date, opens: DayStart, ts: datetime) -> Log:
-    """Trading day `day`'s open as a "day_start" row, which `start` reads back on a restart."""
+def _open_log(
+    day: date, opens: DayStart, ts: datetime, base: float = 0.0, theirs: float | None = None
+) -> Log:
+    """Trading day `day`'s open as a "day_start" row, which `start` reads back on a restart; after
+    a roll during a zero under a gap (#220), also NinjaTrader's raised peak `theirs` (relative to
+    `base`, the phase start) as "nt_peak", which no "peak" row then holds (#225)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
-    return Log(
-        "day_start",
-        {"day": day.isoformat(), "balance": opens.balance, "peak": opens.peak, "ts": stamp},
-    )
+    payload = {"day": day.isoformat(), "balance": opens.balance, "peak": opens.peak, "ts": stamp}
+    if theirs is not None:
+        payload["nt_peak"] = base + theirs
+    return Log("day_start", payload)
 
 
 def _strict(s: RunnerState) -> AccountState:

@@ -665,13 +665,25 @@ def test_a_restart_at_or_below_a_no_close_floor_cannot_start(roll, nt_balance):
     assert r.halt_kind != "breach" and sends(effects) == []
 
 
-@pytest.mark.parametrize("roll", NO_CLOSE_ROLLS.values(), ids=NO_CLOSE_ROLLS.keys())
-def test_a_later_day_restart_keeps_a_no_close_floor(roll):
+@pytest.mark.parametrize(
+    ("roll", "peak"),
+    [
+        (NO_CLOSE_ROLLS["zero"], 2200.0),
+        (NO_CLOSE_ROLLS["lost link"], 2200.0),
+        (NO_CLOSE_ROLLS["zero, stale gap"], 3000.0),  # NinjaTrader's raised peak, as on main
+        (NO_CLOSE_ROLLS["zero, stale 50,700"], 2200.0),
+    ],
+    ids=NO_CLOSE_ROLLS.keys(),
+)
+def test_a_later_day_restart_keeps_a_no_close_floor(roll, peak):
     """#220 review (round 5, NB1): down over the next roll too, so no open journalled for today:
     the highest open journalled since arming bounds the peak, so a D3 restart keeps the floor the
-    D2 no-close roll raised (main, from that roll's stale "peak" row, 200), with no "peak" row."""
+    D2 no-close roll raised (main, from that roll's stale "peak" row, 200), with no "peak" row.
+    Under a gap from the stale figures, the open carries NinjaTrader's raised peak as its
+    "nt_peak", which a later-day restart takes as it takes a "peak" row's (#225), as on main."""
     s, r, out, _ = restart_after(roll, bar("10:00", 0, 0, 0, 0, D3).ts, 52_200.0)
-    assert (r.acct.peak, r.acct.floor) == (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    assert (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    assert (r.acct.peak, r.acct.floor) == (peak, peak - 2000.0)
     assert r.halted.startswith("confirm balances: ") and peaks(out) == []
 
 

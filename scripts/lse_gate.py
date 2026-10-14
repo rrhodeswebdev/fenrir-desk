@@ -133,6 +133,22 @@ def compare_bars(live: dict, hist: dict, tick: float) -> tuple[int, list[str]]:
     return len(shared), problems
 
 
+def volume_stats(live: dict, hist: dict) -> list[str]:
+    """Per symbol, over the shared minutes: how many minutes' volumes are equal, and the totals.
+
+    Informational, not part of PASS: it checks that LSE tick volume is per trade (#17).
+    """
+    shared = set(live) & set(hist)
+    lines = []
+    for sym in sorted({k[0] for k in shared}):
+        keys = [k for k in shared if k[0] == sym]
+        # history volumes come back as floats; round them so float noise is not a mismatch
+        equal = sum(live[k][4] == round(hist[k][4]) for k in keys)
+        lv, hv = sum(live[k][4] for k in keys), sum(round(hist[k][4]) for k in keys)
+        lines.append(f"volume {sym}: equal={equal}/{len(keys)} live={lv} hist={hv}")
+    return lines
+
+
 def coverage_problems(shared: set, symbols: list[str], min_minutes: int) -> list[str]:
     counts = Counter(sym for sym, _ in shared)
     return [
@@ -240,6 +256,12 @@ def cmd_compare(args: argparse.Namespace) -> None:
     compared, problems = compare_bars(live, hist, tick=args.tick)
     short = coverage_problems(set(live) & set(hist), args.symbols, args.min_minutes)
     print(f"compared={compared} mismatches={len(problems)}")
+    if compared:
+        by_symbol = Counter(dict.fromkeys(sorted({k[0] for k in live}), 0))
+        by_symbol.update(p.split()[0] for p in problems)
+        print("   mismatches by symbol:", dict(by_symbol))
+    for line in volume_stats(live, hist):
+        print("  ", line)
     for p in [*short, *problems[:50]]:
         print("  ", p)
     print("PASS" if compared and not problems and not short else "FAIL")

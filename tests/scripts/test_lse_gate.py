@@ -65,6 +65,33 @@ def test_compare_bars_no_overlap_is_not_a_pass():
     ]
 
 
+def test_volume_stats_counts_equal_minutes_and_totals_per_symbol():
+    a, b, c = (utc(2026, 10, 8, 14, m) for m in range(3))
+    live = {
+        ("NQ.F", a): (1.0, 1.0, 1.0, 1.0, 4),
+        ("NQ.F", b): (1.0, 1.0, 1.0, 1.0, 5),
+        ("ES.F", a): (1.0, 1.0, 1.0, 1.0, 7),
+        ("ES.F", c): (1.0, 1.0, 1.0, 1.0, 100),  # live only: not counted
+    }
+    hist = {
+        ("NQ.F", a): (1.0, 1.0, 1.0, 1.0, 4),
+        ("NQ.F", b): (1.0, 1.0, 1.0, 1.0, 6),
+        ("ES.F", a): (1.0, 1.0, 1.0, 1.0, 7),
+        ("ES.F", b): (1.0, 1.0, 1.0, 1.0, 100),  # history only: not counted
+    }
+    assert gate.volume_stats(live, hist) == [
+        "volume ES.F: equal=1/1 live=7 hist=7",
+        "volume NQ.F: equal=1/2 live=9 hist=10",
+    ]
+
+
+def test_volume_stats_rounds_float_history_volumes():
+    key = ("NQ.F", utc(2026, 10, 8, 14, 30))
+    live = {key: (1.0, 1.0, 1.0, 1.0, 2901)}
+    hist = {key: (1.0, 1.0, 1.0, 1.0, 2901.000000001)}
+    assert gate.volume_stats(live, hist) == ["volume NQ.F: equal=1/1 live=2901 hist=2901"]
+
+
 def test_lag_stats():
     assert gate.lag_stats([0.25, 0.75, 0.5, 9.0]) == (0.625, 9.0)
 

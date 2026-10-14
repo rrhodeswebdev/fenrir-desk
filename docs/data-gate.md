@@ -83,7 +83,17 @@ Result: PASS (2026-10-14).
 
 ## Item 5 — LSE prices vs NinjaTrader sim fills
 
-Deferred to plan 22 (needs the add-on and a sim account).
+Result: not run yet (#99). Needs the add-on and a sim account: `docs/live-checklist.md` stage 2.
+- Run: `uv run python scripts/gate_item5.py <sim account> --day <trading day> [<trading day> …]`
+  (`--db PATH` when the journal is not `<private_dir>/fenrir.db`). It reads the account's journal
+  read-only and calls no LSE: each `fill` row (the add-on's fill) against the journalled `bar` row
+  (the LSE 1-minute bar the runner traded on) of the minute holding the fill time, both parsed with
+  `datetime.fromisoformat` and keyed by the minute in UTC.
+- PASS: at least 10 fills compared, and none more than 1 tick outside its bar's [low, high] (item
+  4's tolerance; a sim market fill prints at the ask or bid while LSE's `price` may be the bid,
+  Item 3). Fills with no bar for their minute are listed as unmatched and not compared.
+- To record here: fills seen, compared, unmatched, worst distance in ticks, PASS/FAIL, the days,
+  account, strategy and contract.
 
 ## Dry run on live data (#82)
 

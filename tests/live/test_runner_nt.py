@@ -1895,6 +1895,283 @@ def test_an_intraday_gap_never_replaces_a_refused_start(changed):
     assert s.halted == refused and sends(effects) == []
 
 
+# #241: one rule for a refused start. Nothing replaces its halt, as no figures it reads are the
+# account's, and since it runs no strategy, a position it holds or adopts is flattened once
+
+REFUSALS = {"strategy": {"strategy_hash": "h2"}, "rules": {"rules_hash": "r2"}}
+HELD = [NtPosition("Sim101", INSTRUMENT, 1, 20000.0)]
+HELD_STOP = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "sell", 1, 19000.0, "working")]
+
+
+def refused_long(changed, trailing="intraday"):
+    """A start refused on `changed` that adopts a bracketed long (stop 19,000) from NinjaTrader,
+    as a restart's replayed position is, with no strategy to exit it."""
+    s, _ = core.start(refused(sim(trailing=trailing), changed), T.ts)
+    return core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))[0]
+
+
+def refused_why(s):
+    return f"position {s.position.qty} held by a refused start: {s.halted}"
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_refused_start_flattens_the_position_it_holds_once(changed):
+    """No step child is spawned, so only the long's stop, its target or the add-on's 16:40
+    flatten would ever close it. The next bar flattens it, whatever the figures say, with an
+    alert and the refusal in its reason; once: nothing while that Flatten is out, nor once flat."""
+    s = refused_long(changed)
+    refused, why = s.halted, refused_why(s)
+    assert not s.started and refused.endswith("changed since arming; re-arm")
+    s, effects = core.on_bar(s, bar("09:30", 20000.0, 20000.0, 20000.0, 20000.0))
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"] and s.halted == refused
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == [] and alerts(effects) == []
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(minutes=2, seconds=5), qty=-1))
+    s, effects = core.on_bar(s, at("09:32"))
+    assert (s.position.qty, sends(effects), s.halted) == (0, [], refused)
+
+
+def test_the_refusal_flattens_before_flat_by_does():
+    """Its reason and alert come first, also on a bar past flat-by (16:40 here)."""
+    s = refused_long(REFUSALS["rules"])
+    why = refused_why(s)
+    s, effects = core.on_bar(s, at("16:40"))
+    assert [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"]
+
+
+def test_the_refusal_flattens_before_the_daily_loss_exit_does():
+    """Review of #242, item 3: also ahead of the daily loss limit's exit."""
+    s = refused_long(REFUSALS["rules"])
+    s = replace(s, acct=replace(s.acct, halted_today=True))
+    why = refused_why(s)
+    s, effects = core.on_bar(s, at("09:31"))
+    assert [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"]
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_refused_start_flattens_a_short_it_holds_once(changed):
+    """Review of #242, item 3: a short the same as a long."""
+    s, _ = core.start(replace(sim(trailing="intraday"), **changed), T.ts)
+    short = [NtPosition("Sim101", INSTRUMENT, -1, 20000.0)]
+    stop = [NtOrder("Sim101", "o1", "x", INSTRUMENT, "stop", "buy", 1, 21000.0, "working")]
+    s, _ = core.on_reconcile(s, INSTRUMENT, short, stop, T.ts + timedelta(seconds=30))
+    assert (s.position.qty, s.position.stop) == (-1, 21000.0)
+    why = refused_why(s)
+    assert why.startswith("position -1 held by a refused start: ")
+    s, effects = core.on_bar(s, at("09:30"))
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"]
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == []
+
+
+def test_a_start_below_the_liquidation_level_flattens_what_it_adopts():
+    """The other start that does not start (started false, its figures dropped) runs no
+    strategy either: the same flatten."""
+    s, _ = first_start(48_000.0, -2000.0)
+    s, _ = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))
+    why = refused_why(s)
+    assert not s.started and why.startswith("position 1 held by a refused start: confirm balances")
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+
+
+def test_a_restart_at_the_liquidation_level_under_a_gap_halt_alerts_and_flattens_once():
+    """#238's case: the restored gap halt stays and the start says once why it did not start;
+    the long it then adopts is flattened once, by the refusal's branch (its reason names the
+    halt shown), never also by the gap's: one alert each, one Flatten."""
+    _, halts, kept = gap_rolled()
+    s, effects = restart(50_200.0, halts, kept)
+    reconciled_at = at("09:30", D3).ts + timedelta(seconds=30)
+    s, more = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, reconciled_at)
+    effects += more
+    why = refused_why(s)
+    assert why == f"position 1 held by a refused start: {halts[0]['reason']}"
+    for hhmm in ("09:31", "09:32", "09:33"):
+        s, more = core.on_bar(s, at(hhmm, D3))
+        effects += more
+    assert not s.started and s.halted == halts[0]["reason"]
+    [cannot, flattening] = alerts(effects)
+    assert cannot.startswith("cannot start: ") and flattening == f"flattening: {why}"
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+
+
+def test_a_running_account_halted_on_a_changed_input_is_not_flattened():
+    """The hub halts a running account whose pinned input changed (`_pinned`): its strategy
+    still steps, so its exits still run, and nothing flattens it; a restart refuses it."""
+    s, _ = core.halt(held_long(), "rules file changed since arming; re-arm")
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.started and sends(effects) == []
+
+
+LOW = bar("09:30", 20000.0, 20000.0, 19895.0, 20000.0)  # the long's worst: -2,100
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"rules_hash": "r2"}, {"rules_hash": "r1"}],  # RULES_CHANGED: rules, unpinned
+    ids=["rules", "unpinned"],
+)
+def test_a_breach_on_changed_rules_never_replaces_a_refused_start(changed):
+    """C2 of PR #240: with the rules file changed (or never pinned), a breach is read from the
+    same figures as a gap, which may not be the account's (and the status shows none of them),
+    so it never replaces the refusal either: no "halt" row, no breach alert, the refusal's
+    reason stays. The long is flattened on the refusal itself, not on the breach."""
+    started, _ = core.on_bar(held_long(), LOW)
+    assert started.halt_kind == "breach"  # the same bar breaches a start that ran
+    s = refused_long(changed)
+    refused, why = s.halted, refused_why(s)
+    s, effects = core.on_bar(s, LOW)
+    assert (s.halted, s.halt_kind, s.halt_day) == (refused, None, None)
+    assert "halt" not in kinds(effects) and alerts(effects) == [f"flattening: {why}"]
+    assert [a["reason"] for a in actions(effects)] == [why]
+    s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19800.0, 19900.0))
+    assert s.halted == refused and "halt" not in kinds(effects)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [{"strategy_hash": "h2"}, {"instruments_hash": "i2"}, {"dll_on": True}],  # ARMED_RULES
+    ids=["strategy", "instruments", "dll_on"],
+)
+def test_a_breach_under_the_armed_rules_replaces_a_refused_starts_halt(changed):
+    """Review of #242 (round 2), item 2: under the armed rules the figures are the account's, so
+    a breach is real and is recorded as on main: its "halt" row and an alert naming the refusal
+    it replaced. The refusal's flatten still goes out, as nothing runs the long. A restart
+    restores the breach over the refusal."""
+    started, ran = core.on_bar(held_long(), LOW)
+    breach = started.halted
+    s = refused_long(changed)
+    refusal = s.halted
+    s, effects = core.on_bar(s, LOW)
+    assert (s.halted, s.halt_kind, s.halt_day, s.started) == (breach, "breach", None, False)
+    rows = [e.payload for e in effects if isinstance(e, Log) and e.kind == "halt"]
+    assert rows == [e.payload for e in ran if isinstance(e, Log) and e.kind == "halt"]
+    why = f"position 1 held by a refused start: {breach}"
+    assert alerts(effects) == [f"{breach} (was halted: {refusal})", f"flattening: {why}"]
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+    refusal_row = {"reason": refusal, "kind": None, "until": None}
+    again, _ = core.start(refused(sim(trailing="intraday"), changed), T.ts, [refusal_row, *rows])
+    assert (again.halted, again.halt_kind, again.started) == (breach, "breach", False)
+
+
+def peak_rows(setup):
+    """The "peak" rows of an intraday start at 50,300 (above its 50,000 peak), then NinjaTrader's
+    equity at 50,600, then a long adopted at 20,000 whose bar's high marks +$600 open."""
+    s, first = core.start(setup, T.ts)
+    s, second = core.on_account(reconciled(s), account(balance=50_500.0, unrealized=100.0), T.ts)
+    s, _ = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))
+    _, third = core.on_bar(s, at("09:30", hi=20030.0))
+    return [[p["peak"] for p in peaks(effects)] for effects in (first, second, third)]
+
+
+# its peak rows: kept under the armed rules (any refusal but a changed rules file, as `with_dll`
+# takes the armed dll_on), whose trailing and peak they are; dropped when the rules file changed
+ARMED_RULES = {
+    "strategy": {"strategy_hash": "h2"},
+    "instruments": {"instruments_hash": "i2"},
+    "dll_on": {"dll_on": True},
+}
+RULES_CHANGED = {"rules": {"rules_hash": "r2"}, "unpinned": {"rules_hash": "r1"}}
+
+
+def unpinned(setup):
+    """Armed before the rules hash was pinned (refused on that): the armed rules are unknown."""
+    return replace(setup, armed=replace(setup.armed, rules_hash=None))
+
+
+def refused(setup, changed):
+    return unpinned(setup) if changed == RULES_CHANGED["unpinned"] else replace(setup, **changed)
+
+
+INTRADAY_UP = make_setup(
+    make_rules(trailing="intraday"),
+    mode="sim",
+    start=replace(START, balance=50_300.0),
+    day_start=DayStart(50_300.0, 50_000.0),
+)
+
+
+@pytest.mark.parametrize("changed", ARMED_RULES.values(), ids=ARMED_RULES)
+def test_a_refusal_under_the_armed_rules_journals_the_peak_rows_a_start_that_ran_does(changed):
+    """Review of #242, item 2: its start's raise, NinjaTrader's on an account message, its own on
+    a Mark, all under the trailing rule armed: as a start that ran journals them."""
+    assert peak_rows(refused(INTRADAY_UP, changed)) == peak_rows(INTRADAY_UP)
+    assert peak_rows(INTRADAY_UP) == [[50_300.0], [50_600.0], [50_900.0]]
+
+
+@pytest.mark.parametrize("changed", RULES_CHANGED.values(), ids=RULES_CHANGED)
+def test_a_refusal_on_the_rules_file_journals_no_peak_row(changed):
+    """Its trailing rule and peak may not be the armed ones (decision 5 and the missed close
+    below): none of those rows."""
+    assert peak_rows(refused(INTRADAY_UP, changed)) == [[], [], []]
+
+
+def gap_peaks(setup):
+    s, _ = core.start(setup, T.ts)
+    _, effects = core.on_account(reconciled(s), account(balance=52_100.0, today=2100.0), T.ts)
+    return peaks(effects)
+
+
+@pytest.mark.parametrize(
+    "changed", [*ARMED_RULES.values(), *RULES_CHANGED.values()], ids=[*ARMED_RULES, *RULES_CHANGED]
+)
+def test_a_refused_starts_gap_message_journals_nt_peak_only_under_the_armed_rules(changed):
+    """An account message that would be a gap halt (which keeps the refusal, #240): its row of
+    NinjaTrader's peak the gap did not take (#225) as a start that ran journals it, or none."""
+    setup = sim(trailing="intraday")
+    ran = gap_peaks(setup)
+    assert [p["nt_peak"] for p in ran] == [52_100.0]
+    assert gap_peaks(refused(setup, changed)) == (ran if changed in ARMED_RULES.values() else [])
+
+
+def excursion_floor(changed):
+    """The reviewer's probe: armed intraday at 50,000; restarted with `changed` (refused), where
+    NinjaTrader's equity peaks at 51,000 (a $1,000 open excursion) and returns to 50,000; then
+    the file put back, not re-armed: the floor of that restart (relative to phase start)."""
+    setup = sim(trailing="intraday")
+    s, rows = core.start(refused(setup, changed), T.ts)
+    s = reconciled(s)
+    for unrealized in (1000.0, 0.0):
+        s, more = core.on_account(s, account(unrealized=unrealized), T.ts)
+        rows += more
+    assert not s.started
+    back, _ = core.start(setup, T.ts + timedelta(minutes=5), peaks=peaks(rows))
+    return back.acct.floor
+
+
+def test_a_refusal_under_the_armed_rules_is_never_looser_than_a_start_that_ran():
+    """With only the strategy (or instruments.yaml, or dll_on) changed, the put-back restart's
+    floor is the one main gives: the excursion's 51,000 peak less 2,000."""
+    for changed in ARMED_RULES.values():
+        assert excursion_floor(changed) == -1000.0
+
+
+def test_a_refusal_on_the_rules_file_starts_the_put_back_restart_as_after_downtime():
+    """The stated cost: with the rules file changed, the excursion is not kept (its trailing rule
+    may not be the armed one), so that restart's floor is the pins' -2,000, as after downtime."""
+    for changed in RULES_CHANGED.values():
+        assert excursion_floor(changed) == -2000.0
+
+
+def test_a_refused_starts_raise_never_hides_a_missed_close():
+    """Why: armed end_of_day on D1, down over D1's close, restarted on D2 with the rules file
+    edited to intraday (refused). A "peak" row from its raise to NinjaTrader's equity would be
+    read as a roll by an end_of_day restart (`_missed_close`), so with the file put back that
+    restart would never ask for the confirmed peak of the close it missed."""
+    armed = armed_at(sim(), at("08:00").ts)
+    edited = replace(armed, rules=make_rules(trailing="intraday"), rules_hash="r2")
+    now = at("09:30", D2).ts
+    s, effects = core.start(edited, now)
+    s, more = core.on_account(reconciled(s), account(balance=50_600.0), now)
+    assert not s.started
+    reverted, _ = core.start(armed, now + timedelta(minutes=5), peaks=peaks(effects + more))
+    assert reverted.halted == core.CONFIRM_BALANCES
+
+
 @pytest.mark.parametrize("other", ["strategy error", "warm-up diverged"])
 def test_a_gap_at_the_roll_under_another_open_ended_halt_replaces_it(other):
     """The same at an end_of_day roll (#219): the app flat at 0, NinjaTrader closes at 52,200

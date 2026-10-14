@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 import pytest
@@ -525,6 +526,36 @@ async def test_a_restart_replays_journalled_fills(settings, hub, client, armed):
         await restarted.stop()
     assert s.position == Position(1, 20000.0, 19990.0, 20020.0)
     assert s.working is None and len(s.fills) == 1
+
+
+async def test_a_refused_restart_flattens_the_position_it_replays(
+    settings, hub, client, conn, armed, fake
+):
+    """#241: restarted with the strategy file edited since arming, the start is refused and no
+    strategy is spawned, so the bracketed long it replays is flattened on the next bar, once,
+    with an alert; the refusal stays the halt."""
+    await hub.handle_bar(bar(T0))
+    await hub.handle_fill(mnq_fill(1, 20000.0, T0 + timedelta(minutes=1, seconds=1), cid=CID))
+    await hub.stop()
+    Path(armed.strategy_path).write_text(ALWAYS + "# edited\n")
+    restarted = LiveHub(settings, addon=client)
+    try:
+        await restarted.tick(T0 + timedelta(minutes=2))
+        s = restarted.states["Sim101"]
+        refused = "strategy file changed since arming; re-arm"
+        assert (s.started, s.halted, s.position.qty, restarted.children) == (False, refused, 1, {})
+        before = len(fake.requests)
+        for n in (2, 3):
+            await restarted.handle_bar(bar(T0 + timedelta(minutes=n)))
+        [(path, body)] = fake.requests[before:]
+        why = f"position 1 held by a refused start: {refused}"
+        action = [r.payload for r in rows(conn, "action")][-1]
+        assert (path, action["type"], action["reason"]) == ("/flatten", "Flatten", why)
+        assert body["client_id"] == action["client_id"]
+        assert f"flattening: {why}" in [r.payload["message"] for r in rows(conn, "alert")]
+        assert restarted.states["Sim101"].halted == refused
+    finally:
+        await restarted.stop()
 
 
 async def test_a_restart_replays_only_todays_rows(settings, hub, client, conn, armed):

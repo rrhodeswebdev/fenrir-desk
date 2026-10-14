@@ -1064,14 +1064,16 @@ def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened_at_once(tra
     assert s.halt_kind == "breach"
 
 
-def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next_bar():
+def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_at_once():
     """The same for an entry with a known stop, sent before the gap halt and filled while the
-    account-wide Flatten is out: not stopless, so the next bar's gap flatten closes it."""
+    account-wide Flatten is out: the fill ends that Flatten (which may not close it), so it gets
+    its own at once, not on the next bar, which a feed outage may hold back (#237)."""
     s = running(sim(trailing="intraday"))
     s, effects = decide_now(s, [LONG])
     assert sends(effects) == [Bracket]
     s, effects = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
     assert s.halted.startswith(GAP_INTRADAY) and sends(effects) == [Flatten]
+    gap_flatten = s.exiting
     s, effects = core.on_bar(s, at("09:31"))
     assert sends(effects) == []
     entry = {
@@ -1079,9 +1081,12 @@ def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next
         "client_id": s.working.client_id,
     }
     s, effects = core.on_fill(s, entry)
-    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [])
+    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [Flatten])
+    assert [a["reason"] for a in actions(effects)] == [
+        f"position 1 filled while Flatten {gap_flatten} was out"
+    ]
     s, effects = core.on_bar(s, at("09:32"))
-    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+    assert sends(effects) == []  # one at a time
 
 
 def test_a_same_day_intraday_restart_starts_the_peak_at_least_at_the_replayed_balance():
@@ -1295,6 +1300,26 @@ def test_an_intraday_gap_under_another_open_ended_halt_replaces_it(other):
     s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 20000.0, 20000.0))
     assert sent + sends(effects) == [Flatten] and s.halted == plain.halted
     assert [a["reason"] for a in actions(effects)] in ([], [s.halted])
+
+
+@pytest.mark.parametrize(
+    "changed", [{"strategy_hash": "h2"}, {"rules_hash": "r2"}], ids=["strategy", "rules"]
+)
+def test_an_intraday_gap_never_replaces_a_refused_start(changed):
+    """Review of #236, non-blocking 1: a start refused because a pinned input changed since
+    arming (`started=False`) keeps its own halt. Its figures are not the account's (they come
+    from inputs that may have been edited since arming, and the status shows none of them), so
+    no gap is read from them and nothing is flattened on them. The account stays halted until
+    re-armed either way, and the refusal's reason is the one that says what to do."""
+    s, effects = core.start(replace(sim(trailing="intraday"), **changed), T.ts)
+    refused = s.halted
+    assert not s.started and refused.endswith("changed since arming; re-arm")
+    gap_account = account(balance=52_100.0, today=2100.0, unrealized=-50.0)
+    s, effects = core.on_account(reconciled(s), gap_account, T.ts)
+    assert (s.halted, s.halt_kind, s.exiting) == (refused, None, None)
+    assert "halt" not in kinds(effects) and sends(effects) == []
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.halted == refused and sends(effects) == []
 
 
 @pytest.mark.parametrize("other", ["strategy error", "warm-up diverged"])

@@ -97,16 +97,16 @@ Result: PASS (2026-10-14). SPEC Testing Strategy: a dry run on live LSE data com
   - The socket had authenticated by 09:53:25, when the status showed `lse.connected: true`, with the account `warming`.
   - LSE replayed the day from 18:00 ET the day before. That replay and the warm-up were both done by 09:53:30: the status showed no conditions. The first `bar` row followed at 09:54:00.
 - **Bars:**
-  - Run 1 journalled 19 consecutive one-minute `bar` rows for `NQZ26`, with opens from 09:53 to 10:11 ET. None was missing or repeated, and each was journalled 0.2–0.4 s after its minute closed.
+  - Run 1 journalled 19 consecutive one-minute `bar` rows for `NQZ26`, with opens from 09:53 to 10:11 ET. None was missing or repeated, and each was journalled 0.16–0.36 s after its minute closed.
   - Run 2 (below) added 5 more, 10:13–10:17.
-  - The 10:12 bar closed while the server was stopped. A restart's warm-up replays the bars it missed, but it journals no `bar` row for them.
+  - The 10:12 bar closed while the server was stopped. A restart's warm-up replays all of today's bars, the missed one included, with actions suppressed, and it journals no `bar` row for them. Run 2's same-day warm-up did not diverge from run 1's journal.
 - **Stale-data pause and resume:**
   - With the default `stale_seconds` of 180 nothing paused: a bar came every minute.
   - Run 2 restarted the server with `FENRIR_STALE_SECONDS=45`. That setting is not pinned at arming, so the armed row stayed.
   - Each minute, 47 s after the last bar, the hub journalled an `alert`, `no NQ bar for 47s; new entries paused`, and the status showed `halted: true` with `halt_kind: "stale"`. This happened at 10:14:47, 10:15:47, 10:16:47 and 10:17:47 ET.
   - Each time, the next bar, 13 s later, lifted the pause: the status went back to `halt_kind: null` with no conditions.
   - No journal row marks a resume: the next `bar` row and the status show it.
-- **Dry actions:** none were logged. ORB's 09:30–09:45 opening range had broken before the arm, and the warm-up replays a breakout with its actions suppressed.
+- **Dry actions:** none were logged. ORB's 09:30–09:45 opening range (30497.75–30625.75, rebuilt from the item 4 recording) had already broken before the arm, and ORB trades once a day. The warm-up replays a breakout with its actions suppressed. Bars after the arm, such as 09:57, which closed at 30479.25 below the range, logged no action.
 - **Disarm:** at 10:18:46 ET, `POST /api/arming/disarm` returned `{"ok":true,"error":null}` and journalled a `halt` row with reason `disarmed`. Disarming does not close the LSE socket. Stopping the server (SIGINT, which ran the lifespan shutdown) did.
 
 ## Values downstream plans need

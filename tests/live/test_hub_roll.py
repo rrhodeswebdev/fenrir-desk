@@ -574,6 +574,7 @@ async def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_peak(
         await started(first)
         await first.handle_stream(account(52_200.0, realized=2200.0))
         await first.handle_bar(bar(D2))
+        reason = first.states["Sim101"].halted
     finally:
         await first.stop()
     second = await restarted(settings, client, clock, D2 + timedelta(hours=1), 52_200.0)
@@ -590,5 +591,8 @@ async def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_peak(
         assert (
             s.halted == "breach max_drawdown: equity -2010.00 at or below drawdown floor -2000.00"
         )
+        # the app's own figures, replayed, not NinjaTrader's (N4, review of #238)
+        alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+        assert f"{s.halted}, on the app's own figures, not the gap (was halted: {reason})" in alerts
     finally:
         await second.stop()

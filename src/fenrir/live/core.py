@@ -403,7 +403,9 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         entry = (abs(pos.qty) * (pos.entry or 0.0) + abs(qty) * price) / abs(rest)
         if mine:
             stop, target = w.bracket.stop, w.bracket.target
-        elif fill["client_id"] == s.entry_id:  # more of that entry: still under its stop
+        # more of that entry, or of one a reconcile kept working beside its first lots: the
+        # add-on resizes its stop and target to cover it
+        elif fill["client_id"] in (s.entry_id, w and w.client_id):
             stop, target = pos.stop, pos.target
         else:  # not Fenrir's entry (a manual add): no stop at NinjaTrader covers it all (#237)
             stop = target = None

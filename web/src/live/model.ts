@@ -221,8 +221,8 @@ export function focusOf(
 /** Resolve lifts the reconcile and drift pauses (never a halt or breach), so it shows for those two only, under a halt too. */
 export const canResolve = (a: AccountStatus): boolean => has(a, 'reconcile') || has(a, 'drift')
 
-/** The colour of an account's alert line and sleeve outline: its need, or caution for a stale, drift or warming-up
- * pause (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
+/** The colour of an account's alert line and sleeve outline: its need, or caution for a stale, drift, figures or
+ * warming-up pause (entries are paused; the system strip carries the cell). Null when nothing is wrong. */
 export function alertTone(a: AccountStatus): 'caution' | 'alarm' | null {
   return need(a)?.state ?? (a.halted || has(a, 'warming') ? 'caution' : null)
 }

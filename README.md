@@ -40,18 +40,25 @@ Open the launch link it prints (`docker compose logs` shows it again), then ente
 - **Rebuilds.** The server runs code built into the image, so changes you make to `src/`, `web/`, `assets/brand/`, `pyproject.toml` or `uv.lock` take effect after `docker compose up --build`.
 - **Linux hosts.** Build with your uid so files the terminal writes are yours, every time, then start: `docker compose build --build-arg CLAUDE_UID=$(id -u) && docker compose up` (a plain `up --build` would rebuild with uid 1000).
 - **`docker compose exec`.** Add `-u claude` for anything you run inside; without it the command runs as root.
-- **NinjaTrader address.** `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine; `http://<VM IP>:8123` for NinjaTrader in a Windows VM on a Mac (run `ipconfig` in the VM; use bridged or shared networking). Live trading needs NinjaTrader 8 with the Fenrir add-on imported: see [addon/INSTALL.md](addon/INSTALL.md).
+- **NinjaTrader.** Sim and live trading need NinjaTrader 8 with the Fenrir add-on: see [NinjaTrader add-on](#ninjatrader-add-on).
 
-## Windows Firewall
+## NinjaTrader add-on
 
-The add-on listens on port 8123 on the NinjaTrader machine. Allow it from your local network only, in PowerShell as Administrator:
+Fenrir trades through a C# add-on inside NinjaTrader 8 on Windows: the same machine as Docker, or a Windows VM when Fenrir runs on a Mac or Linux host. Full steps and config: [addon/INSTALL.md](addon/INSTALL.md). Checks on Sim101: [addon/CHECKLIST.md](addon/CHECKLIST.md).
 
-```powershell
-netsh http add urlacl url=http://+:8123/ user=Everyone
-netsh advfirewall firewall add rule name="Fenrir add-on 8123" dir=in action=allow protocol=TCP localport=8123 remoteip=localsubnet
-```
+1. **Import.** `python3 addon/build.py` writes `addon/dist/FenrirAddOn.zip`. In NinjaTrader: **Tools → Import → NinjaScript Add-On…**, pick the zip; NinjaTrader compiles it.
+2. **Token.** Generate one with `openssl rand -hex 32`. Copy `addon/fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.json`, put the token there and list the accounts Fenrir may trade in `managed_accounts`. Enter the same token on Fenrir's Settings page.
+3. **Windows Firewall.** The add-on listens on port 8123. In PowerShell as Administrator on the NinjaTrader machine, allow it from your local network only, then restart NinjaTrader (**New → NinjaScript Output** shows `Fenrir: listening on port 8123`):
 
-With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
+   ```powershell
+   netsh http add urlacl url=http://+:8123/ user=Everyone
+   netsh advfirewall firewall add rule name="Fenrir add-on 8123" dir=in action=allow protocol=TCP localport=8123 remoteip=localsubnet
+   ```
+
+   With Docker on the same Windows machine, if requests time out the Docker/WSL network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` instead (for example `remoteip=172.16.0.0/12`).
+4. **Address.** On the Settings page: `http://host.docker.internal:8123` when NinjaTrader runs on the same Windows machine as Docker; `http://<VM IP>:8123` for NinjaTrader in a Windows VM (run `ipconfig` in the VM; use bridged or shared networking). Settings apply after `docker compose restart`; the Live page's NinjaTrader field then shows the heartbeat.
+
+At 16:40 New York time the add-on flattens and cancels everything on its managed accounts by itself, whether Fenrir is running or not.
 
 ## Develop
 

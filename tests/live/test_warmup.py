@@ -21,6 +21,7 @@ from fenrir.bridge.fake_addon import FakeAddon, running
 from fenrir.core.actions import Bracket, Cancel, Flatten
 from fenrir.core.bars import Bar
 from fenrir.core.instruments import load_instruments
+from fenrir.data.live import FeedStopped
 from fenrir.data.store import load_bars, write_bars
 from fenrir.live import arming, core, journal, service
 from fenrir.live.arming import Armed
@@ -836,3 +837,198 @@ async def test_the_server_starts_the_bar_feed_with_the_first_armed_account(
     assert hub._feed is None and hub._tasks == []
     await hub.tick(T0)  # e.g. a late route after stop(): no feed that nothing would cancel
     assert hub._feed is None
+
+
+class FakeFeed:
+    """A stand-in for `stream_bars` (no LSE): each subscription is counted, yields what `bars`
+    is given, and records that it was closed (the socket released) in `closed`."""
+
+    def __init__(self, stopped: FeedStopped | None = None, slow_close: bool = False):
+        self.subscribed = 0
+        self.closing = 0
+        self.closed = 0
+        self.bars: asyncio.Queue[Bar] = asyncio.Queue()
+        self.stopped = stopped
+        self.release = asyncio.Event()  # a slow close (the close handshake) ends on set()
+        if not slow_close:
+            self.release.set()
+
+    async def __call__(self, settings, contracts, **kw):
+        self.subscribed += 1
+        try:
+            if self.stopped is not None:
+                raise self.stopped
+            while True:
+                yield await self.bars.get()
+        finally:
+            self.closing += 1
+            await self.release.wait()
+            self.closed += 1
+
+
+async def until(check, timeout=10.0):
+    async with asyncio.timeout(timeout):
+        while not check():
+            await asyncio.sleep(0.01)
+
+
+def second(conn, a: Armed) -> Armed:
+    b = replace(a, account="Sim102")
+    arming.insert_armed(conn, b)
+    return b
+
+
+async def fed(hub, conn, tmp_path, monkeypatch, feed: FakeFeed) -> Armed:
+    """The server started and one account armed: the feed subscribed once. The test ticks."""
+
+    async def no_ticks(hub):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(service, "run_ticks", no_ticks)
+    monkeypatch.setattr(service, "stream_bars", feed)
+    hub.start()
+    a = arm(conn, tmp_path, ALWAYS)
+    await hub.tick(T0)
+    await until(lambda: feed.subscribed == 1)
+    return a
+
+
+def feed_stopped(hub, feed: FakeFeed, task: asyncio.Task) -> None:
+    assert task.done() and task not in hub._tasks and hub._feed is None
+    assert feed.closed == feed.subscribed  # the stream closed (its socket free) before the stop
+    status = hub.status()["lse"]
+    assert status["connected"] is False and status["error"] is None
+    assert hub.lse_retry_at is None and hub.replaying == set() and hub.today == {}
+
+
+@pytest.mark.anyio
+async def test_disarming_the_last_account_stops_the_feed_and_rearming_starts_it(
+    hub, conn, tmp_path, monkeypatch
+):
+    # #251: LSE allows one socket per key; a server with nothing armed must not hold it
+    feed = FakeFeed()
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    hub.feed_live("NQZ26")
+    feed.bars.put_nowait(live_bar(0))
+    await until(lambda: "NQZ26" in hub.today)
+    task = hub._feed
+    assert (await hub.disarm("Sim101"))["ok"]
+    feed_stopped(hub, feed, task)
+    arm(conn, tmp_path, ALWAYS)
+    await hub.tick(T0)
+    await until(lambda: feed.subscribed == 2)  # a fresh subscription, replaying today
+    assert hub._feed is not None and not hub._feed.done() and hub._feed in hub._tasks
+    assert hub.replaying == {"ES", "NQ"}  # nothing warms up before the replay is over
+    assert hub.states["Sim101"].warming.startswith("warming up: today's NQ bars from LSE")
+
+
+@pytest.mark.anyio
+async def test_disarming_one_of_two_accounts_keeps_the_feed(hub, conn, tmp_path, monkeypatch):
+    feed = FakeFeed()
+    a = await fed(hub, conn, tmp_path, monkeypatch, feed)
+    second(conn, a)
+    await hub.tick(T0)
+    task = hub._feed
+    assert (await hub.disarm("Sim101"))["ok"]
+    assert hub._feed is task and not task.done() and feed.closed == 0
+    assert (await hub.disarm("Sim102"))["ok"]
+    feed_stopped(hub, feed, task)
+
+
+@pytest.mark.anyio
+async def test_a_disarm_seen_by_a_bars_sync_stops_the_feed_at_the_next_tick(
+    hub, conn, tmp_path, monkeypatch
+):
+    # the bar's sync runs inside the feed task, under the hub lock: it must not await itself
+    feed = FakeFeed()
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    hub.feed_live("NQZ26")
+    task = hub._feed
+    arming.disarm(conn, "Sim101", T0)  # e.g. another process: no sync of the hub's own
+    async with asyncio.timeout(5):
+        feed.bars.put_nowait(live_bar(0))
+        await until(lambda: "NQZ26" in hub.today)
+        assert hub.states == {}  # that sync saw the disarm: no deadlock, the account stopped
+        await hub.tick(T0)
+    feed_stopped(hub, feed, task)
+
+
+@pytest.mark.anyio
+async def test_the_feed_waiting_for_the_hub_lock_stops(hub, conn, tmp_path, monkeypatch):
+    feed = FakeFeed()
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    hub.feed_live("NQZ26")
+    task = hub._feed
+    arming.disarm(conn, "Sim101", T0)
+    async with asyncio.timeout(5):
+        async with hub._lock:  # as a tick holds it: the feed's bar waits on it
+            feed.bars.put_nowait(live_bar(0))
+            await until(lambda: len(hub._lock._waiters or ()) == 1)  # the feed's handle_bar
+            await hub._sync(T0)
+    feed_stopped(hub, feed, task)
+
+
+@pytest.mark.anyio
+async def test_a_stop_whose_caller_is_cancelled_still_waits_for_the_close(
+    hub, conn, tmp_path, monkeypatch
+):
+    # review of #256: released early, the lock would let a re-arm subscribe a second socket
+    feed = FakeFeed(slow_close=True)
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    task = hub._feed
+    arming.disarm(conn, "Sim101", T0)
+    async with asyncio.timeout(5):
+        caller = asyncio.create_task(hub.tick(T0))
+        await until(lambda: feed.closing == 1)
+        caller.cancel()
+        await asyncio.sleep(0.05)
+        assert not caller.done() and hub._lock.locked()  # still waiting for the close
+        feed.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+    feed_stopped(hub, feed, task)
+    assert not hub._lock.locked()
+
+
+@pytest.mark.anyio
+async def test_a_feed_backing_off_after_feed_stopped_stops(hub, conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(service, "FEED_RETRY", 3600)
+    feed = FakeFeed(FeedStopped("Max 1 concurrent websocket connection(s)"))
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    await until(lambda: hub.lse_error is not None)  # sleeping before it resubscribes
+    task = hub._feed
+    async with asyncio.timeout(5):
+        assert (await hub.disarm("Sim101"))["ok"]
+    feed_stopped(hub, feed, task)
+
+
+@pytest.mark.anyio
+async def test_stop_after_the_feed_stopped_is_clean(hub, conn, tmp_path, monkeypatch, caplog):
+    feed = FakeFeed()
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    assert (await hub.disarm("Sim101"))["ok"]
+    with caplog.at_level(logging.ERROR):
+        await hub.stop()
+    assert "live task had failed" not in caplog.text
+    assert hub._feed is None and hub._tasks == [] and feed.subscribed == feed.closed == 1
+
+
+@pytest.mark.anyio
+async def test_the_kill_switch_stops_the_feed_only_once_no_row_is_left(
+    hub, conn, tmp_path, monkeypatch
+):
+    feed = FakeFeed()
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    task = hub._feed
+    delete = service.delete_armed
+
+    def locked(conn, account):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(service, "delete_armed", locked)
+    assert not (await hub.kill())["ok"]  # the row is still armed (halted): it keeps the feed
+    await hub.tick(T0)
+    assert hub._feed is task and not task.done() and feed.closed == 0
+    monkeypatch.setattr(service, "delete_armed", delete)
+    assert (await hub.kill())["ok"]
+    feed_stopped(hub, feed, task)

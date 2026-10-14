@@ -65,6 +65,15 @@ Without the `urlacl` line the add-on cannot listen and logs `failed to start: ..
 
 - **Fenrir in Docker on the same Windows machine:** NinjaTrader address `http://host.docker.internal:8123`. If requests time out, the WSL/Docker network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` (for example `remoteip=172.16.0.0/12`).
 - **Fenrir on a Mac, NinjaTrader in a VM:** run `ipconfig` in the VM and use `http://<its IPv4 address>:8123`. Use bridged or shared networking so the Mac and the VM share a subnet.
+- **Fenrir on a Linux host, NinjaTrader in a VirtualBox VM:** VirtualBox's default NAT adapter cannot be reached from the host without port forwarding (and a forward on the host's loopback is out of a Docker container's reach), so add a host-only adapter. With the VM powered off:
+
+  ```bash
+  VBoxManage list hostonlyifs                 # none listed: VBoxManage hostonlyif create
+  VBoxManage list dhcpservers                 # none for vboxnet0: add one (below) or give Windows a static IP
+  VBoxManage modifyvm "<VM name>" --nic2 hostonly --hostonlyadapter2 vboxnet0
+  ```
+
+  `hostonlyif create` adds no DHCP server, so the guest would get a 169.254.x address. Add one with `VBoxManage dhcpserver add --interface=vboxnet0 --server-ip=192.168.56.100 --netmask=255.255.255.0 --lower-ip=192.168.56.101 --upper-ip=192.168.56.254 --enable`. Start the VM, run `ipconfig` and use the host-only adapter's address: `http://192.168.56.x:8123`. Docker rewrites the container's traffic to come from the host's vboxnet0 address (192.168.56.1), as does Fenrir run natively, so `remoteip=localsubnet` covers both.
 
 Then restart NinjaTrader. **New → NinjaScript Output** shows `Fenrir: listening on port 8123`.
 

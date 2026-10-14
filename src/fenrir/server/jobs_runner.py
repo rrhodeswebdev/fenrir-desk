@@ -496,6 +496,9 @@ class JobRunner:
             "FENRIR_STRATEGIES_DIR": str(self._settings.strategies_dir),
             "FENRIR_HOLDOUT_MONTHS": str(self._settings.holdout_months),
         }
+        # only ever lowers the backtest worker count, and is no secret (#260)
+        if workers := os.environ.get("FENRIR_BACKTEST_WORKERS"):
+            env["FENRIR_BACKTEST_WORKERS"] = workers
         overlay, drop = as_user(user)
         env |= overlay
         with self._lock:

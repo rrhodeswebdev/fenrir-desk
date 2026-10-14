@@ -402,17 +402,23 @@ def test_a_new_series_drops_the_idle_workers_before_loading(settings, monkeypatc
 
 
 def test_memory_is_measured_once_per_series_with_no_workers_alive(settings, monkeypatch, spy_pool):
+    loads = counted_loads(monkeypatch)
     measured = []
 
     def limit():
-        measured.append(run_module._pool)
+        measured.append((run_module._pool, len(loads)))
         return 64 * GIB - len(measured) * GIB  # live workers would shrink MemAvailable
 
     monkeypatch.setattr(run_module, "_memory_limit", limit)
-    for contract in ("MNQ", "NQ"):
+    for contract in ("MNQ", "NQ"):  # one series: measured once, the pool reused
         run_backtest(ORB, ACCOUNT, contract, settings, include_holdout=False)
-    assert measured == [None]  # before the parent's load, and the grid's second item reused it
-    assert spy_pool["pools"] == 1
+    assert run_module._pool is not None and spy_pool["pools"] == 1
+    day = date(2025, 10, 1)
+    code = front_month(load_instruments(), "NQ", day)
+    write_bars(settings.data_dir, "NQ", code, day_bars(day, 0, code))  # a new data_version
+    run_backtest(ORB, ACCOUNT, "MNQ", settings, include_holdout=False)
+    # each time after the old pool is dropped and before the parent loads the series
+    assert measured == [(None, 0), (None, 1)]
 
 
 def test_a_worker_loads_each_series_once_across_items(settings, monkeypatch):
@@ -478,12 +484,16 @@ def test_mem_available_reads_meminfo(text, available):
     assert run_module.mem_available(text) == available
 
 
-def memory_files(tmp_path, cgroup: str | None, meminfo: str | None) -> tuple[Path, Path]:
-    paths = tmp_path / "memory.max", tmp_path / "meminfo"
-    for path, text in zip(paths, (cgroup, meminfo), strict=True):
+def memory_files(
+    tmp_path, cgroup: str | None, meminfo: str | None, self_cgroup: str | None = "0::/\n"
+) -> tuple[Path, Path, Path]:
+    """(cgroup root, /proc/self/cgroup, /proc/meminfo); `cgroup` is the root's memory.max."""
+    root, own, info = tmp_path / "cgroup", tmp_path / "self_cgroup", tmp_path / "meminfo"
+    root.mkdir()
+    for path, text in ((root / "memory.max", cgroup), (own, self_cgroup), (info, meminfo)):
         if text is not None:
             path.write_text(text)
-    return paths
+    return root, own, info
 
 
 @pytest.mark.parametrize(
@@ -492,7 +502,7 @@ def memory_files(tmp_path, cgroup: str | None, meminfo: str | None) -> tuple[Pat
         ("6442450944\n", MEMINFO, 6 * GIB),  # a container limit below what the host has free
         ("68719476736\n", MEMINFO, 20 * GIB),  # in a container MemAvailable is the host's
         ("max\n", MEMINFO, 20 * GIB),  # Docker on Linux without a limit (#260)
-        (None, MEMINFO, 20 * GIB),  # native: no cgroup file at the root
+        (None, MEMINFO, 20 * GIB),  # native: no memory.max at the root
         ("6442450944\n", None, 6 * GIB),
         ("max\n", "MemTotal: 1 kB\n", 1024 * 1024),  # neither: physical memory
         (None, None, 1024 * 1024),
@@ -502,6 +512,50 @@ def memory_files(tmp_path, cgroup: str | None, meminfo: str | None) -> tuple[Pat
 def test_memory_limit_is_what_is_available(tmp_path, monkeypatch, cgroup, meminfo, limit):
     monkeypatch.setattr(run_module.os, "sysconf", lambda name: 1024)
     assert run_module._memory_limit(*memory_files(tmp_path, cgroup, meminfo)) == limit
+
+
+def test_unreadable_files_fall_back_to_physical_memory(tmp_path, monkeypatch):
+    monkeypatch.setattr(run_module.os, "sysconf", lambda name: 1024)
+    root, own, info = memory_files(tmp_path, None, None)
+    info.write_bytes(b"MemAvailable: \xff\xfe kB\n")  # not UTF-8
+    (root / "memory.max").write_bytes(b"\xff\n")
+    own.write_bytes(b"0::/\xff\n")
+    assert run_module._memory_limit(root, own, info) == 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("text", "dirs"),
+    [
+        ("0::/\n", [""]),  # a container's private cgroup namespace: the root itself
+        ("0::/user.slice/run-1.scope\n", ["user.slice/run-1.scope", "user.slice", ""]),
+        ("12:memory:/x\n1:name=systemd:/x\n0::/a\n", ["a", ""]),  # hybrid: the v2 line
+        ("12:memory:/x\n", [""]),  # cgroup v1 only
+        ("0::/a/../b\n", [""]),  # never walk out of the root
+        ("0::relative\n", [""]),
+        ("", [""]),
+    ],
+)
+def test_cgroup_dirs_walk_up_to_the_root(text, dirs):
+    root = Path("/sys/fs/cgroup")
+    assert run_module.cgroup_dirs(text, root) == [root / d if d else root for d in dirs]
+
+
+@pytest.mark.parametrize(
+    ("limits", "limit"),
+    [
+        ({"user.slice/run-1.scope": "1073741824"}, 1 * GIB),  # systemd-run -p MemoryMax=1G
+        ({"user.slice/run-1.scope": "max", "user.slice": "2147483648"}, 2 * GIB),  # a parent's
+        ({"user.slice/run-1.scope": "4294967296", "user.slice": "2147483648"}, 2 * GIB),
+        ({"user.slice/run-1.scope": "1073741824", "user.slice": "2147483648"}, 1 * GIB),
+        ({"user.slice": "max"}, 20 * GIB),  # no limit anywhere: MemAvailable
+    ],
+)
+def test_memory_limit_reads_the_process_own_cgroup(tmp_path, limits, limit):
+    root, own, info = memory_files(tmp_path, None, MEMINFO, "0::/user.slice/run-1.scope\n")
+    for d, text in limits.items():
+        (root / d).mkdir(parents=True, exist_ok=True)
+        (root / d / "memory.max").write_text(text + "\n")
+    assert run_module._memory_limit(root, own, info) == limit
 
 
 def test_memory_limit_unknown_is_none(tmp_path, monkeypatch):
@@ -531,8 +585,16 @@ def test_workers_env_caps_the_count(monkeypatch, capsys, raw, workers):
 
 @pytest.mark.parametrize("raw", ["0", "-2", "four", "2.5"])
 def test_an_invalid_workers_env_is_ignored_with_a_warning(monkeypatch, capsys, raw):
+    monkeypatch.setattr(run_module, "_warned", set())
     monkeypatch.setattr(run_module.os, "cpu_count", lambda: 16)
     assert run_module._workers(1_000, 64 * GIB, {"FENRIR_BACKTEST_WORKERS": raw}) == 16
     err = capsys.readouterr().err
     assert f"ignoring FENRIR_BACKTEST_WORKERS={raw!r}" in err
     assert "positive whole number" in err
+
+
+def test_an_invalid_workers_env_warns_once_per_process(monkeypatch, capsys):
+    monkeypatch.setattr(run_module, "_warned", set())
+    for raw in ("four", "four", "0", "four"):  # a grid calls _workers once per item
+        run_module._workers(1_000, 64 * GIB, {"FENRIR_BACKTEST_WORKERS": raw})
+    assert capsys.readouterr().err.count("warning: ignoring") == 2  # "four" and "0", once each

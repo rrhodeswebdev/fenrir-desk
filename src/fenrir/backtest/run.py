@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
@@ -32,10 +32,13 @@ BYTES_PER_BAR = 520
 # of the memory available at start, which already leaves out other processes (a VM, #260): the
 # rest is for load peaks, the page cache MemAvailable counts as free, and others growing later
 BUDGET_PCT = 70
-# cgroup v2 only (Docker's): a v1 limit is not read. Natively there is no such file
-CGROUP_MEMORY_MAX = Path("/sys/fs/cgroup/memory.max")
+# cgroup v2 only: a v1 limit is not read. In a container (private cgroupns) the process's cgroup
+# is the root; natively it is e.g. a `systemd-run -p MemoryMax=` scope under the root
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+SELF_CGROUP = Path("/proc/self/cgroup")
 MEMINFO = Path("/proc/meminfo")
 WORKERS_ENV = "FENRIR_BACKTEST_WORKERS"  # process env only, like FENRIR_PTY_USER: a cap
+_warned: set[str] = set()  # invalid WORKERS_ENV values already warned about, once per process
 
 # per process: name -> (key, value). One value per name, so a new series replaces the old one
 _memo: dict[str, tuple] = {}
@@ -108,25 +111,49 @@ def mem_available(text: str) -> int | None:
     return None
 
 
-def _cgroup_limit(path: Path) -> int | None:
+def cgroup_dirs(text: str, root: Path) -> list[Path]:
+    """The process's cgroup v2 directory under `root`, then each parent up to `root`, from
+    /proc/self/cgroup text; just [root] without a usable `0::` line (cgroup v1). Pure."""
+    for line in text.splitlines():
+        if line.startswith("0::/"):
+            parts = PurePosixPath(line[3:]).parts[1:]  # parts[0] is "/"
+            if ".." not in parts:
+                return [root.joinpath(*parts[:n]) for n in range(len(parts), -1, -1)]
+    return [root]
+
+
+def _memory_max(path: Path) -> int | None:
     try:
         text = path.read_text().strip()
         return None if text == "max" else int(text)
-    except (OSError, ValueError):
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
         return None
+
+
+def _cgroup_limit(root: Path, self_cgroup: Path) -> int | None:
+    """The smallest `memory.max` from this process's cgroup up to the root; None if none is set."""
+    try:
+        text = self_cgroup.read_text()
+    except (OSError, ValueError):
+        text = ""
+    limits = (_memory_max(d / "memory.max") for d in cgroup_dirs(text, root))
+    return min((m for m in limits if m is not None), default=None)
 
 
 def _available(path: Path) -> int | None:
     try:
         return mem_available(path.read_text())
-    except OSError:
+    except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
         return None
 
 
-def _memory_limit(cgroup: Path = CGROUP_MEMORY_MAX, meminfo: Path = MEMINFO) -> int | None:
+def _memory_limit(
+    cgroup_root: Path = CGROUP_ROOT, self_cgroup: Path = SELF_CGROUP, meminfo: Path = MEMINFO
+) -> int | None:
     """Memory available at start: the smaller of the cgroup limit and MemAvailable (in a container
     MemAvailable is the host's), else physical memory; None if unknown."""
-    known = [m for m in (_cgroup_limit(cgroup), _available(meminfo)) if m is not None]
+    cgroup = _cgroup_limit(cgroup_root, self_cgroup)
+    known = [m for m in (cgroup, _available(meminfo)) if m is not None]
     if known:
         return min(known)
     try:
@@ -146,7 +173,11 @@ def _workers_cap(env: Mapping[str, str]) -> int | None:
         cap = 0
     if cap >= 1:
         return cap
-    print(f"warning: ignoring {WORKERS_ENV}={raw!r}: not a positive whole number", file=sys.stderr)
+    if raw not in _warned:  # once per process, not once per grid item
+        _warned.add(raw)
+        print(
+            f"warning: ignoring {WORKERS_ENV}={raw!r}: not a positive whole number", file=sys.stderr
+        )
     return None
 
 

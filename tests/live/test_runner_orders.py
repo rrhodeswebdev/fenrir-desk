@@ -430,7 +430,10 @@ def test_more_of_the_entry_while_a_flatten_is_out_gets_its_own_flatten():
     assert s.position == core.Position(2, 20000.25, 19990.0, 20020.0)
     cid = core.client_id("Sim101", t + timedelta(seconds=1), "f2", Flatten())
     assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
-    assert reasons(effects) == [f"position 2 filled while Flatten {mine.client_id} was out"]
+    why = f"position 2 filled while Flatten {mine.client_id} was out"
+    assert reasons(effects) == [why]
+    assert [e.kind for e in effects if isinstance(e, core.Log)][-2:] == ["alert", "action"]
+    assert effects[-3].payload == {"message": f"flattening: {why}"}
 
 
 def test_late_bar_takes_no_entries_but_exits():

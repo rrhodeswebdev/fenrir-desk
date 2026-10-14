@@ -214,6 +214,7 @@ def test_the_child_env_holds_no_secrets(make, tmp_path, monkeypatch):
     monkeypatch.setenv("FENRIR_NT_TOKEN", "secret")
     monkeypatch.setenv("FENRIR_LSE_API_KEY", "secret")
     monkeypatch.setenv("COPIED_KEY", "x-sekrit-x")  # holds the session key
+    monkeypatch.delenv("FENRIR_BACKTEST_WORKERS", raising=False)
     runner = make(secret="sekrit")
     runner.start()
     job = runner.submit(grid(tmp_path, "env"), True)
@@ -221,6 +222,15 @@ def test_the_child_env_holds_no_secrets(make, tmp_path, monkeypatch):
     assert runner.get(job.id).items[0].error == (
         "FENRIR_DATA_DIR FENRIR_HOLDOUT_MONTHS FENRIR_RULES_DIR FENRIR_STRATEGIES_DIR"
     )
+
+
+def test_the_backtest_workers_cap_reaches_the_child(make, tmp_path, monkeypatch):
+    monkeypatch.setenv("FENRIR_BACKTEST_WORKERS", "3")  # only lowers the count; no secret (#260)
+    runner = make()
+    runner.start()
+    job = runner.submit(grid(tmp_path, "env"), True)
+    wait_for(lambda: finished(runner, job.id))
+    assert "FENRIR_BACKTEST_WORKERS" in runner.get(job.id).items[0].error.split()
 
 
 def gone(pid: int) -> bool:

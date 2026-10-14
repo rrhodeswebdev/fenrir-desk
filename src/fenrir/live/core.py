@@ -361,8 +361,11 @@ def changed_since_arming(setup: Setup) -> str | None:
 def _missed_close(armed_at: datetime, peaks: Sequence[Mapping[str, Any]], today: date) -> bool:
     """end_of_day: each day roll (and only a roll) journals a "peak" row stamped with its bar or
     fill. A session that opened after the last roll (or the arming), up to `today`, means a close
-    the restarted runner never raises at: its balance may have moved since (DEC-4a)."""
-    rolled = trading_day(max([armed_at, *(datetime.fromisoformat(p["ts"]) for p in peaks)]))
+    the restarted runner never raises at: its balance may have moved since (DEC-4a). A refused
+    start's roll is no proof (#244): it never ran this check, so a close missed before it may
+    never have been taken; its peak still counts in `start`."""
+    taken = (datetime.fromisoformat(p["ts"]) for p in peaks if not p.get("refused"))
+    rolled = trading_day(max([armed_at, *taken]))
     # trading days with a session (Mon-Fri; holidays count) open at 18:00 ET the evening before
     days = (rolled + timedelta(days=n) for n in range(1, (today - rolled).days + 1))
     return any(d.weekday() < 5 for d in days)
@@ -1219,8 +1222,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
             else:
                 acct, theirs = raised, None
         if s.nt and not s.no_balance:
-            # every roll, raised or not: see _missed_close
-            out += (_peak_log(s.setup, acct, ts, theirs),)
+            # every roll, raised or not: see _missed_close; a refused start's is marked (#244)
+            out += (_peak_log(s.setup, acct, ts, theirs, refused=not s.started),)
         elif s.setup.start:  # none yet, lost with the link, or 0: this close is never taken
             untaken = theirs if s.nt else None  # during a 0, a gap's: the open carries it
             s, more = halt(s, NO_CLOSE)
@@ -1274,8 +1277,9 @@ def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
 def _armed_rules(setup: Setup) -> bool:
     """Whether `setup.rules` are the rules file armed (pinned, unchanged): always for a start that
     ran; for a refused one (#241) only when another pinned input caused it. A refused start with
-    other rules journals no "peak" row: their trailing rule may not be the armed one, and under an
-    end_of_day arming any row reads as a roll taken (`_missed_close`)."""
+    other rules journals no "peak" row but its roll's: their trailing rule may not be the armed
+    one, and under an end_of_day arming any unmarked row reads as a roll taken (`_missed_close`);
+    the roll's takes NinjaTrader's real close and is marked "refused" under any rules (#244)."""
     return setup.rules_hash == setup.armed.rules_hash
 
 
@@ -1294,13 +1298,18 @@ def _gap_peaked(
     return s, (*out, _peak_log(s.setup, s.acct, ts, theirs))
 
 
-def _peak_log(setup: Setup, a: AccountState, ts: datetime, theirs: float | None = None) -> Log:
+def _peak_log(
+    setup: Setup, a: AccountState, ts: datetime, theirs: float | None = None, refused: bool = False
+) -> Log:
     """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601); under
-    a gap halt also NinjaTrader's raised peak `theirs` (relative), not taken, as "nt_peak"."""
+    a gap halt also NinjaTrader's raised peak `theirs` (relative), not taken, as "nt_peak"; a
+    refused start's roll (`refused`) as "refused": true, which `_missed_close` skips (#244)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
     payload = {"peak": setup.start.phase_start + a.peak, "ts": stamp}
     if theirs is not None:
         payload["nt_peak"] = setup.start.phase_start + theirs
+    if refused:
+        payload["refused"] = True
     return Log("peak", payload)
 
 

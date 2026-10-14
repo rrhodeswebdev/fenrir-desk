@@ -1022,7 +1022,7 @@ async def test_a_stop_cancelled_again_and_again_still_waits_for_the_close(
         feed_stopped(hub, feed, task)
         assert not hub._lock.locked()
 
-        hub.start()  # a second run: armed again, then a disarm cancelled by a scope
+        # armed again, then a disarm cancelled by a scope
         a = arm(conn, tmp_path, ALWAYS)
         await hub.tick(T0)
         await until(lambda: feed.subscribed == 2)

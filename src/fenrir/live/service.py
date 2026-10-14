@@ -902,12 +902,15 @@ class LiveHub:
 
     async def _stop_feed(self) -> None:
         """Cancel the bar feed and wait until it has ended (it needs no hub lock to end, so a
-        caller holding it never deadlocks), then show it down without an outage. Ended, it has
-        closed its stream; the SDK may close its socket a loop turn later (lse-data's
-        `stream_async` leaves its inner generator to the finalizer, #257). `today` goes with it:
-        a re-arm's feed replays the day from the open, so the bars missed meanwhile come back,
-        and none of a day gone by is kept while nothing is armed. The lock is held through the
-        close handshake (up to websockets' close timeout on a half-open link): nothing is armed."""
+        caller holding it never deadlocks), then show it down without an outage. A cancel of
+        the caller's is held until then and re-raised, so the lock is never released with the
+        old feed still running (#257); under an anyio scope, which cancels on every loop turn,
+        that wait spins a core for as long as the close takes (no scope wraps a hub caller).
+        Ended, the feed has closed its stream, usually its socket too: lse-data's
+        `stream_async` can leave its inner generator to the finalizer, which then starts the
+        close handshake a loop turn later, after the lock is released (#257). `today` goes with
+        it: a re-arm's feed replays the day from the open, so the bars missed meanwhile come
+        back, and none of a day gone by is kept while nothing is armed."""
         feed, self._feed = self._feed, None
         feed.cancel()
         cancelled: asyncio.CancelledError | None = None
@@ -922,7 +925,8 @@ class LiveHub:
         self.lse_error = self.lse_retry_at = None
         self.replaying = set()
         self.today = {}
-        self._tasks.remove(feed)
+        if feed in self._tasks:  # a stop() may have cleared them meanwhile
+            self._tasks.remove(feed)
         if cancelled is not None:
             raise cancelled
 

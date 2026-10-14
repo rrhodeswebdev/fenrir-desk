@@ -143,8 +143,8 @@ class RunnerState:
     stale: str | None = None  # stale-data pause: no new entries until the next bar
     working: Working | None = None  # no new entries while an entry is working
     exiting: str | None = None  # client_id of the Flatten out (runner or step), until flat
-    # client_id of the bracket whose entry fill opened the position: its later entry fills are
-    # under its stop and target (the add-on resizes them), any other add is not (#237)
+    # client_id of the bracket whose entry fill last opened a position: a later fill of that
+    # entry is under its stop and target (the add-on resizes them), any other add is not (#237)
     entry_id: str | None = None
     drift: str | None = None  # entry-fill drift pause: no new entries until resolved
     unreconciled: str | None = None  # sim/live: no new entries until NinjaTrader's book matches
@@ -427,7 +427,7 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
         position=position,
         fills=(*s.fills, ts),
         working=None if mine else w,
-        entry_id=w.client_id if mine else None if rest == 0 or flipped else s.entry_id,
+        entry_id=w.client_id if mine else s.entry_id,
         # an over-close that reversed the position ends that Flatten: the reversal gets its own;
         # so does a fill that opens or adds: a Flatten sent before it (while flat, the gap's
         # account-wide one, #229; or for fewer lots, #234) may not close all of it, and a
@@ -679,7 +679,6 @@ def warm_up(
         bars=tuple(history)[-WINDOW:],
         working=None,
         exiting=None,
-        entry_id=None,
         held=None,
         read_at=None,
         fills=(),

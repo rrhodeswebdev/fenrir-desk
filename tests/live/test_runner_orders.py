@@ -327,6 +327,68 @@ def test_a_failed_flatten_of_a_stopless_position_is_sent_again():
     assert "alert" in kinds(effects)
 
 
+# #234: a manual add on the app's instrument while the app's Flatten is out
+
+
+def reasons(effects):
+    return [e.payload["reason"] for e in effects if isinstance(e, core.Log) and e.kind == "action"]
+
+
+def test_a_manual_add_while_a_flatten_is_out_gets_its_own_flatten():
+    """The issue's sequence: long 1 with no known stop, its Flatten out; a manual +1 fills first,
+    then that Flatten's -1. The Flatten was posted for 1 lot, so the add ends it: the 2 lots get
+    their own Flatten at once, and the lot left after the first Flatten's fill is never left
+    unflattened (it was: `exiting` stayed the first id and nothing went out until a reconcile)."""
+    s = started(sim(), at("09:30"))
+    t = at("09:31").ts
+    s, effects = core.on_fill(s, fill(1, 20000.0, t + timedelta(seconds=5)))
+    [first] = sends(effects)
+    s, effects = core.on_fill(s, fill(1, 20000.0, t + timedelta(seconds=6)))  # the manual add
+    cid = core.client_id("Sim101", t + timedelta(seconds=6), "f2", Flatten())
+    assert sends(effects) == [Send(Flatten(), cid)] and cid != first.client_id
+    assert reasons(effects) == ["position 2 has no known stop"]
+    s, effects = core.on_fill(s, fill(-1, 20000.0, t + timedelta(seconds=7)))  # the first's
+    assert (s.position.qty, s.exiting, sends(effects)) == (1, cid, [])
+    for n in range(1, 5):  # the second Flatten is out: one at a time
+        s, effects = core.on_bar(s, at(f"09:3{n}"))
+        assert sends(effects) == []
+    s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:35").ts + timedelta(seconds=1)))
+    assert (s.position, s.exiting) == (core.FLAT, None)
+
+
+def test_a_flatten_that_fills_by_itself_sends_no_second_one():
+    """An ordinary Flatten of a stopless position filled in parts: closing fills never end it."""
+    s = started(sim(), at("09:30"))
+    t = at("09:31").ts
+    s, effects = core.on_fill(s, fill(2, 20000.0, t + timedelta(seconds=5)))
+    [first] = sends(effects)
+    s, effects = core.on_fill(s, fill(-1, 20000.0, t + timedelta(seconds=6)))
+    assert (s.position.qty, s.exiting, sends(effects)) == (1, first.client_id, [])
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == []
+    s, effects = core.on_fill(s, fill(-1, 20000.0, t + timedelta(seconds=70)))
+    assert (s.position, s.exiting, sends(effects)) == (core.FLAT, None, [])
+    assert sends(core.on_bar(s, at("09:32"))[1]) == []
+
+
+def test_a_manual_add_while_the_strategys_flatten_is_out_ends_it():
+    """The strategy's Flatten of a bracketed long is out; a manual +1 fills first. That Flatten
+    was sent for 1 lot, so the add ends it: a later breach flattens what is left (it did not:
+    `exiting` stayed the strategy's id, so `_exit` sent nothing)."""
+    s = entered(sim())
+    s, effects = decide_now(s, [Flatten()])
+    [mine] = sends(effects)
+    assert s.exiting == mine.client_id
+    s, _ = core.on_fill(s, fill(1, 20000.0, at("09:31").ts + timedelta(seconds=20)))
+    assert (s.position.qty, s.position.stop, s.exiting) == (2, 19990.0, None)
+    s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:31").ts + timedelta(seconds=30)))
+    s = replace(s, acct=replace(s.acct, balance=-1900.0))
+    b = at("09:32", lo=19990.0)  # equity below the -2,000 floor
+    s, effects = core.on_bar(s, b)
+    assert s.halt_kind == "breach"
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x", Flatten()))]
+
+
 def test_late_bar_takes_no_entries_but_exits():
     s = started(sim(), at("09:30"))
     closed = at("09:31").ts  # the 09:30 bar's close

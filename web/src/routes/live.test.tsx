@@ -117,6 +117,14 @@ describe('live page', () => {
     expect(page).toContain('Trading day')
   })
 
+  it('asks the server to leave bars, peaks and day opens out of the tape (#220)', async () => {
+    const client = new QueryClient()
+    await render(desk(), client)
+    const keys = client.getQueryCache().findAll({ queryKey: ['live', 'journal'] }).map((q) => q.queryKey)
+    expect(keys).toHaveLength(1)
+    expect(keys[0]?.[3]).toEqual(['bar', 'peak', 'day_start'])
+  })
+
   it('polls every 2 s through errors, but not after a 401', () => {
     expect(statusPollMs({ error: null })).toBe(2000)
     expect(statusPollMs({ error: new ApiError(500, '') })).toBe(2000)

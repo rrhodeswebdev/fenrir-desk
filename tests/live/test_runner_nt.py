@@ -533,20 +533,43 @@ def test_a_zero_balance_alerts_once_per_run_across_the_day_roll():
     assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
 
 
-def test_a_lost_link_clears_the_figures_condition():
-    """#220 review (B): a lost link drops NinjaTrader's figures as stale, and its zero with them,
-    so the unreconciled pause alone shows. Once relinked, a zero shows the condition again,
-    without a second alert in the run."""
+def test_a_lost_link_pauses_entries_until_a_balance_above_0():
+    """#243 (#220 review B): a lost link drops NinjaTrader's figures as stale, a zero's with
+    them, and holds new entries back (a `figures` pause) until an account message with a balance
+    above 0, not only until the reconnect's reconcile. The reconcile, a Resolve and the end of
+    warm-up leave it; a zero after the reconnect shows as one, with no second alert in the run."""
+    lost = {"kind": "figures", "reason": core.FIGURES_LOST}
     s = running(sim(), account(50_400.0))
     s, _ = core.on_account(s, account(0.0), T.ts)
-    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    s, effects = core.on_disconnect(s, "no heartbeat for 6 s")
+    assert [e.payload["message"] for e in effects] == [f"{core.LINK_LOST} (no heartbeat for 6 s)"]
     status = core.account_status(s)
-    assert status["conditions"] == [] and status["halt_reason"] == core.LINK_LOST
+    assert status["conditions"] == [lost] and status["nt_balance"] is None
+    assert (status["halted"], status["halt_kind"], status["halt_reason"]) == (
+        True,
+        "figures",
+        core.FIGURES_LOST,
+    )
+    s, effects = core.on_disconnect(s, "no heartbeat for 6 s")  # still the same outage
+    assert effects == () and core.conditions(s) == [lost]
+    s = reconciled(s)
+    assert s.unreconciled is None and core.conditions(s) == [lost]
+    s, _ = core.resolve(s, INSTRUMENT, (), (), T.ts)
+    s, _ = core.warmed(replace(s, warming="warming up: replaying"), s.bars, (), ())
+    assert core.conditions(s) == [lost]
     s, effects = core.on_account(s, account(0.0), T.ts)
     assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
-    assert core.account_status(s)["nt_balance"] is None  # no last figures: only the app's
-    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")  # still unreconciled: the same outage
-    assert core.conditions(s) == []
+    s, _ = core.on_account(s, account(50_300.0), T.ts)
+    assert core.conditions(s) == [] and s.nt.balance == 50_300.0
+    s, _ = core.on_disconnect(s, "stream closed")  # every lost link, a zero before it or not
+    assert core.conditions(s) == [lost]
+
+
+def test_a_lost_link_adds_no_figures_pause_to_an_account_that_never_started():
+    """Without start figures `on_account` never takes a balance, so nothing could lift it."""
+    s, _ = core.start(make_setup(make_rules(), mode="sim"), T.ts)
+    s, _ = core.on_disconnect(s, "stream closed")
+    assert "figures" not in [c["kind"] for c in core.conditions(s)]
 
 
 def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():

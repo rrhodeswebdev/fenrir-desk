@@ -589,28 +589,43 @@ def test_an_open_loss_held_over_a_close_taken_from_no_figures_still_breaches(los
     assert sends(effects) == [Flatten]
 
 
-@pytest.mark.parametrize("lost", ["zero", "lost link"])
-def test_a_restart_after_a_no_close_roll_keeps_its_floor(lost):
-    """#220 review (round 4, P12/P13): a no-close roll journals no "peak" row, so a restart later
-    that day rebuilt its peak from the pins and the earlier rows (floor -2,000; main, from a stale
-    "peak" row, 200). Under the restored "confirm balances", today's journalled open, which the
-    roll wrote with the floor it raised, is a lower bound on the peak: the restart's floor is
-    the running one, still with no "peak" row, so a later restart asks again."""
-    s, effects, close = no_close_over_a_held_loss(lost)
-    assert s.acct.floor == 200.0
+def a_zero_over_the_close_flat(nt_balance):
+    """The app flat at 0, NinjaTrader's last figure `nt_balance`, then a zero, then the roll."""
+    s = running(sim(), account(nt_balance))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    return s, effects, 20000.0
+
+
+@pytest.mark.parametrize(
+    ("roll", "floor"),
+    [
+        (lambda: no_close_over_a_held_loss("zero"), 200.0),
+        (lambda: no_close_over_a_held_loss("lost link"), 200.0),
+        (lambda: no_close_over_a_held_loss("zero", 53_000.0), 200.0),  # a stale gap: gap halt
+        (lambda: a_zero_over_the_close_flat(51_000.0), -1000.0),  # raised from the last figure
+    ],
+    ids=["zero", "lost link", "zero, stale gap", "zero, stale figure above the app"],
+)
+def test_a_restart_after_a_no_close_roll_keeps_its_floor(roll, floor):
+    """#220 review (round 4, P12/P13): a roll that takes no close journals no "peak" row, so a
+    restart later that day rebuilt its peak from the pins and the earlier rows (floor -2,000;
+    main, from a stale "peak" row, 200). Today's journalled open, which the roll wrote with the
+    peak it raised to, is a lower bound on an end_of_day restart's peak: the restart keeps the
+    running floor and halt, still with no "peak" row, so a later restart asks again. That holds
+    under a gap halt from stale figures too (no "confirm balances" row then), and for a raise
+    from NinjaTrader's last figure above the app's balance (the open's peak, not its balance)."""
+    s, effects, close = roll()
+    assert s.halted.startswith("confirm balances: ") and s.acct.floor == floor
     rows = [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
     halts, opens = ([p for k, p in rows if k == kind] for kind in ("halt", "day_start"))
-    assert core.NO_CLOSE in [h["reason"] for h in halts] and len(opens) == 1
-    setup = replace(sim(), start=Start(50_000.0, 50_000.0, 52_200.0), day_start=None)
+    assert peaks(effects) == [] and len(opens) == 1
+    balance = START.phase_start + s.acct.balance
+    setup = replace(sim(), start=Start(50_000.0, 50_000.0, balance), day_start=None)
     now = bar("10:00", close, close, close, close, D2).ts
     r, out = core.start(setup, now, halts, [], opens)
-    assert (r.halted, r.acct.peak, r.acct.floor, r.session_floor) == (
-        core.NO_CLOSE,
-        2200.0,
-        200.0,
-        200.0,
-    )
-    assert peaks(out) == []
+    assert (r.halted, r.acct.peak, r.acct.floor) == (s.halted, s.acct.peak, floor)
+    assert r.session_floor == floor and peaks(out) == []
 
 
 def test_the_no_close_floor_trails_the_apps_balance_under_a_gap_halt_too():

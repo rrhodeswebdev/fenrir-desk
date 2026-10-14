@@ -227,8 +227,9 @@ def start(
 ) -> Step:
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
-    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a). `opens`: the
-    "day_start" payloads journalled since then. Without `setup.day_start`, today's open is the
+    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a), and for
+    `end_of_day` at least today's journalled open's (#220). `opens`: the "day_start" payloads
+    journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
     none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
     0; a gain stays in the open, so it gives no extra daily room and `replay` never cuts it from
@@ -290,9 +291,10 @@ def start(
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
     trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
-    if day is not None and trailing == "end_of_day" and any(h["reason"] == NO_CLOSE for h in halts):
-        # a roll that took no close journals no "peak" row (#220), but raised the floor, and the
-        # open it journalled holds that peak: never looser than it ran (no row: a restart asks)
+    if replays and trailing == "end_of_day":
+        # today's journalled open holds the peak the day opened with, raised by its roll even when
+        # that took no close and so journalled no "peak" row (#220): never looser than it ran, and
+        # no row here either, so a later restart still asks (`_missed_close`)
         s = replace(s, acct=_raised(setup, s.acct, day.peak))
     refused = changed_since_arming(setup)
     if refused:

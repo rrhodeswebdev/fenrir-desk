@@ -157,6 +157,9 @@ class RunnerState:
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
     # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
     warming: str | None = None
+    # NinjaTrader's intraday peak an intraday gap halt did not take, relative to phase start, as
+    # last journalled in a "peak" row's "nt_peak": a later-day restart takes it (#225)
+    nt_peak: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +224,8 @@ def start(
 ) -> Step:
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
-    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a). `opens`: the
+    journalled since then; the highest of them and `start.peak` is the peak (DEC-4a), with their
+    "nt_peak"s when today's open is not journalled, else with that open's peak (#225). `opens`: the
     "day_start" payloads journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
     none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
@@ -235,13 +239,18 @@ def start(
         False  # today's open is journalled: `replay` sets the app's balance, not NinjaTrader's
     )
     if begin is not None:
-        begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks)]))
+        today = trading_day(now).isoformat()
+        rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
+        replays = setup.day_start is None and bool(rows)
+        # a gap halt journals NinjaTrader's peak next to the app's (#225): a restart that opens at
+        # NinjaTrader's balance, which holds the gap, takes it too, so its floor is never looser
+        # than NinjaTrader's; one that replays the app's own balance keeps the app's peak (theirs
+        # would breach it), and at least today's open's, which a start may have set from theirs
+        theirs = [rows[-1].peak] if replays else [p["nt_peak"] for p in peaks if "nt_peak" in p]
+        begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks), *theirs]))
         if setup.day_start is None:
-            today = trading_day(now).isoformat()
-            rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
             if rows:
                 setup = replace(setup, day_start=rows[-1])  # the latest: one per arming and day
-                replays = True
             elif begin.realized_today is not None:  # before today's losses, never above the balance
                 loss = min(begin.realized_today, 0.0)
                 setup = replace(setup, day_start=DayStart(begin.balance - loss, begin.peak))
@@ -296,7 +305,11 @@ def start(
         fresh = replace(setup, start=None, day_start=None)
         s = replace(s, setup=fresh, acct=initial_state(setup.rules, a.phase, acct.day))
         reason = CONFIRM_LIQUIDATED.format(balance=begin.balance, level=level)
-        return halt(replace(s, started=False), reason)
+        s, out = halt(replace(s, started=False), reason)
+        if not out and s.halted != reason:  # a restored halt holds: still say why (review of #238)
+            message = f"cannot start: {reason} (still halted: {s.halted})"
+            out = (Log("alert", {"message": message}),)
+        return s, out
     if opened:  # so a later restart today opens the day at the same figures
         out += (*opened, _open_log(acct.day, setup.day_start, now))
     trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
@@ -503,7 +516,7 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
                 equity=base + equity,
             )
             s, out = halt(replace(s, acct=_raised(s.setup, a, base + a.balance)), gap)
-            out += _peaked(was, s, now)
+            s, out = _gap_peaked(was, s, raised.peak, now, out)
             held = s.position.qty or round(nt.unrealized_pnl, 2) != 0
             if s.halted != was.halted and held and not s.exiting:
                 # flattened now, as `_exit` would on the next LSE bar, which a feed outage may
@@ -1097,9 +1110,11 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
-        # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
-        # account message, then that bar's own Mark breaches: review of #231)
-        own = ", on the app's own figures, not the gap" if was_gap else ""
+        # a breach is a loss through the floor the runner checks, never the gap alone (a
+        # same-bar spike halts on the account message, then that bar's own Mark breaches: review
+        # of #231); true on the app's own figures and on NinjaTrader's after a later-day restart
+        # (#225), so one clause for both (review of #238)
+        own = ", a loss through the floor the runner checks, not the gap alone" if was_gap else ""
         out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 
@@ -1138,9 +1153,11 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 # and from its own balance at the close (DEC-4a), never looser than NinjaTrader's
                 # by more than the gap: an open loss it holds still breaches (review of #221)
                 acct = _raised(s.setup, acct, base + acct.balance)
+                theirs = raised.peak  # journalled next to it: a later-day restart takes it (#225)
             else:
-                acct = raised
-            out += (_peak_log(s.setup, acct, ts),)  # every roll, raised or not: see _missed_close
+                acct, theirs = raised, None
+            # every roll, raised or not: see _missed_close
+            out += (_peak_log(s.setup, acct, ts, theirs),)
         elif s.setup.start:  # none yet, or lost with the link: this close is never taken
             s, more = halt(s, NO_CLOSE)
             out += more
@@ -1183,10 +1200,26 @@ def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
     return (_peak_log(s.setup, s.acct, ts),)
 
 
-def _peak_log(setup: Setup, a: AccountState, ts: datetime) -> Log:
-    """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601)."""
+def _gap_peaked(
+    was: RunnerState, s: RunnerState, theirs: float, ts: datetime, out: tuple[Log | Send, ...]
+) -> Step:
+    """Under an intraday gap halt: `out`, then a "peak" row when the app's peak rose or
+    NinjaTrader's `theirs` (relative), not taken, rose above the last one journalled, with it as
+    "nt_peak" (#225); a later message at or below it journals nothing."""
+    if s.nt_peak is not None and theirs <= s.nt_peak:
+        return s, out + _peaked(was, s, ts)
+    s = replace(s, nt_peak=theirs)
+    return s, (*out, _peak_log(s.setup, s.acct, ts, theirs))
+
+
+def _peak_log(setup: Setup, a: AccountState, ts: datetime, theirs: float | None = None) -> Log:
+    """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601); under
+    a gap halt also NinjaTrader's raised peak `theirs` (relative), not taken, as "nt_peak"."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
-    return Log("peak", {"peak": setup.start.phase_start + a.peak, "ts": stamp})
+    payload = {"peak": setup.start.phase_start + a.peak, "ts": stamp}
+    if theirs is not None:
+        payload["nt_peak"] = setup.start.phase_start + theirs
+    return Log("peak", payload)
 
 
 def _open_log(day: date, opens: DayStart, ts: datetime) -> Log:

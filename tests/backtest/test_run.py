@@ -528,7 +528,7 @@ def test_unreadable_files_fall_back_to_physical_memory(tmp_path, monkeypatch):
     [
         ("0::/\n", [""]),  # a container's private cgroup namespace: the root itself
         ("0::/user.slice/run-1.scope\n", ["user.slice/run-1.scope", "user.slice", ""]),
-        ("12:memory:/x\n1:name=systemd:/x\n0::/a\n", ["a", ""]),  # hybrid: the v2 line
+        ("12:memory:/x\n1:name=systemd:/x\n0::/a\n", ["a", ""]),  # v1 lines too: the v2 one is read
         ("12:memory:/x\n", [""]),  # cgroup v1 only
         ("0::/a/../b\n", [""]),  # never walk out of the root
         ("0::relative\n", [""]),

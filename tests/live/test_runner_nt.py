@@ -1235,6 +1235,39 @@ def test_ninjatraders_own_floor_is_checked_on_an_intraday_gap_message_too():
     assert alerts(effects) == [f"{nt_floor(50_150.0)} (still halted: {gap})"]
 
 
+D4 = D3 + timedelta(days=1)
+
+
+def test_ninjatraders_own_peak_rises_with_a_close_the_app_takes_too():
+    """K23: after M13 a manual +1,300 both book puts NinjaTrader at 52,300; the D3 close is no
+    gap and takes the raise (the app's peak 2,300). NinjaTrader's own peak is 52,300 now, not the
+    gap's 52,200, so -2,050 it alone books (50,250) is through its own floor 50,300."""
+    s, halts, _, _ = shrunk()
+    s, _ = manual_loss(s, -1300.0)
+    s = core.on_account(s, account(balance=52_300.0, today=1300.0), at("09:32", D3).ts)[0]
+    s, _ = core.on_bar(s, at("09:30", D4))
+    assert (s.acct.peak, s.acct.floor, s.nt_peak) == (2300.0, 300.0, 2300.0)
+    s, effects = core.on_account(s, account(balance=50_250.0, today=-2050.0), at("09:31", D4).ts)
+    caught = nt_floor(50_250.0, floor=50_300.0, peak=52_300.0)
+    assert alerts(effects) == [f"{caught} (still halted: {halts[0]['reason']})"]
+
+
+def test_ninjatraders_own_peak_rises_with_an_intraday_raise_the_app_takes_too():
+    """The intraday side: the gap at 52,200, then a manual +1,500 both book with NinjaTrader at
+    52,500 (no gap: the app takes the raise to 2,500); -2,050 it alone books (50,450) is through
+    its own floor 50,500."""
+    s = running(sim(trailing="intraday"))
+    s, _ = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    gap = s.halted
+    s, _ = manual_loss(reconciled(s), -1500.0, day=D1)
+    now = at("09:32").ts
+    s, _ = core.on_account(s, account(balance=52_500.0, today=2500.0), now)
+    assert (s.acct.peak, s.acct.floor, s.nt_peak) == (2500.0, 500.0, 2500.0)
+    s, effects = core.on_account(s, account(balance=50_450.0, today=450.0), now)
+    caught = nt_floor(50_450.0, floor=50_500.0, peak=52_500.0)
+    assert alerts(effects) == [f"{caught} (still halted: {gap})"]
+
+
 def held_over_the_close(gain, loss, nt_balance, unrealized, **rules):
     """The app books `gain` in fills, then adopts NinjaTrader's long with a known stop (19,000)
     and marks it `loss` open; the link drops over the close and NinjaTrader reports `nt_balance`

@@ -179,7 +179,8 @@ class RunnerState:
     no_balance_alerted: bool = False  # one alert per run
     # NinjaTrader's highest peak a gap halt did not take, relative to phase start, as journalled
     # in "peak" rows' "nt_peak": a later-day restart takes it (#225); a same-day one restores it,
-    # and NinjaTrader's own equity is checked against the floor from it (#239)
+    # it then follows NinjaTrader's own closes (end_of_day) or equity (intraday), and
+    # NinjaTrader's own equity is checked against the floor from it (#239)
     nt_peak: float | None = None
     nt_floored: bool = False  # that check halted (or alerted) this run: once per run (#239)
 
@@ -561,6 +562,8 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
                 out += more
             return _nt_floored(s, now, out)
         s = replace(s, acct=raised)
+        if s.nt_peak is not None:  # NinjaTrader's own peak follows its own equity, once known
+            s = replace(s, nt_peak=max(s.nt_peak, nt.balance + nt.unrealized_pnl - base))
     return _nt_floored(s, now, _peaked(was, s, now))
 
 
@@ -1264,6 +1267,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 s = replace(s, nt_peak=theirs if s.nt_peak is None else max(theirs, s.nt_peak))
             else:
                 acct, theirs = raised, None
+                if s.nt_peak is not None and not s.no_balance:  # its own close, once known (#239)
+                    s = replace(s, nt_peak=max(s.nt_peak, s.nt.balance - base))
         if s.nt and not s.no_balance:
             # every roll, raised or not: see _missed_close
             out += (_peak_log(s.setup, acct, ts, theirs),)

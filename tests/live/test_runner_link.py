@@ -171,9 +171,11 @@ def test_a_fill_past_flat_by_while_unreconciled_is_still_a_breach():
 
 def test_held_qty_above_the_oco_qty_is_flagged_and_flattened():
     s = entered(sim(), at("09:30"))
-    # a manual buy adds to the bracketed long: the add-on resizes the OCO only for entry fills
+    # a manual buy adds to the bracketed long: the add-on resizes the OCO only for entry fills,
+    # so the add has no known stop and is flattened at once (#237)
     s, effects = core.on_fill(s, fill(1, 20001.0, at("09:32").ts))
-    assert s.position.qty == 2 and s.position.stop == 19990.0 and sends(effects) == []
+    assert s.position.qty == 2 and s.position.stop is None
+    assert [e.action for e in sends(effects)] == [Flatten()]
     oco = [order("stop", "sell", 1, 19990.0), order("target", "sell", 1, 20020.0, oid="o2")]
     now = at("09:33").ts
     s, effects = core.on_reconcile(s, INSTRUMENT, [held(2, 20000.5)], oco, now)

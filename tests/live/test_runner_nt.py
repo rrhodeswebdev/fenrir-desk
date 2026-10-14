@@ -870,14 +870,16 @@ def test_a_position_booked_while_the_gap_flatten_is_out_is_flattened_at_once(tra
     assert s.halt_kind == "breach"
 
 
-def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next_bar():
+def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_at_once():
     """The same for an entry with a known stop, sent before the gap halt and filled while the
-    account-wide Flatten is out: not stopless, so the next bar's gap flatten closes it."""
+    account-wide Flatten is out: the fill ends that Flatten (which may not close it), so it gets
+    its own at once, not on the next bar, which a feed outage may hold back (#237)."""
     s = running(sim(trailing="intraday"))
     s, effects = decide_now(s, [LONG])
     assert sends(effects) == [Bracket]
     s, effects = core.on_account(s, account(balance=54_500.0, unrealized=-1900.0), T.ts)
     assert s.halted.startswith(GAP_INTRADAY) and sends(effects) == [Flatten]
+    gap_flatten = s.exiting
     s, effects = core.on_bar(s, at("09:31"))
     assert sends(effects) == []
     entry = {
@@ -885,9 +887,12 @@ def test_a_bracketed_entry_filled_while_the_gap_flatten_is_out_is_flattened_next
         "client_id": s.working.client_id,
     }
     s, effects = core.on_fill(s, entry)
-    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [])
+    assert (s.position.qty, s.position.stop, sends(effects)) == (1, 19990.0, [Flatten])
+    assert [a["reason"] for a in actions(effects)] == [
+        f"position 1 filled while Flatten {gap_flatten} was out"
+    ]
     s, effects = core.on_bar(s, at("09:32"))
-    assert [(a["type"], a["reason"]) for a in actions(effects)] == [("Flatten", s.halted)]
+    assert sends(effects) == []  # one at a time
 
 
 def test_a_same_day_intraday_restart_starts_the_peak_at_least_at_the_replayed_balance():

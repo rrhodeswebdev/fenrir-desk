@@ -169,10 +169,33 @@ def test_entry_and_exit_fill_book_position_and_pnl():
     assert len(st["session"]["fills"]) == 2 and st["position"]["qty"] == 0
 
 
+ENTRY_ID = core.client_id("Sim101", at("09:30").ts, "0", LONG)  # `entered`'s bracket
+
+
 def test_partial_entry_fills_average_the_entry():
+    """A later part of the entry carries its bracket's client_id: the add-on resizes the stop and
+    target to cover it, so the bracket's stop still covers the whole position."""
     s = entered(sim())
-    s, _ = core.on_fill(s, fill(1, 20001.25, at("09:31").ts + timedelta(seconds=2)))
-    assert s.position == core.Position(2, 20000.75, 19990.0, 20020.0)
+    later = fill(1, 20001.25, at("09:31").ts + timedelta(seconds=2), cid=ENTRY_ID)
+    s, effects = core.on_fill(s, later)
+    assert s.position == core.Position(2, 20000.75, 19990.0, 20020.0) and sends(effects) == []
+
+
+def test_a_manual_add_on_a_bracketed_position_has_no_known_stop():
+    """#237: a fill that adds and is not the entry's (a manual buy) is under no stop at
+    NinjaTrader, which resizes the bracket's stop and target on entry fills only. The position
+    has no known stop: it is flattened at once, which also cancels that stop and target."""
+    s = entered(sim())
+    t = at("09:31").ts + timedelta(seconds=20)
+    s, effects = core.on_fill(s, fill(1, 20001.0, t))
+    assert s.position == core.Position(2, 20000.625, None, None)
+    cid = core.client_id("Sim101", t, "f2", Flatten())
+    assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
+    assert reasons(effects) == ["position 2 has no known stop"]
+    # later parts of the entry never bring the stop back: it covers fewer lots than are held
+    s, _ = core.on_fill(s, fill(-1, 20001.0, t + timedelta(seconds=5)))
+    s, _ = core.on_fill(s, fill(1, 20001.0, t + timedelta(seconds=6), cid=ENTRY_ID))
+    assert (s.position.qty, s.position.stop, s.position.target) == (2, None, None)
 
 
 def test_same_minute_winner_is_a_possible_microscalp():
@@ -371,22 +394,43 @@ def test_a_flatten_that_fills_by_itself_sends_no_second_one():
     assert sends(core.on_bar(s, at("09:32"))[1]) == []
 
 
-def test_a_manual_add_while_the_strategys_flatten_is_out_ends_it():
-    """The strategy's Flatten of a bracketed long is out; a manual +1 fills first. That Flatten
-    was sent for 1 lot, so the add ends it: a later breach flattens what is left (it did not:
-    `exiting` stayed the strategy's id, so `_exit` sent nothing)."""
+def test_a_manual_add_while_the_strategys_flatten_is_out_is_flattened_at_once():
+    """The strategy's Flatten of a bracketed long is out; a manual +1 fills first. The add ends
+    that Flatten, so the hub stops resending it if its post timed out (review of #236,
+    non-blocking 3). The add has no stop at NinjaTrader (#237), so the 2 lots get their own
+    Flatten at once, and the lot left after the strategy's Flatten fills stays under it (before:
+    the bracket's stop was kept for 2 lots and nothing more went out)."""
     s = entered(sim())
     s, effects = decide_now(s, [Flatten()])
     [mine] = sends(effects)
     assert s.exiting == mine.client_id
-    s, _ = core.on_fill(s, fill(1, 20000.0, at("09:31").ts + timedelta(seconds=20)))
-    assert (s.position.qty, s.position.stop, s.exiting) == (2, 19990.0, None)
-    s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:31").ts + timedelta(seconds=30)))
-    s = replace(s, acct=replace(s.acct, balance=-1900.0))
-    b = at("09:32", lo=19990.0)  # equity below the -2,000 floor
-    s, effects = core.on_bar(s, b)
-    assert s.halt_kind == "breach"
-    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", b.ts, "x", Flatten()))]
+    t = at("09:31").ts + timedelta(seconds=20)
+    s, effects = core.on_fill(s, fill(1, 20000.0, t))
+    cid = core.client_id("Sim101", t, "f2", Flatten())
+    assert (s.position.qty, s.position.stop, s.exiting) == (2, None, cid)
+    assert sends(effects) == [Send(Flatten(), cid)]
+    s, effects = core.on_fill(s, fill(-1, 20000.0, t + timedelta(seconds=10)))  # the strategy's
+    assert (s.position.qty, s.exiting, sends(effects)) == (1, cid, [])
+    s, effects = core.on_bar(s, at("09:32"))
+    assert sends(effects) == []  # one at a time
+
+
+def test_more_of_the_entry_while_a_flatten_is_out_gets_its_own_flatten():
+    """The same with the entry's own later fill, which keeps its stop: the Flatten it ends was
+    sent for fewer lots, and nothing else sends another (a strategy's Flatten is not sent again
+    by any bar), so the position gets its own at once."""
+    b = at("09:30")
+    s, _ = decide_now(started(sim(), b), [replace(LONG, qty=2)])
+    entry_id = s.working.client_id
+    t = b.ts + timedelta(minutes=1, seconds=1)
+    s, _ = core.on_fill(s, fill(1, 20000.25, t, cid=entry_id))
+    s, effects = decide_now(s, [Flatten()])
+    [mine] = sends(effects)
+    s, effects = core.on_fill(s, fill(1, 20000.25, t + timedelta(seconds=1), cid=entry_id))
+    assert s.position == core.Position(2, 20000.25, 19990.0, 20020.0)
+    cid = core.client_id("Sim101", t + timedelta(seconds=1), "f2", Flatten())
+    assert sends(effects) == [Send(Flatten(), cid)] and s.exiting == cid
+    assert reasons(effects) == [f"position 2 filled while Flatten {mine.client_id} was out"]
 
 
 def test_late_bar_takes_no_entries_but_exits():

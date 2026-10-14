@@ -143,6 +143,9 @@ class RunnerState:
     stale: str | None = None  # stale-data pause: no new entries until the next bar
     working: Working | None = None  # no new entries while an entry is working
     exiting: str | None = None  # client_id of the Flatten out (runner or step), until flat
+    # client_id of the bracket whose entry fill opened the position: its later entry fills are
+    # under its stop and target (the add-on resizes them), any other add is not (#237)
+    entry_id: str | None = None
     drift: str | None = None  # entry-fill drift pause: no new entries until resolved
     unreconciled: str | None = None  # sim/live: no new entries until NinjaTrader's book matches
     mismatch: str | None = None  # reconcile pause: no new entries until the user resolves it
@@ -398,8 +401,13 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
     opening = pos.qty == 0 or (pos.qty > 0) == (qty > 0)
     if opening:  # or adding
         entry = (abs(pos.qty) * (pos.entry or 0.0) + abs(qty) * price) / abs(rest)
-        b = w.bracket if mine else pos
-        position, realized = Position(rest, entry, b.stop, b.target), 0.0
+        if mine:
+            stop, target = w.bracket.stop, w.bracket.target
+        elif fill["client_id"] == s.entry_id:  # more of that entry: still under its stop
+            stop, target = pos.stop, pos.target
+        else:  # not Fenrir's entry (a manual add): no stop at NinjaTrader covers it all (#237)
+            stop = target = None
+        position, realized = Position(rest, entry, stop, target), 0.0
     else:
         closed = min(abs(qty), abs(pos.qty)) * (1 if pos.qty > 0 else -1)
         realized = gross_pnl(closed, pos.entry, price, spec.point_value)
@@ -413,11 +421,13 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
     per_side = getattr(s.setup.rules.costs.commission_per_side, spec.symbol)
     commission = max(fill["commission"], per_side * abs(qty), 0.0)
     before, today = s.acct.balance, s.acct.day
+    ended = s.exiting if opening else None  # the Flatten this fill ends, which may not close it
     s = replace(
         s,
         position=position,
         fills=(*s.fills, ts),
         working=None if mine else w,
+        entry_id=w.client_id if mine else None if rest == 0 or flipped else s.entry_id,
         # an over-close that reversed the position ends that Flatten: the reversal gets its own;
         # so does a fill that opens or adds: a Flatten sent before it (while flat, the gap's
         # account-wide one, #229; or for fewer lots, #234) may not close all of it, and a
@@ -445,10 +455,14 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
             )
             s = replace(s, drift=reason)  # a "halt" row, so a restart restores it
             out += (Log("halt", {"reason": reason, "kind": "drift", "until": None}),)
+    # "f<n>": today's n-th fill, so each fill's Flatten has its own id, the same on a replay
     if s.position.qty and s.position.stop is None and not s.exiting:  # no broker-side stop known
-        # "f<n>": today's n-th fill, so each fill's Flatten has its own id, the same on a replay
         s, more = _stopless(s, ts, f"f{len(s.fills)}")
         out += more
+    elif ended:  # at once: no bar may call for one (a strategy's Flatten)
+        why = f"position {s.position.qty} filled while Flatten {ended} was out"
+        s, more = _flatten(s, ts, f"f{len(s.fills)}", why)
+        out += (Log("alert", {"message": f"flattening: {why}"}), *more)
     return s, out
 
 
@@ -665,6 +679,7 @@ def warm_up(
         bars=tuple(history)[-WINDOW:],
         working=None,
         exiting=None,
+        entry_id=None,
         held=None,
         read_at=None,
         fills=(),

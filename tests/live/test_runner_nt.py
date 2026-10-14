@@ -567,12 +567,9 @@ def test_a_later_day_restart_under_the_gap_halt_takes_ninjatraders_peak():
     s, effects = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19900.0, 19900.0, D3))  # -2,000
     breach = "breach max_drawdown: equity 200.00 at or below drawdown floor 200.00"
     assert s.halted == breach
-    # the figures are NinjaTrader's since the restart, never "the app's own, not the gap"
+    # the figures are NinjaTrader's since the restart: the clause holds for them as for the app's
     gap = halts[0]["reason"]
-    assert alerts(effects) == [
-        f"{breach}, on NinjaTrader's balance and peak, taken at a restart on a later day"
-        f" (was halted: {gap})"
-    ]
+    assert alerts(effects) == [f"{breach}{NOT_THE_GAP} (was halted: {gap})"]
 
 
 def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_own_peak():
@@ -597,6 +594,26 @@ def test_a_same_day_restart_after_a_later_day_restart_keeps_ninjatraders_peak():
     s, _ = restart(52_200.0, halts, kept, opens=opens)
     s = reconciled(core.replay(s, []))
     assert (s.acct.balance, s.acct.peak, s.acct.floor) == (2200.0, 2200.0, 200.0)
+
+
+def test_a_same_day_intraday_restart_after_a_later_day_restart_keeps_ninjatraders_peak():
+    """The intraday side (review of #238, round 2): NinjaTrader peaked at 52,300 under the D1
+    halt and stands at 52,100 on D2. The later-day restart opens D2 at 52,100 with peak 52,300
+    and journals no "peak" row (its peak already holds the nt_peak); a second restart that day
+    takes that open's peak, not the app's 50,000 raised only to the replayed balance."""
+    s = running(sim(trailing="intraday"))
+    s, one = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    s, two = core.on_account(s, account(balance=52_300.0, today=2300.0), T.ts)
+    halts = [e.payload for e in one if e.kind == "halt"]
+    kept = peaks(one) + peaks(two)
+    first, effects = restart(52_100.0, halts, kept, day=D2, trailing="intraday")
+    assert peaks(effects) == []
+    opens = [e.payload for e in effects if e.kind == "day_start"]
+    assert [(o["balance"], o["peak"]) for o in opens] == [(52_100.0, 52_300.0)]
+    s, _ = restart(52_100.0, halts, kept, opens=opens, day=D2, trailing="intraday")
+    s = reconciled(core.replay(s, []))
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (2100.0, 2300.0, 300.0)
+    assert (first.acct.peak, first.acct.floor) == (s.acct.peak, s.acct.floor)
 
 
 def test_a_later_day_restart_at_ninjatraders_floor_cannot_start():
@@ -850,6 +867,8 @@ def test_the_gap_flatten_of_a_held_position_is_journalled_with_the_halts_reason(
 # #222: an intraday peak raise from NinjaTrader's equity (every account message) that alone
 # would breach the app's own figures is a gap, as at the end-of-day roll (#219)
 
+# the clause of every breach alert that replaces a gap halt (review of #238)
+NOT_THE_GAP = ", a loss through the floor the runner checks, not the gap alone"
 GAP_INTRADAY = "confirm balances: a gap on NinjaTrader's account figures: NinjaTrader's equity "
 
 
@@ -1153,9 +1172,7 @@ def test_a_same_bar_breach_after_an_intraday_gap_halt_is_not_put_down_to_the_gap
     s, effects = core.on_bar(s, bar("09:31", 20000.0, 20105.0, 20000.0, 20100.0))
     breach = "breach max_drawdown: equity 0.00 at or below drawdown floor 100.00"
     assert (s.halted, s.halt_kind) == (breach, "breach")
-    assert alerts(effects) == [
-        f"{breach}, on the app's own figures, not the gap (was halted: {gap})"
-    ]
+    assert alerts(effects) == [f"{breach}{NOT_THE_GAP} (was halted: {gap})"]
 
 
 def test_a_breach_that_replaces_another_open_ended_halt_alerts_with_its_reason():

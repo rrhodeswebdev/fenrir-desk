@@ -160,9 +160,6 @@ class RunnerState:
     # NinjaTrader's intraday peak an intraday gap halt did not take, relative to phase start, as
     # last journalled in a "peak" row's "nt_peak": a later-day restart takes it (#225)
     nt_peak: float | None = None
-    # a later-day restart under a restored gap halt: the figures are NinjaTrader's balance and
-    # peak from then on (#225), so a breach that replaces that halt is on them, not the app's own
-    nt_figures: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,8 +292,6 @@ def start(
                 until = h["until"] and date.fromisoformat(h["until"])
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
-    if begin and not replays and (s.halted or "").startswith(GAP):
-        s = replace(s, nt_figures=True)  # opened at NinjaTrader's balance and peak (#225)
     refused = changed_since_arming(setup)
     if refused:
         s, more = halt(replace(s, started=False), refused)
@@ -1115,11 +1110,11 @@ def _halt(s: RunnerState, reason: str, kind: str | None, until: date | None) -> 
     payload = {"reason": reason, "kind": kind, "until": until.isoformat() if until else None}
     out: tuple[Log, ...] = (Log("halt", payload),)
     if open_ended:  # the account was already halted: the user must still learn it failed
-        # a breach is the app's own figures, never the gap's (a same-bar spike halts on the
-        # account message, then that bar's own Mark breaches: review of #231)
-        own = ", on the app's own figures, not the gap" if was_gap else ""
-        if was_gap and s.nt_figures:  # since a later-day restart: NinjaTrader's (review of #238)
-            own = ", on NinjaTrader's balance and peak, taken at a restart on a later day"
+        # a breach is a loss through the floor the runner checks, never the gap alone (a
+        # same-bar spike halts on the account message, then that bar's own Mark breaches: review
+        # of #231); true on the app's own figures and on NinjaTrader's after a later-day restart
+        # (#225), so one clause for both (review of #238)
+        own = ", a loss through the floor the runner checks, not the gap alone" if was_gap else ""
         out += (Log("alert", {"message": f"{reason}{own} (was halted: {s.halted})"}),)
     return replace(s, halted=reason, halt_kind=kind, halt_day=until), out
 

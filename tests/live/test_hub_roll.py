@@ -505,6 +505,8 @@ async def test_an_intraday_gap_under_a_strategy_error_halts_alerts_and_flattens(
         await second.stop()
 
 
+# the clause of every breach alert that replaces a gap halt (review of #238)
+NOT_THE_GAP = ", a loss through the floor the runner checks, not the gap alone"
 THU = T0 + timedelta(days=3, hours=-0.5)  # Thursday 09:30 ET, trading day 2026-10-15
 
 
@@ -557,6 +559,9 @@ async def test_a_later_day_restart_under_the_gap_halt_checks_ninjatraders_floor(
         s = third.states["Sim101"]
         assert s.halt_kind == "breach"
         assert s.halted == "breach max_drawdown: equity -310.00 at or below drawdown floor 100.00"
+        # a same-day restart after the later-day one: the same clause (review of #238, round 2)
+        alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+        assert f"{s.halted}{NOT_THE_GAP} (was halted: {reason})" in alerts
     finally:
         await third.stop()
     [row] = [r.payload for r in journal.rows(conn, kind="peak")]  # the gap roll's, both peaks
@@ -591,8 +596,8 @@ async def test_a_same_day_restart_under_the_gap_halt_keeps_the_apps_peak(
         assert (
             s.halted == "breach max_drawdown: equity -2010.00 at or below drawdown floor -2000.00"
         )
-        # the app's own figures, replayed, not NinjaTrader's (N4, review of #238)
+        # one clause for every breach that replaces a gap halt, whose figures it is on aside
         alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
-        assert f"{s.halted}, on the app's own figures, not the gap (was halted: {reason})" in alerts
+        assert f"{s.halted}{NOT_THE_GAP} (was halted: {reason})" in alerts
     finally:
         await second.stop()

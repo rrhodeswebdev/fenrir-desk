@@ -54,8 +54,6 @@ Beside it the add-on keeps `fenrir-addon.seen.json`, the client order ids of the
 
 Don't recompile (F5) or restart NinjaTrader while Fenrir has an entry filling: the add-on keeps its brackets in memory, so a recompile in that second leaves the rest of that fill without its stop until Fenrir reconciles.
 
-Restart NinjaTrader. **New → NinjaScript Output** shows `Fenrir: listening on port 8123`.
-
 ## 3. Allow the port (PowerShell as Administrator)
 
 ```powershell
@@ -67,6 +65,8 @@ Without the `urlacl` line the add-on cannot listen and logs `failed to start: ..
 
 - **Fenrir in Docker on the same Windows machine:** NinjaTrader address `http://host.docker.internal:8123`. If requests time out, the WSL/Docker network is not in `localsubnet`: run `ipconfig`, find the `vEthernet (WSL)` adapter's subnet and use it as `remoteip=` (for example `remoteip=172.16.0.0/12`).
 - **Fenrir on a Mac, NinjaTrader in a VM:** run `ipconfig` in the VM and use `http://<its IPv4 address>:8123`. Use bridged or shared networking so the Mac and the VM share a subnet.
+
+Then restart NinjaTrader. **New → NinjaScript Output** shows `Fenrir: listening on port 8123`.
 
 ## 4. Check
 

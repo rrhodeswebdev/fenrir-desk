@@ -29,7 +29,7 @@ post() { curl -s -w "  [%{http_code}]\n" -H "X-Fenrir-Token: $T" -H "Content-Typ
 
 ```bash
 cat > /tmp/fenrir-watch.py <<'EOF'
-# Prints the add-on's /stream events; ALL=1 also prints heartbeats and account messages.
+# Prints the add-on's /stream events; with ALL=1 also heartbeats and account messages.
 # A malformed message shows as {'type': 'disconnected', 'error': 'ValueError: malformed ...'}.
 import asyncio
 import os
@@ -38,7 +38,7 @@ from fenrir.bridge.client import AddonClient
 
 
 async def main():
-    every = os.environ.get("ALL")
+    every = os.environ.get("ALL") == "1"
     client = AddonClient(os.environ["H"], os.environ["T"])
     async for msg in client.stream():
         if every or msg["type"] not in ("heartbeat", "account"):
@@ -74,7 +74,7 @@ asyncio.run(main())
 EOF
 ```
 
-Watch the stream with `uv run python /tmp/fenrir-watch.py` (Ctrl+C stops it); check the book with `A=Sim101 I="MNQ 12-26" Q=0 uv run python /tmp/fenrir-book.py`.
+Watch the stream with `uv run python /tmp/fenrir-watch.py` (Ctrl+C stops it; `ALL=1` in front also prints heartbeats and account messages). It prints `{'type': 'connected'}` on each connect and reconnects by itself after a drop; the printed messages are Fenrir's parsed form, so key order follows the add-on (`type` comes last on `account` and `order` messages); check the book with `A=Sim101 I="MNQ 12-26" Q=0 uv run python /tmp/fenrir-book.py`.
 
 - Use a new `client_id` for every request unless the line says to resend one. The ids below (`ck-c2` …) are examples; after 7 days they may be reused.
 
@@ -97,7 +97,7 @@ Watch the stream with `uv run python /tmp/fenrir-watch.py` (Ctrl+C stops it); ch
 - [ ] **B3.** `get accounts`. **Expect:** `[{"id":"Sim101","name":"Sim101","is_sim":true,"balance":…,"realized_pnl_today":…,"unrealized_pnl":…}]  [200]`, and no other account (Playback101 or any other sim account is left out). — Date: ______ NT: ______ Result: ______
 - [ ] **B4.** `get nope` (unknown path, right token). **Expect:** `{"error":"not found"}  [404]`; NinjaTrader keeps running. — Date: ______ NT: ______ Result: ______
 - [ ] **B5.** `post flatten 'not json'`. **Expect:** `{"error":"body must be a JSON object"}  [400]`. — Date: ______ NT: ______ Result: ______
-- [ ] **B6.** Raw stream: `uv run --with websockets python -m websockets "${H/http/ws}/stream?token=$T"` for 10 s. **Expect:** `{"type":"heartbeat","ts":"YYYY-MM-DDTHH:MM:SS.mmmZ"}` every 2 s (UTC, three decimals, `Z`), each followed by one `{"type":"account","id":"Sim101",…}`. — Date: ______ NT: ______ Result: ______
+- [ ] **B6.** Raw stream: `uv run --with websockets python -m websockets "${H/http/ws}/stream?token=$T"` for 10 s. **Expect:** `{"type":"heartbeat","ts":"YYYY-MM-DDTHH:MM:SS.mmmZ"}` every 2 s (UTC, three decimals, `Z`), each followed by one account message for Sim101, `{"id":"Sim101","name":"Sim101","is_sim":true,…,"type":"account"}` (the add-on writes `type` last there). — Date: ______ NT: ______ Result: ______
 - [ ] **B7.** The same with `?token=wrong`. **Expect:** the connection is refused with HTTP 401 before the WebSocket upgrade. — Date: ______ NT: ______ Result: ______
 - [ ] **B8.** Fenrir itself: enter the NinjaTrader address and token on the Settings page, `docker compose restart`, open the Live page. **Expect:** the NinjaTrader field shows a heartbeat age of a few seconds (not `no heartbeat yet`). Record the address used. — Date: ______ NT: ______ Result: ______
 
@@ -116,14 +116,15 @@ Start flat with no working orders on Sim101.
 - [ ] **C9.** Unmanaged account: the C2 body with `"account":"Sim102"` and id `ck-c9`. **Expect:** `{"accepted":false,"duplicate":false,"error":"unmanaged_account"}`. Then the same id `ck-c9` on Sim101: **accepted** (not duplicate: refusals are not recorded as seen). Flatten after. — Date: ______ NT: ______ Result: ______
 - [ ] **C10.** `get "positions?account=Sim102"` and `get "orders?account=Sim102"`. **Expect:** `[]` for both, whatever that account holds (if it exists). — Date: ______ NT: ______ Result: ______
 - [ ] **C11.** Cancel a manual order: from Chart Trader or the SuperDOM place a Sim101 buy limit at P-200; `get "orders?account=Sim101"` shows it with `"role":"other"`, `"client_id":""`; `post cancel '{"client_id":"ck-c11","account":"Sim101","order_id":"<its order_id>"}'`. **Expect:** accepted, that order cancelled, nothing else touched. Resend → `duplicate: true`. `"order_id":"nope"` with a new id → `"unknown order"`. — Date: ______ NT: ______ Result: ______
-- [ ] **C12.** Rejected stop flattens: long bracket with `stop <P+20>`, `target <P+40>` (a sell stop above the market), id `ck-c12`. **Expect:** the entry fills, NinjaTrader rejects the stop, Output alerts `Fenrir: stop rejected for ck-c12: flattening MNQ 12-26 on Sim101` (after `Fenrir: stop ck-c12: <error code> (Rejected)` when NinjaTrader gives one), then `Fenrir: MNQ 12-26 flat on Sim101`; no working orders left. If NinjaTrader accepts the stop instead, record that and flatten. — Date: ______ NT: ______ Result: ______
+- [ ] **C12.** Rejected stop flattens: take `P` right before sending, then a long bracket with `stop <P+20>`, `target <P+40>` (a sell stop above the market), id `ck-c12`. **Expect:** the entry fills, NinjaTrader rejects the stop, Output alerts `Fenrir: stop rejected for ck-c12: flattening MNQ 12-26 on Sim101` (after `Fenrir: stop ck-c12: <error code> (Rejected)` when NinjaTrader gives one), then `Fenrir: MNQ 12-26 flat on Sim101`; no working orders left. If NinjaTrader accepts the stop instead, record that and flatten. — Date: ______ NT: ______ Result: ______
 - [ ] **C13.** Cancelled stop flattens: open a bracket (`ck-c13`), then cancel its stop in the Orders tab. **Expect:** alert `Fenrir: stop cancelled for ck-c13 while the position is held: flattening MNQ 12-26 on Sim101`, then flat with no working orders. — Date: ______ NT: ______ Result: ______
-- [ ] **C14.** Cancelling a Fenrir target: open a bracket (`ck-c14`) and `post cancel` with its **target**'s `order_id`. **Expect (from the code):** if NinjaTrader's OCO also cancels the stop, the add-on treats it as C13 and flattens. Record what happens: the contract says a cancel removes only the named order. — Date: ______ NT: ______ Result: ______
-- [ ] **C15.** Stop or target fill: bracket with `stop <P-2>`, `target <P+2>` (`ck-c15`), wait for one to fill. **Expect:** the other is cancelled by the OCO, no `flattening` alert, Sim101 flat. — Date: ______ NT: ______ Result: ______
+- [ ] **C14.** Cancelling a Fenrir target: open a bracket (`ck-c14`) and `post cancel` with its **target**'s `order_id`. **Expect (from the code):** if NinjaTrader's OCO also cancels the stop, the add-on treats it as C13 and flattens. #64 says a cancel removes only the named order, and `docs/contracts.md` covers only a cancelled **stop**, so the intended behaviour is not settled: record what NinjaTrader and the add-on actually do (the target-cancel → OCO → flatten path is tracked in its own issue). No pass or fail until that is decided. — Date: ______ NT: ______ Result: ______
+- [ ] **C15.** Stop or target fill: take `P` right before sending, then a bracket with `stop <P-4>`, `target <P+4>` (`ck-c15`), and wait for one to fill (if the stop is rejected the price moved first: that is C12's path, start again). **Expect:** the other is cancelled by the OCO, no `flattening` alert, Sim101 flat. — Date: ______ NT: ______ Result: ______
 - [ ] **C16.** Entry still incomplete after 2 s (only when the entry does not fill at once, e.g. a live data connection while the market is closed; otherwise write why not run). **Expect:** `Fenrir: entry ck-c16 not complete after 2 s: cancelling the remainder`; the unfilled rest is cancelled and any part that filled has its stop and target. — Date: ______ NT: ______ Result: ______
 - [ ] **C17.** Partial entry fill (only if NinjaTrader's simulator can be made to part-fill a market order; otherwise write why not run). **Expect:** after each part the stop and target quantity equals the total filled so far. — Date: ______ NT: ______ Result: ______
 - [ ] **C18.** A submit NinjaTrader refuses (only if one can be forced, e.g. by disconnecting while sending; otherwise write why not run). **Expect:** `"error":"submit failed: …"`, alert `Fenrir: bracket <id> not placed: …`; resending the same id later is **accepted**, not `duplicate`. — Date: ______ NT: ______ Result: ______
 - [ ] **C19.** Dedupe survives a restart: flat, restart NinjaTrader. **Expect:** `Fenrir: <n> client ids seen in the last 7 days` with n at least the ids accepted so far; `Documents\NinjaTrader 8\fenrir-addon.seen.json` lists them with UTC times; resending the C2 body → `duplicate: true`, nothing placed. — Date: ______ NT: ______ Result: ______
+- [ ] **C20.** Unknown account: add a name NinjaTrader has no account for (e.g. `"SimNone"`) to `managed_accounts`, restart, then the C2 body with `"account":"SimNone"` and id `ck-c20`. **Expect:** `{"accepted":false,"duplicate":false,"error":"unknown account"}`, nothing placed, and `get accounts` still lists Sim101 only. Restore the A5 config. — Date: ______ NT: ______ Result: ______
 
 ## D. Fills and the stream
 
@@ -134,10 +135,11 @@ Run `uv run python /tmp/fenrir-watch.py` in a second shell during these lines. N
 - [ ] **D3.** Flatten it. **Expect:** a fill with `'qty': -1` and `'client_id': ''` (NinjaTrader's own close), stop and target `order` messages `Cancelled`, and a `position` message `'qty': 0, 'avg_price': 0.0`. — Date: ______ NT: ______ Result: ______
 - [ ] **D4.** A short bracket's entry fill. **Expect:** `'qty': -1` with its `client_id`; its stop or target fill carries the same `client_id` with `'qty': 1`. — Date: ______ NT: ______ Result: ______
 - [ ] **D5.** A manual Sim101 trade (Chart Trader, no ATM). **Expect:** its fill with `'client_id': ''` and its `order` messages with `'role': 'other'`. Flatten after. — Date: ______ NT: ______ Result: ______
+- [ ] **D6.** Stalled client (Mac or Linux shell): run two watch scripts, freeze one with `kill -STOP <its pid>`, then place and flatten a bracket (new ids). **Expect:** both acks come back at once (well under a second), and the other watch script still prints the fills, orders and positions. A stalled client is dropped once one send to it takes over 2 s, which may need minutes of messages to fill the socket buffers: record whether and when it was dropped (after `kill -CONT <pid>` it prints `disconnected` then `connected` if it was). Ctrl+C both after. — Date: ______ NT: ______ Result: ______
 
 ## E. Account messages
 
-- [ ] **E1.** `ALL=1 uv run python /tmp/fenrir-watch.py` for 10 s. **Expect:** after each heartbeat one `{'type': 'account', 'id': 'Sim101', 'name': 'Sim101', 'is_sim': True, …}`, every 2 s, and none for an account outside `managed_accounts`. — Date: ______ NT: ______ Result: ______
+- [ ] **E1.** `ALL=1 uv run python /tmp/fenrir-watch.py` for 10 s. **Expect:** after each heartbeat one account message for Sim101, printed as `{'id': 'Sim101', 'name': 'Sim101', 'is_sim': True, …, 'type': 'account'}`, every 2 s, and none for an account outside `managed_accounts`. — Date: ______ NT: ______ Result: ______
 - [ ] **E2.** With a position open, compare with the Control Center Accounts tab. **Expect:** `balance` = Cash value, `realized_pnl_today` = Realized PnL, `unrealized_pnl` = Unrealized PnL, the last moving with the price. — Date: ______ NT: ______ Result: ______
 - [ ] **E3.** `"managed_accounts": []`, restart. **Expect:** the empty-list alert of A4, `get accounts` → `[]`, the stream sends heartbeats only; `post flatten-all '{"client_id":"ck-e3"}'` → `accepted: true` and touches nothing. Restore `["Sim101"]`. — Date: ______ NT: ______ Result: ______
 
@@ -173,19 +175,19 @@ No stream client during these lines unless the line says so: Ctrl+C every watch 
 
 ## I. 16:40 flatten (SC6)
 
-For each line Python is disconnected: Fenrir stopped (`docker compose stop`) and no watch or `websockets` client. The test lines set `flatten_at` to New York time now plus 3 minutes, from PowerShell on the NinjaTrader machine:
+For each line Python is disconnected: Fenrir stopped (`docker compose stop`) and no watch or `websockets` client. The test lines set `flatten_at` to New York time now plus 5 minutes, from PowerShell on the NinjaTrader machine:
 
 ```powershell
-[TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, 'Eastern Standard Time').AddMinutes(3).ToString('HH:mm')
+[TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, 'Eastern Standard Time').AddMinutes(5).ToString('HH:mm')
 ```
 
 Keep a test time before 23:40 New York: the 20-minute window does not run past midnight. Record the Log tab time of each alert and the Executions tab time of each closing fill.
 
-- [ ] **I1.** PC time zone set to anything but Eastern (Windows Settings → Time & language; record it). `flatten_at` = NY now + 3 min, restart (Output: `… daily at HH:MM New York time`). Open a Fenrir bracket on MNQ (`post bracket`), a manual 1-lot on `MES 12-26` with no stop, and a manual buy limit far below the market. **Expect:** within 15 s after HH:MM New York, alert `Fenrir: HH:MM New York flatten: flattening and cancelling on Sim101`, then `… flat on Sim101` per instrument; Sim101 flat with no working orders. — Date: ______ NT: ______ Result: ______
+- [ ] **I1.** PC time zone set to anything but Eastern (Windows Settings → Time & language; record it). `flatten_at` = NY now + 5 min, restart (Output: `… daily at HH:MM New York time`). Open a Fenrir bracket on MNQ (`post bracket`), a manual 1-lot on `MES 12-26` with no stop, and a manual buy limit far below the market. **Expect:** within 15 s after HH:MM New York, alert `Fenrir: HH:MM New York flatten: flattening and cancelling on Sim101`, then `… flat on Sim101` per instrument; Sim101 flat with no working orders. — Date: ______ NT: ______ Result: ______
 - [ ] **I2.** Inside the 20 minutes after I1's flatten, open a manual 1-lot. **Expect:** flattened again within 15 s, with the I1 alert again. — Date: ______ NT: ______ Result: ______
 - [ ] **I3.** More than 20 minutes after HH:MM, open a manual 1-lot. **Expect:** it stays open (the window is over). Flatten it by hand. — Date: ______ NT: ______ Result: ______
-- [ ] **I4.** Short token: `"token": "abcd"`, `flatten_at` = NY now + 3 min, restart (A7's alert), open a manual 1-lot. **Expect:** flattened within 15 s after HH:MM, as in I1, though the server never started. — Date: ______ NT: ______ Result: ______
-- [ ] **I5.** Failed bind (if A6 could be run): no `urlacl`, `flatten_at` = NY now + 3 min, restart (A6's alert), a manual 1-lot open. **Expect:** flattened as in I1. Restore the `urlacl`. — Date: ______ NT: ______ Result: ______
+- [ ] **I4.** Short token: `"token": "abcd"`, `flatten_at` = NY now + 5 min, restart (A7's alert), open a manual 1-lot. **Expect:** flattened within 15 s after HH:MM, as in I1, though the server never started. — Date: ______ NT: ______ Result: ______
+- [ ] **I5.** Failed bind (if A6 could be run): no `urlacl`, `flatten_at` = NY now + 5 min, restart (A6's alert), a manual 1-lot open. **Expect:** flattened as in I1. Restore the `urlacl`. — Date: ______ NT: ______ Result: ______
 - [ ] **I6.** If a sim account outside `managed_accounts` exists, give it a position before I1. **Expect:** I1 leaves it untouched. — Date: ______ NT: ______ Result: ______
 - [ ] **I7. The real 16:40, default config.** Restore exactly the A5 config (`"flatten_at": "16:40"`, valid token, `flatten_on_disconnect_seconds: null`) and restart. Before 16:40 New York, open a Sim101 position (a Fenrir bracket via `post bracket`, plus a manual 1-lot on another instrument with no stop), then stop Fenrir (`docker compose stop`) and every stream client. Market data running (Simulated Data Feed, or the live feed: CME index futures trade until 17:00 ET). **Expect:** between 16:40:00 and 16:40:15 New York, alert `Fenrir: 16:40 New York flatten: flattening and cancelling on Sim101`, then `… flat on Sim101` per instrument; Sim101 flat, no working orders. Record the PC time zone and the alert and fill times. — Date: ______ NT: ______ Result: ______
 

@@ -1396,6 +1396,26 @@ def test_a_start_below_the_liquidation_level_flattens_what_it_adopts():
     assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
 
 
+def test_a_restart_at_the_liquidation_level_under_a_gap_halt_alerts_and_flattens_once():
+    """#238's case: the restored gap halt stays and the start says once why it did not start;
+    the long it then adopts is flattened once, by the refusal's branch (its reason names the
+    halt shown), never also by the gap's: one alert each, one Flatten."""
+    _, halts, kept = gap_rolled()
+    s, effects = restart(50_200.0, halts, kept)
+    reconciled_at = at("09:30", D3).ts + timedelta(seconds=30)
+    s, more = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, reconciled_at)
+    effects += more
+    why = refused_why(s)
+    assert why == f"position 1 held by a refused start: {halts[0]['reason']}"
+    for hhmm in ("09:31", "09:32", "09:33"):
+        s, more = core.on_bar(s, at(hhmm, D3))
+        effects += more
+    assert not s.started and s.halted == halts[0]["reason"]
+    [cannot, flattening] = alerts(effects)
+    assert cannot.startswith("cannot start: ") and flattening == f"flattening: {why}"
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+
+
 def test_a_running_account_halted_on_a_changed_input_is_not_flattened():
     """The hub halts a running account whose pinned input changed (`_pinned`): its strategy
     still steps, so its exits still run, and nothing flattens it; a restart refuses it."""

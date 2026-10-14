@@ -1214,7 +1214,10 @@ def _gap_peaked(
 ) -> Step:
     """Under an intraday gap halt: `out`, then a "peak" row when the app's peak rose or
     NinjaTrader's `theirs` (relative), not taken, rose above the last one journalled, with it as
-    "nt_peak" (#225); a later message at or below it journals nothing."""
+    "nt_peak" (#225); a later message at or below it journals nothing. Never on a refused start
+    (#241), as `_peaked`."""
+    if not s.started:
+        return s, out
     if s.nt_peak is not None and theirs <= s.nt_peak:
         return s, out + _peaked(was, s, ts)
     s = replace(s, nt_peak=theirs)

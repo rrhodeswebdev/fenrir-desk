@@ -1275,7 +1275,9 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
             else:
                 acct, theirs = raised, None
                 if s.nt_peak is not None and not s.no_balance:  # its own close, once known (#239)
-                    s = replace(s, nt_peak=max(s.nt_peak, s.nt.balance - base))
+                    if _risen(s.nt_peak, close := s.nt.balance - base):
+                        # journalled, so a same-day restart keeps its floor too
+                        s, theirs = replace(s, nt_peak=close), close
         if s.nt and not s.no_balance:
             # every roll, raised or not: see _missed_close
             out += (_peak_log(s.setup, acct, ts, theirs),)
@@ -1320,13 +1322,20 @@ def _raised(setup: Setup, a: AccountState, top: float) -> AccountState:
 
 
 def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
-    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it. Only
-    under the armed rules (`_armed_rules`, #241)."""
-    if s.setup.armed.mode == "dry" or s.setup.start is None or s.acct.peak <= was.acct.peak:
+    """A "peak" row when sim or live raised the peak (intraday), or NinjaTrader's own peak
+    (`nt_peak`, then as "nt_peak", so a same-day restart keeps its floor: #239) rose: a restart
+    starts from it. Only under the armed rules (`_armed_rules`, #241)."""
+    if s.setup.armed.mode == "dry" or s.setup.start is None or not _armed_rules(s.setup):
         return ()
-    if not _armed_rules(s.setup):
+    theirs = s.nt_peak if _risen(was.nt_peak, s.nt_peak) else None
+    if s.acct.peak <= was.acct.peak and theirs is None:
         return ()
-    return (_peak_log(s.setup, s.acct, ts),)
+    return (_peak_log(s.setup, s.acct, ts, theirs),)
+
+
+def _risen(was: float | None, now: float | None) -> bool:
+    """Whether NinjaTrader's own peak (`nt_peak`) rose from `was` to `now`."""
+    return now is not None and (was is None or now > was)
 
 
 def _armed_rules(setup: Setup) -> bool:
@@ -1354,7 +1363,8 @@ def _gap_peaked(
 
 def _peak_log(setup: Setup, a: AccountState, ts: datetime, theirs: float | None = None) -> Log:
     """The drawdown peak in absolute $, stamped with the event that set it (UTC ISO 8601); under
-    a gap halt also NinjaTrader's raised peak `theirs` (relative), not taken, as "nt_peak"."""
+    a gap halt also NinjaTrader's raised peak `theirs` (relative), not taken, as "nt_peak", and so
+    each later rise of that peak on NinjaTrader's own figures (#239)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
     payload = {"peak": setup.start.phase_start + a.peak, "ts": stamp}
     if theirs is not None:

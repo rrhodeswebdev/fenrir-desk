@@ -1052,11 +1052,11 @@ def shrunk():
 def manual_loss(s, loss, day=D3):
     """A manual 1 NQ on the armed contract, closed `loss` lower within the minute (the runner's
     flatten of a position with no known stop is out meanwhile); returns the state and the rows."""
-    ts = at("09:31", day).ts
+    ts, before = at("09:31", day).ts, s.acct.balance
     s, one = core.on_fill(s, fill_at(ts + timedelta(seconds=5), qty=1))
     exit_ = {**fill_at(ts + timedelta(seconds=10), qty=-1), "price": 20000.0 - loss / 20}
     s, two = core.on_fill(s, exit_)
-    assert (s.position.qty, s.acct.balance) == (0, -loss)
+    assert (s.position.qty, s.acct.balance) == (0, before - loss)
     return s, [("fill", e.payload) for e in (*one, *two) if isinstance(e, Log) and e.kind == "fill"]
 
 
@@ -1277,6 +1277,88 @@ def test_ninjatraders_own_peak_rises_with_an_intraday_raise_the_app_takes_too():
     s, effects = core.on_account(s, account(balance=50_450.0, today=450.0), now)
     caught = nt_floor(50_450.0, floor=50_500.0, peak=52_500.0)
     assert alerts(effects) == [f"{caught} (still halted: {gap})"]
+
+
+def taken_above_the_gap(unrealized=0.0):
+    """Review of #246, non-blocking 1: #219's gap at the D1 close (NinjaTrader at 52,200, the app
+    at 50,000), then on D2 the app books +1,500, which NinjaTrader books too, and NinjaTrader books
+    -1,000 the app never sees: it closes D2 at 52,700 (`unrealized` open besides). That close is
+    no gap, so the roll takes the raise (the app's peak 2,700, floor 700), and NinjaTrader's own
+    peak rises with it. Returns the D3 state and the "halt", "peak" and "day_start" payloads."""
+    s, halts, kept = gap_rolled()
+    s, _ = manual_loss(reconciled(s), -1500.0, day=D2)
+    message = account(balance=52_700.0, today=500.0, unrealized=unrealized)
+    s = core.on_account(s, message, at("09:32", D2).ts)[0]
+    s, effects = core.on_bar(s, at("09:30", D3))
+    opens = [e.payload for e in effects if isinstance(e, Log) and e.kind == "day_start"]
+    return s, halts, kept + peaks(effects), opens
+
+
+def test_a_same_day_restart_keeps_ninjatraders_own_peak_from_a_close_the_app_takes_too():
+    """Review of #246, non-blocking 1: the roll that takes NinjaTrader's 52,700 journals it as
+    NinjaTrader's own peak too, so a same-day restart (at 52,700, before any loss) keeps its floor
+    50,700, not the gap's 50,200. Then -2,200 NinjaTrader alone books (50,500) is through it,
+    running and after that restart alike."""
+    s, halts, kept, opens = taken_above_the_gap()
+    assert (s.acct.peak, s.acct.floor, s.nt_peak) == (2700.0, 700.0, 2700.0)
+    assert kept[-1] == {"peak": 52_700.0, "ts": iso(at("09:30", D3).ts), "nt_peak": 52_700.0}
+    message = account(balance=50_500.0, today=-2200.0)
+    caught = nt_floor(50_500.0, floor=50_700.0, peak=52_700.0)
+    caught = [f"{caught} (still halted: {halts[0]['reason']})"]
+    s = reconciled(core.on_account(s, account(balance=52_700.0), at("09:30", D3).ts)[0])
+    assert alerts(core.on_account(s, message, at("09:31", D3).ts)[1]) == caught
+    s, effects = restart(52_700.0, halts, kept, opens=opens)
+    assert s.started and effects == () and s.nt_peak == 2700.0
+    s = reconciled(core.replay(s, []))
+    assert (s.acct.balance, s.acct.peak, s.acct.floor) == (1500.0, 2700.0, 700.0)
+    assert alerts(core.on_account(s, message, at("09:31", D3).ts)[1]) == caught
+
+
+def test_an_intraday_same_day_restart_keeps_ninjatraders_own_peak_from_a_raise_the_app_takes():
+    """The intraday side: the gap at 52,200, then +1,500 both book with NinjaTrader's equity at
+    52,500 (+200 of it open), a raise the app takes; it journals NinjaTrader's own peak 52,500
+    too, so after a same-day restart -2,050 NinjaTrader alone books (50,450) is still through its
+    floor 50,500. A later message no higher journals nothing."""
+    s = running(sim(trailing="intraday"))
+    s, effects = core.on_account(s, account(balance=52_200.0, today=2200.0), T.ts)
+    halts = [e.payload for e in effects if e.kind == "halt"]
+    kept = peaks(effects)
+    s, rows = manual_loss(reconciled(s), -1500.0, day=D1)
+    now = at("09:32").ts
+    s, effects = core.on_account(s, account(balance=52_300.0, today=2300.0, unrealized=200.0), now)
+    assert peaks(effects) == [{"peak": 52_500.0, "ts": iso(now), "nt_peak": 52_500.0}]
+    kept += peaks(effects)
+    assert peaks(core.on_account(s, account(balance=52_300.0, today=2300.0), now)[1]) == []
+    s, effects = restart(
+        52_300.0, halts, kept, [opened(D1, 50_000.0)], D1, "intraday", realized=2300.0
+    )
+    assert s.started and effects == () and s.nt_peak == 2500.0
+    s = reconciled(core.replay(s, rows))
+    message = account(balance=50_450.0, today=450.0)
+    caught = nt_floor(50_450.0, floor=50_500.0, peak=52_500.0)
+    assert alerts(core.on_account(s, message, at("09:33").ts)[1]) == [
+        f"{caught} (still halted: {halts[0]['reason']})"
+    ]
+
+
+def test_ninjatraders_own_peak_rises_on_its_closing_balance_not_its_equity():
+    """Review of #246, Md: open P&L NinjaTrader holds over the close is no close's figure, so its
+    own peak rises to its 52,700 balance, not its 53,200 equity (which would give a false halt at
+    a floor 500 above its own)."""
+    s, _, kept, _ = taken_above_the_gap(unrealized=500.0)
+    assert s.nt_peak == 2700.0 and kept[-1]["nt_peak"] == 52_700.0
+
+
+def test_the_drawdown_room_shown_is_the_apps_when_ninjatraders_own_is_larger():
+    """Review of #246, Mr: the status takes the smaller of the two rooms. After a later-day
+    restart under the gap halt the floors are level (200); the app books -500 NinjaTrader's last
+    message does not show yet: the app's room is 1,500, NinjaTrader's own still 2,000."""
+    _, halts, kept = gap_rolled()
+    s, _ = restart(52_200.0, halts, kept)
+    s = reconciled(core.on_account(s, account(balance=52_200.0), at("09:30", D3).ts)[0])
+    s, _ = manual_loss(s, 500.0)
+    assert core._nt_floor(s) == (2200.0, 200.0)  # NinjaTrader's own room: 2,000
+    assert core.account_status(s)["limits"]["drawdown_remaining"] == 1500.0
 
 
 def held_over_the_close(gain, loss, nt_balance, unrealized, **rules):

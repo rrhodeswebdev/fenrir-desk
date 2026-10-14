@@ -142,8 +142,9 @@ def volume_stats(live: dict, hist: dict) -> list[str]:
     lines = []
     for sym in sorted({k[0] for k in shared}):
         keys = [k for k in shared if k[0] == sym]
-        equal = sum(live[k][4] == hist[k][4] for k in keys)
-        lv, hv = sum(live[k][4] for k in keys), sum(hist[k][4] for k in keys)
+        # history volumes come back as floats; round them so float noise is not a mismatch
+        equal = sum(live[k][4] == round(hist[k][4]) for k in keys)
+        lv, hv = sum(live[k][4] for k in keys), sum(round(hist[k][4]) for k in keys)
         lines.append(f"volume {sym}: equal={equal}/{len(keys)} live={lv} hist={hv}")
     return lines
 
@@ -256,7 +257,9 @@ def cmd_compare(args: argparse.Namespace) -> None:
     short = coverage_problems(set(live) & set(hist), args.symbols, args.min_minutes)
     print(f"compared={compared} mismatches={len(problems)}")
     if compared:
-        print("   mismatches by symbol:", dict(Counter(p.split()[0] for p in problems)))
+        by_symbol = Counter(dict.fromkeys(sorted({k[0] for k in live}), 0))
+        by_symbol.update(p.split()[0] for p in problems)
+        print("   mismatches by symbol:", dict(by_symbol))
     for line in volume_stats(live, hist):
         print("  ", line)
     for p in [*short, *problems[:50]]:

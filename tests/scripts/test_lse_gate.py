@@ -85,6 +85,13 @@ def test_volume_stats_counts_equal_minutes_and_totals_per_symbol():
     ]
 
 
+def test_volume_stats_rounds_float_history_volumes():
+    key = ("NQ.F", utc(2026, 10, 8, 14, 30))
+    live = {key: (1.0, 1.0, 1.0, 1.0, 2901)}
+    hist = {key: (1.0, 1.0, 1.0, 1.0, 2901.000000001)}
+    assert gate.volume_stats(live, hist) == ["volume NQ.F: equal=1/1 live=2901 hist=2901"]
+
+
 def test_lag_stats():
     assert gate.lag_stats([0.25, 0.75, 0.5, 9.0]) == (0.625, 9.0)
 

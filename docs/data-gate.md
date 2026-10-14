@@ -51,10 +51,11 @@ Result: PASS, with a roll-date mismatch that plan 03 must handle (see below)
 Result: PASS (2026-10-13). The 2026-10-11 run below received no futures ticks. The 2026-10-13 run used the owner's own LSE key, now in `.env` on the Linux machine; that key (or its tier) is what changed, but the tier was not re-read (see below).
 - Run 2026-10-13 (Tuesday), regular hours: `live ES.F NQ.F --minutes 2` from 14:23:20 UTC (10:23 ET): `ticks=3210 (no volume: 0) lag median=0.25s p95=0.55s -> PASS` (clock NTP-synchronised), saved `data/gate/ticks-2026-10-13T142320.jsonl`.
   - `NQ.F` 1,836 ticks (30765.75–30795.0), `ES.F` 1,374 ticks (7849.75–7853.25). Every tick has `ts`, `price`, `size`, `bid`, `ask`, `symbol`; every price is on the 0.25 tick.
-  - `volume` looks like the per-trade quantity, not a running total: 1 on 2,082 of the 3,210 ticks, then 2, 3, 4 …; consecutive sizes go up and down. Inferred from the values only: history for these minutes was not yet published to compare against (ES 14:24 UTC sums to 2,901, NQ to 1,582). No tick had a missing or zero volume.
-  - `price == bid` on every tick and never `== ask`, in this file (3,210) and in the item 4 recording (28,376 read on 2026-10-13). Real trades print at both sides, so LSE's `price` may be the bid rather than the last trade (or `bid` is filled with the last trade). Spread: ES 0.25 here (0.5 on 45 of 13,175 ES ticks in the item 4 file), so ES bars stay within 1 tick either way; NQ 0.25–1.25 nearly always (0.5 on 918, 0.75 on 472 here; up to 7.0 rarely), so bid-built NQ bars may miss the 1-tick tolerance. Item 4's `compare` will tell.
-  - Tier not re-read: the socket allows one connection per key (see Client API) and the item 4 recording holds it until 2026-10-14. The tier and symbol list are in the `authenticated` message the next time the socket is free.
+  - `volume` looks like the per-trade quantity, not a running total: 1 on 2,082 of the 3,210 ticks, then 2, 3, 4 …; consecutive sizes go up and down. Inferred from the values only: history for these minutes was not yet published to compare against (ES 14:24 UTC sums to 2,901, NQ to 1,582). No tick had a missing or zero volume. Item 4 confirmed it against history.
+  - `price == bid` on every tick and never `== ask`, in this file (3,210) and in the item 4 recording (28,376 read on 2026-10-13). Real trades print at both sides, so LSE's `price` may be the bid rather than the last trade (or `bid` is filled with the last trade). Spread: ES 0.25 here (0.5 on 45 of 13,175 ES ticks in the item 4 file), so ES bars stay within 1 tick either way; NQ 0.25–1.25 nearly always (0.5 on 918, 0.75 on 472 here; up to 7.0 rarely), so bid-built NQ bars may miss the 1-tick tolerance. Item 4's `compare` showed it does not matter: no NQ minute was off by more than 1 tick.
+  - Tier not re-read: the socket allows one connection per key (see Client API), and the item 4 recording, then the #82 dry run, held it. The tier and symbol list are in the `authenticated` message the next time the socket is free.
   - Contracts streamed: `ES.F`, `NQ.F` (continuous series, as in history).
+- `stream_bars` on live data (04.3, #74), 2026-10-14 09:46–09:50 ET, after the item 4 recording had freed the socket: 8 closed bars for `NQZ26` and `ESZ26` (today's front months), 13:46–13:49 UTC, each delivered 0.14–0.37 s after its minute ended. The first bar of each was partial because the subscription started mid-minute; the live runner subscribes with `start` at the session open, so its first bars are whole.
 - Run 2026-10-11 (Sunday), Globex open (ES and NQ trade from 18:00 ET): `live ES.F NQ.F --minutes 30` from 18:10:27 ET. 0 ticks for `ES.F` and `NQ.F`, so 0 without volume; lag n/a. `data/gate/ticks-2026-10-11T221027.jsonl` is empty. The Mac idle-slept from 18:21:07 to 18:50:12 ET (`pmset -g log`), so about 10.7 minutes were actually recorded; the process was killed at 18:50 before it printed its summary (see the run note below).
 - Re-checks the same evening, Globex still open:
   - 18:53 ET, 60 s, subscribed to `ES.F`, `NQ.F`, `MES.F`, `MNQ.F`, `ESZ26`, `ESZ6`, `NQZ26`, `NQZ6`, `ES`, `NQ`, `MES`, `MNQ`, `/ES`, `/NQ`: 0 ticks and no error reply (the server ignores a symbol it does not serve).
@@ -66,11 +67,19 @@ Result: PASS (2026-10-13). The 2026-10-11 run below received no futures ticks. T
 
 ## Item 4 — A day of live bars matches historical bars
 
-Result: in progress
-- Recording started 2026-10-13 10:25 ET (`live ES.F NQ.F --minutes 1400`, systemd user unit `fenrir-gate4`), ends about 09:45 ET 2026-10-14: about 1,340 trading minutes across two sessions (the rest of Tuesday's, most of Wednesday's Globex), above the 1,242 `compare` needs. File `data/gate/ticks-2026-10-13T142537.jsonl`. Then `compare` against history.
-- `compare` passes or fails on open, high, low and close only. It also prints, per symbol, the mismatches and a `volume` line (minutes whose live and historical volumes are equal, and both totals), which checks the per-trade reading of `volume` (#17) without gating the verdict.
-- Day: `____`. Minutes compared: `____`. Mismatches beyond 1 tick: `____`.
-- Notes: ...
+Result: PASS (2026-10-14).
+- Recording: `live ES.F NQ.F --minutes 1400` from 2026-10-13 10:25 ET (systemd user unit `fenrir-gate4`) to 2026-10-14 09:45 ET, across two sessions: the rest of Tuesday's and most of Wednesday's Globex. It printed `ticks=553575 (no volume: 0) lag median=0.29s p95=0.78s -> PASS` and saved `data/gate/ticks-2026-10-13T142537.jsonl`.
+- `compare data/gate/ticks-2026-10-13T142537.jsonl --symbols ES.F NQ.F`, run 2026-10-14 09:47 ET, printed `compared=2557 mismatches=0` and `PASS`:
+
+  | Symbol | Minutes compared | Mismatches beyond 1 tick | Minutes with equal volume | Volume, live = history |
+  |---|---|---|---|---|
+  | ES.F | 1,273 | 0 | 1,273/1,273 | 810,681 |
+  | NQ.F | 1,284 | 0 | 1,284/1,284 | 338,526 |
+
+  Both symbols are above the 1,242 minutes `compare` needs. The first and last recorded minute of each symbol are dropped, and only minutes that history has published count: 55 recorded minutes per symbol were not in history yet when `compare` ran.
+- `compare` passes or fails on open, high, low and close only. It also prints the mismatches and a `volume` line for each symbol: how many minutes have equal live and historical volumes, and both totals. That line does not count towards the verdict.
+- `volume` is the per-trade quantity: summing it per minute gives exactly the historical volume in every compared minute. That settles the reading inferred from the values in Item 3.
+- `price == bid` (Item 3) does not move the bars: NQ, whose spread is often 0.5 or more, matched history within 1 tick in every minute. Whatever LSE's `price` is, its history is consistent with it to within 1 tick.
 
 ## Item 5 — LSE prices vs NinjaTrader sim fills
 
@@ -91,4 +100,4 @@ Deferred to plan 22 (needs the add-on and a sim account).
 - Items 1–2: PASS → plan 03 may run. FAIL → stop; revisit the data source (Databento is the known alternative) before plan 03.
 - Items 3–4: PASS → plans 04, 21 may run. FAIL → live trading blocked until the user picks another live source; plans 03, 05–18 continue.
 
-Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Item 3 PASS (2026-10-13, with the owner's key; 2026-10-11's `registered` tier had streamed no futures), so 04.2 may be built; live use (plans 04, 21) still needs item 4. DEC-7 (#18) is needed only if item 4 fails. Item 4 in progress: the 1,400-minute recording runs until about 09:45 ET 2026-10-14. Plans 03 and 05–18 continue.
+Decision: Items 1–2 PASS → plan 03 may run, skipping the roll-window days (option 2 above). Items 3–4 PASS (item 3 on 2026-10-13 with the owner's key, after 2026-10-11's `registered` tier had streamed no futures; item 4 on 2026-10-14, 2,557 minutes with no mismatch), so plans 04 and 21 may use LSE live and DEC-7 (#18) is not needed. Item 5 waits on plan 22 (add-on and sim account).

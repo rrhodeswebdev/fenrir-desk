@@ -45,7 +45,7 @@ Plans 01–03 and 05–08 are merged. Plan 09 is built on `feat/09-attempts-repo
 4. **Live limits.** Account starting state at arming; whether NinjaTrader balance/drawdown feeds "stricter of"; safety margin when DLL is off (no-op on every Flex account today); pin `dll_on` in `armed`; warm-up source for `Ctx.bars` and strategy state.
 5. **Add-on behaviour.** 16:40 flatten and flatten-all hit every NinjaTrader account; add-on-side flatten on lost link; partial entry fills; persist seen client ids across restarts.
 6. **Docker mounts.** Whole repo at `/app` vs the five bind mounts in SPEC.
-7. **Live data source** (only if data-gate items 3–4 fail). Item 3 passed on 2026-10-13; needed only if item 4 fails.
+7. **Live data source** (only if data-gate items 3–4 fail). Not needed: item 3 passed on 2026-10-13, item 4 on 2026-10-14.
 
 ## Task list (GitHub issue index)
 
@@ -59,8 +59,8 @@ Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links b
 - [x] #14 DEC-5 Add-on behaviour questions · ask-first
 - [x] #13 DEC-6 Docker mounts · ask-first
 - [x] #16 GATE-3 Run data-gate item 3 in market hours · S · PASS 2026-10-13
-- [ ] #17 GATE-4 Run data-gate item 4 over a full session · S · after GATE-3
-- [ ] #18 DEC-7 Live data source (if GATE-3/4 fail) · ask-first · only if GATE-4 fails
+- [x] #17 GATE-4 Run data-gate item 4 over a full session · S · PASS 2026-10-14
+- [x] #18 DEC-7 Live data source (if GATE-3/4 fail) · ask-first · not needed (GATE-4 PASS 2026-10-14)
 - [ ] #19 RULES-1 Enter Lucid Pro rules · S · ask-first
 - [ ] #20 RULES-2 Enter Lucid Direct rules · S · ask-first
 - [ ] #21 RULES-3 Enter Lucid Daily rules · S · ask-first
@@ -173,13 +173,13 @@ Issues #10–#99, grouped into milestones v1.1–v1.6, with "blocked by" links b
 - **Backtest lane:** 09 → 10 → 17; 14 needs 10 and 12.
 - **UI lane:** 11 → 12 → 13/15/16 (15 and 16 don't need 10).
 - **Broker lane:** 19 → 20 (Windows box needed for 19).
-- **Live lane:** needs the backtest, UI and broker lanes plus GATE-3 (passed 2026-10-13) and GATE-4.
+- **Live lane:** needs the backtest, UI and broker lanes plus GATE-3 (passed 2026-10-13) and GATE-4 (passed 2026-10-14).
 
 ## Risks and mitigations
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| LSE has no live futures on the current tier | Low: GATE-3 passed 2026-10-13 on the owner's key; GATE-4 pending | DEC-7 only if GATE-4 fails; `stream_bars` stays the only seam |
+| LSE has no live futures on the current tier | Low: GATE-3 passed 2026-10-13 on the owner's key; GATE-4 passed 2026-10-14 | `stream_bars` stays the only seam |
 | Claude in the terminal reaches the token, `.env` or `armed` | High: breaks the arming boundary | DEC-1 before 13.2 ships and before 23.2 |
 | Fold memory: about 2.2 GB per worker × CPUs | High: OOM in Docker, UI grids unusable | 09.2 measures; 10.4 memoizes and reuses the pool |
 | Add-on 16:40 flatten silently never runs | High: positions held past flat-by | 19.6 starts the timer first and independently |

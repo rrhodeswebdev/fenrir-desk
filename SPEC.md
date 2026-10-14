@@ -21,7 +21,7 @@ Fenrir Desk is a local-only web app where one futures prop trader uses Claude Co
 | Instruments | ES, MES, NQ, MNQ. Micros use the mini's price series. |
 | Users | Single user per install; anyone can clone and run it. No accounts or login. |
 | Strategies per account | One armed strategy per account. Different accounts can run different strategies. |
-| Market data | London Strategic Edge (LSE) for history and live bars. Data gate item 3 passed on 2026-10-13 (real-time `ES.F`/`NQ.F` on the owner's key); live trading still waits on item 4, and DEC-7 (another live source) reopens only if item 4 fails. Only `fenrir.data.lse` knows LSE. |
+| Market data | London Strategic Edge (LSE) for history and live bars. Data gate items 3 and 4 passed (2026-10-13: real-time `ES.F`/`NQ.F` on the owner's key; 2026-10-14: 2,557 live minutes matched history within 1 tick, volume exactly), so DEC-7 (another live source) is not needed. Only `fenrir.data.lse` knows LSE. |
 | Execution | NinjaTrader 8 (Windows) via a C# add-on: orders, accounts, positions only. |
 | Style | Functional core, imperative shell, everywhere. |
 | Running | `docker compose up`. Development runs natively. |
@@ -316,7 +316,7 @@ def daily_loss_limit(limit: float) -> Rule:
 
 | Risk | Mitigation |
 |---|---|
-| LSE live stops matching history, or the key's tier changes | Gate item 3 passed 2026-10-13; live use waits on item 4, DEC-7 only if it fails; fetch is the only LSE-aware code. |
+| LSE live stops matching history, or the key's tier changes | Gate items 3 and 4 passed (2026-10-13, 2026-10-14); `scripts/lse_gate.py compare` re-checks a recording; fetch is the only LSE-aware code. |
 | Lucid rules change or summaries are wrong | Rules from Lucid's site; `verified_on` staleness warning. |
 | Overfitting from many strategies on the same data | Hold-out; ranking never uses it; `holdout_gap` flag. |
 | Backtest fills better than live | Conservative fill model; dry run and sim first; journal for live vs backtest. |
@@ -329,8 +329,8 @@ def daily_loss_limit(limit: float) -> Rule:
 
 ## Open Questions
 
-1. **Live futures on LSE (gate item 3): passed on 2026-10-13.** On 2026-10-11, with Globex open, the socket sent no `ES.F`/`NQ.F` ticks: tier `registered` lists no futures in any form. On 2026-10-13, with the owner's own key, a 2-minute regular-hours run got 3,210 ticks (median lag 0.25 s, p95 0.55 s; details in `docs/data-gate.md` Item 3). DEC-7 (#18) waits on item 4 and is needed only if it fails; 04.2 may be built now. The socket allows one connection per key, so the live runner and a gate recording cannot stream at once.
-2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills) have not been run. Item 4's 1,400-minute recording (about 1,340 trading minutes across two sessions) started 2026-10-13 10:25 ET and ends about 09:45 ET 2026-10-14.
+1. **Live futures on LSE (gate item 3): passed on 2026-10-13.** On 2026-10-11, with Globex open, the socket sent no `ES.F`/`NQ.F` ticks: tier `registered` lists no futures in any form. On 2026-10-13, with the owner's own key, a 2-minute regular-hours run got 3,210 ticks (median lag 0.25 s, p95 0.55 s; details in `docs/data-gate.md` Item 3). DEC-7 (#18) is not needed: item 4 passed too (below). The socket allows one connection per key, so the live runner and a gate recording cannot stream at once.
+2. **Gate items 4–5** (live vs historical bars; LSE vs NinjaTrader fills). Item 4 passed on 2026-10-14: a 1,400-minute recording across two sessions, 2,557 minutes compared (ES.F 1,273, NQ.F 1,284), none off by more than 1 tick, volume equal in every minute (`docs/data-gate.md` Item 4). Item 5 has not been run: it needs the add-on and a sim account (plan 22).
 3. **ES 2023-03 roll** is ambiguous in the data; the fixed roll window covers it, but it isn't confirmed.
 4. **Pro, Direct and Daily rules** were entered on 2026-10-11 from Lucid's help center; automation is allowed on all three. Some of their mechanics have no schema field, so the files use conservative stand-ins named in their headers: the 60% scaling DLL (fixed DLL kept), the payout buffer (Pro, Daily) and payout profit goal (Direct), encoded through `max_pct_of_profit`; Daily's choice of end-of-day evaluation drawdown (intraday entered), its news-window hard breach and its maximum daily profit are not modelled. Direct's DLL is mandatory but only applies with `dll_on: true`, and Pro 25k cannot run with `dll_on` (no evaluation DLL). Should the schema grow fields for these (ask first)?
 5. **Fold performance** (09.2, sampled 2026-10-11 on a 16-core, 64 GB Mac; the full 3 h run was skipped). `fenrir backtest strategies/orb.py --account lucid-flex-50k --contract MNQ`: 3,386,345 NQ bars load in 12.2 s; tuning 2016-06-01 → 2025-10-09 is 2,265 attempts, hold-out 2025-10-10 → 2026-10-09 is 243. ORB risks about $20 to make $40 against a $3,000 target and $2,000 drawdown, so most attempts run to the end of the data (`no_result`); two sampled attempts took 160–170 s each, about 52 µs per bar, so about 50 CPU-hours, about 3 h wall on 16 workers. 16 spawn workers held about 24 GB RSS (largest 1.65 GB). Parent RSS was not sampled; it holds one full series while planning (about 2.2 GB, see Market data), so the total is about 26 GB. **No-go** on both thresholds: 60 s wall time and 6 GB total memory (chosen to fit a modest Docker Desktop limit). Follow-up is folded into 10.4 (#27): load once per process and cap workers to fit memory. Load is not the bottleneck, though: the fold over years of bars per attempt is.

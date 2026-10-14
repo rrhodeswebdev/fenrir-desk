@@ -558,25 +558,81 @@ def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():
     assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}  # still 0
 
 
-@pytest.mark.parametrize("lost", ["zero", "lost link"])
-def test_an_open_loss_held_over_a_close_taken_from_no_figures_still_breaches(lost):
-    """#220 review (round 3, P5): a long held unverified over the close at -1,500 open, the app
-    and NinjaTrader at 52,200; then NinjaTrader reports a zero (or the link drops again) before
-    the reconcile. The roll takes no close, but raises the floor from the app's own closing
-    balance (200, as the gap branch does) with no "peak" row, so the loss running to equity 100
-    breaches and is flattened, as on main; before, the floor stayed at the app's -1,300."""
-    s, close = held_over_the_close(2200.0, 1500.0, 52_200.0, -1500.0)
+def no_close_over_a_held_loss(lost, nt_balance=52_200.0):
+    """A long held unverified over the close at -1,500 open, the app at 52,200 and NinjaTrader's
+    last figure `nt_balance` (-1,500 open); then a zero (or the link drops again) before the
+    reconcile, and the roll. Returns the state, the roll's effects and the bar's close."""
+    s, close = held_over_the_close(2200.0, 1500.0, nt_balance, -1500.0)
     if lost == "zero":
         s, _ = core.on_account(s, account(0.0), T.ts)
     else:
         s, _ = core.on_disconnect(s, "stream closed")
     s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    return s, effects, close
+
+
+@pytest.mark.parametrize(
+    ("lost", "nt_balance"), [("zero", 52_200.0), ("zero", 51_000.0), ("lost link", 52_200.0)]
+)
+def test_an_open_loss_held_over_a_close_taken_from_no_figures_still_breaches(lost, nt_balance):
+    """#220 review (rounds 3 and 4, P5 and P4): the roll takes no close, but raises the floor
+    from the app's own closing balance (200, as the gap branch does) with no "peak" row, so the
+    loss running to equity 100 breaches and is flattened. With NinjaTrader's last figure 51,000,
+    below the app's balance, the raise from it gives only -1,000: the app's own balance sets 200.
+    Before, the lost link's floor stayed at the app's -1,300."""
+    s, effects, close = no_close_over_a_held_loss(lost, nt_balance)
     assert s.halted == core.NO_CLOSE and peaks(effects) == [] and sends(effects) == []
     assert (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
     low = close - 30.0  # equity 100
     s, effects = core.on_bar(s, bar("09:31", close, close, low, low, D2))
     assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
     assert sends(effects) == [Flatten]
+
+
+@pytest.mark.parametrize("lost", ["zero", "lost link"])
+def test_a_restart_after_a_no_close_roll_keeps_its_floor(lost):
+    """#220 review (round 4, P12/P13): a no-close roll journals no "peak" row, so a restart later
+    that day rebuilt its peak from the pins and the earlier rows (floor -2,000; main, from a stale
+    "peak" row, 200). Under the restored "confirm balances", today's journalled open, which the
+    roll wrote with the floor it raised, is a lower bound on the peak: the restart's floor is
+    the running one, still with no "peak" row, so a later restart asks again."""
+    s, effects, close = no_close_over_a_held_loss(lost)
+    assert s.acct.floor == 200.0
+    rows = [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    halts, opens = ([p for k, p in rows if k == kind] for kind in ("halt", "day_start"))
+    assert core.NO_CLOSE in [h["reason"] for h in halts] and len(opens) == 1
+    setup = replace(sim(), start=Start(50_000.0, 50_000.0, 52_200.0), day_start=None)
+    now = bar("10:00", close, close, close, close, D2).ts
+    r, out = core.start(setup, now, halts, [], opens)
+    assert (r.halted, r.acct.peak, r.acct.floor, r.session_floor) == (
+        core.NO_CLOSE,
+        2200.0,
+        200.0,
+        200.0,
+    )
+    assert peaks(out) == []
+
+
+def test_the_no_close_floor_trails_the_apps_balance_under_a_gap_halt_too():
+    """#220 review (round 4, M12): a gap halt at the D2 roll with a long of 2 held, whose Flatten
+    fills only 1 (at +600) before the link drops again over the next close. The D3 roll's
+    "confirm balances" is a no-op under the gap halt, but its floor still trails the app's own
+    balance, 600 (floor -1,400), above the close's equity, 400, which the rules' own trail takes."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=2))
+    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19990.0, 19990.0))
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(balance=52_000.0, unrealized=-400.0), T.ts)
+    s, effects = core.on_bar(s, bar("09:30", 19990.0, 19990.0, 19990.0, 19990.0, D2))
+    assert s.halted.startswith(core.GAP) and sends(effects) == [Flatten]
+    gap = s.halted
+    part = {**fill_at(at("09:30", D2).ts + timedelta(seconds=5), qty=-1), "price": 20030.0}
+    s, _ = core.on_fill(s, part)
+    assert (s.acct.balance, s.position.qty) == (600.0, 1)
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, effects = core.on_bar(s, bar("09:30", 19990.0, 19990.0, 19990.0, 19990.0, D3))
+    assert s.halted == gap and peaks(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (600.0, -1400.0)
 
 
 def test_a_zero_at_the_roll_replaces_a_day_halt_with_confirm_balances():

@@ -289,6 +289,11 @@ def start(
                 until = h["until"] and date.fromisoformat(h["until"])
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
+    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
+    if day is not None and trailing == "end_of_day" and any(h["reason"] == NO_CLOSE for h in halts):
+        # a roll that took no close journals no "peak" row (#220), but raised the floor, and the
+        # open it journalled holds that peak: never looser than it ran (no row: a restart asks)
+        s = replace(s, acct=_raised(setup, s.acct, day.peak))
     refused = changed_since_arming(setup)
     if refused:
         s, more = halt(replace(s, started=False), refused)
@@ -305,7 +310,6 @@ def start(
         return halt(replace(s, started=False), reason)
     if opened:  # so a later restart today opens the day at the same figures
         out += (*opened, _open_log(acct.day, setup.day_start, now))
-    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
     if begin and trailing == "end_of_day" and _missed_close(a.armed_at, peaks, acct.day):
         s, more = halt(s, CONFIRM_BALANCES)
         return s, out + more

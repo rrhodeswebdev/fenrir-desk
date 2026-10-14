@@ -1,5 +1,8 @@
 import os
+import signal
+import sqlite3
 import stat
+import threading
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -13,7 +16,7 @@ from fenrir.live import journal
 from fenrir.live.arming import Armed, insert_armed
 from fenrir.rules.loader import list_accounts
 from fenrir.server import isolation
-from fenrir.server.app import create_app
+from fenrir.server.app import STOP_GRACE, create_app, terminator
 from fenrir.server.auth import SESSION_COOKIE
 from fenrir.server.jobs import Job, JobItem
 from fenrir.server.routes.settings import restart_refusals
@@ -388,11 +391,32 @@ def test_restart_while_armed_is_409(image, env):
     assert calls == [] and client.app.state.restarting is False
 
 
+@pytest.mark.parametrize(
+    ("db", "error"),
+    [
+        (b"not a database, just bytes " * 100, "file is not a database"),
+        (None, "no such table: armed"),  # a real sqlite file without the table
+    ],
+)
+def test_an_unreadable_armed_table_is_500_and_never_restarts(image, env, db, error):
+    client, calls = image
+    path = env[1].parent / "fenrir.db"
+    if db is None:
+        with closing(sqlite3.connect(path)) as conn:
+            conn.execute("CREATE TABLE other (x)")
+    else:
+        path.write_bytes(db)
+    r = client.post("/api/settings/restart", headers=WRITE)
+    assert r.status_code == 500 and r.json()["detail"] == f"cannot read the armed accounts: {error}"
+    assert calls == [] and client.app.state.restarting is False
+
+
 def test_restart_during_a_pull_or_a_backtest_is_409(image):
     client, calls = image
     state = client.app.state
     state.pull = _Busy(pull="running")
     assert "data pull" in client.post("/api/settings/restart", headers=WRITE).json()["detail"]
+    assert state.restarting is False  # a refusal clears it: arming works again
     state.pull = _Busy()
     item = JobItem("strategies/orb.py", AID, "MESM6")
     state.jobs = _Busy(jobs=[Job("j1", "2026-10-14T00:00:00Z", False, (item,))])
@@ -415,6 +439,29 @@ def test_restart_needs_the_session_and_our_origin(image):
     client.cookies.clear()
     assert client.post("/api/settings/restart", headers=WRITE).status_code == 401
     assert calls == []
+
+
+def test_pull_and_job_submit_refuse_while_restarting(env):
+    client = env[0]
+    client.app.state.restarting = True
+    r = client.post("/api/data/pull", headers=WRITE)
+    assert r.status_code == 409 and r.json()["detail"] == "the server is restarting"
+    job = {"strategies": ["orb.py"], "accounts": [AID], "contracts": None}
+    r = client.post("/api/backtests/jobs", json=job, headers=WRITE)
+    assert r.status_code == 409 and r.json()["detail"] == "the server is restarting"
+
+
+def test_terminate_sigterms_itself_then_a_watchdog_exits_if_the_stop_hangs():
+    kills, exits, done = [], [], threading.Event()
+
+    def exit_now(code: int) -> None:
+        exits.append(code)
+        done.set()
+
+    terminator(kill=lambda pid, sig: kills.append((pid, sig)), exit_now=exit_now, grace=0.05)()
+    assert kills == [(os.getpid(), signal.SIGTERM)] and exits == []  # not before the grace
+    assert done.wait(5) and exits == [1]
+    assert STOP_GRACE == 20.0
 
 
 def test_settings_say_whether_a_restart_applies_and_works(env, monkeypatch):

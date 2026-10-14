@@ -4,7 +4,7 @@ import { renderToString } from 'react-dom/server'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api'
 import { routeTree } from '@/router'
-import { type Choices, type Settings, DLL_HELP, RESTART_LATE, RESTART_POLL_MS, restartServer } from './settings'
+import { type Choices, type Settings, DLL_HELP, RESTART_LATE, RESTART_POLL_MS, Restart, restartServer } from './settings'
 
 const settings: Settings = {
   lse_api_key: '••••0001',
@@ -84,6 +84,22 @@ describe('apply and restart', () => {
     expect(await render({ ...docker, restart_pending: true })).toMatch(/<button[^>]*>Apply and restart<\/button>/)
   })
 
+  it('keeps an empty status line there from the start, so its changes are announced', async () => {
+    const html = await render({ ...settings, can_restart: true })
+    expect(html).toMatch(/<p role="status" tabindex="-1" class="[^"]*"><\/p>/i)
+  })
+
+  it('is disabled while there are unsaved edits or a save in flight', () => {
+    const row = (unsaved: boolean) =>
+      renderToString(
+        <QueryClientProvider client={new QueryClient()}>
+          <Restart server={{ ...settings, can_restart: true, restart_pending: true }} unsaved={unsaved} />
+        </QueryClientProvider>,
+      )
+    expect(row(true)).toMatch(/<button[^>]*disabled=""[^>]*>Apply and restart<\/button>/)
+    expect(row(false)).not.toMatch(/disabled=""[^>]*>Apply and restart/)
+  })
+
   it('natively says to restart the server, with no button', async () => {
     expect(await render()).not.toContain('Restart the server to apply')
     const html = await render({ ...settings, restart_pending: true })
@@ -127,6 +143,7 @@ describe('apply and restart', () => {
     let t = 0
     const e = await restartServer(async (ms) => void (t += ms), () => t).catch((x: unknown) => x)
     expect(e).toEqual(new Error(RESTART_LATE))
+    expect(RESTART_LATE).not.toContain('`') // plain text in the error line
     expect(t).toBeGreaterThanOrEqual(60_000)
   })
 })

@@ -16,7 +16,6 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from starlette.datastructures import State
 
 from fenrir.backtest.run import AccountChoice, load_account_choices
-from fenrir.live import journal
 from fenrir.live.arming import list_armed
 from fenrir.rules.loader import list_accounts
 from fenrir.server.isolation import in_image, nested_git_in_image
@@ -163,12 +162,16 @@ async def put_settings(request: Request):
 
 
 def _armed(settings: Settings) -> list[str]:
+    """The armed accounts, read under sqlite's write lock: an arm in flight commits first (and is
+    seen here) or takes the lock after `restarting` is set, and refuses."""
     path = settings.private_dir / "fenrir.db"
-    if not path.exists():
+    if not path.exists():  # an arm creates the file before it checks `restarting`
         return []  # nothing was ever armed
     try:
-        with closing(journal.open_ro(path)) as conn:
-            return [a.account for a in list_armed(conn)]
+        # not journal.open_db: that would create a missing `armed` table rather than refuse
+        with closing(sqlite3.connect(path, timeout=10)) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return [a.account for a in list_armed(conn)]  # the close rolls back
     except sqlite3.Error as e:  # fail closed: an unreadable `armed` never restarts
         raise HTTPException(status_code=500, detail=f"cannot read the armed accounts: {e}") from e
 
@@ -176,18 +179,26 @@ def _armed(settings: Settings) -> list[str]:
 @router.post("/restart")
 async def restart(request: Request, background: BackgroundTasks) -> Response:
     state = request.app.state
-    armed = await asyncio.to_thread(_armed, state.settings)
-    # no await from here on: two POSTs never both pass `restarting`
-    why = restart_refusals(
-        in_image(),
-        state.restarting,
-        armed,
-        state.pull.status()["state"] == "running",
-        any(unfinished(j) for j in state.jobs.jobs()),
-    )
-    if why:
+    if why := restart_refusals(in_image(), state.restarting, [], False, False):
         raise HTTPException(status_code=409, detail=" ".join(why))
+    # set before the reads, with no await since the check: arm, pull and job submit refuse from
+    # here on, and a second POST is "already restarting"
     state.restarting = True
+    try:
+        armed = await asyncio.to_thread(_armed, state.settings)
+        why = restart_refusals(
+            True,
+            False,
+            armed,
+            state.pull.status()["state"] == "running",
+            any(unfinished(j) for j in state.jobs.jobs()),
+        )
+    except BaseException:
+        state.restarting = False
+        raise
+    if why:
+        state.restarting = False
+        raise HTTPException(status_code=409, detail=" ".join(why))
     # runs after the response is sent; uvicorn's SIGTERM shutdown runs the lifespan's stop()
     background.add_task(state.terminate)
     return Response(status_code=202)

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createRoute } from '@tanstack/react-router'
-import { useId, useState, type ReactNode } from 'react'
+import { useId, useRef, useState, type ReactNode } from 'react'
 import { apiFetch } from '@/api'
 import { Page } from '@/components/page'
 import {
@@ -121,7 +121,7 @@ function SaveRow({ dirty, save, errors, note, action }: { dirty: boolean; save: 
 
 export const RESTART_POLL_MS = 500
 export const RESTART_TIMEOUT_MS = 60_000
-export const RESTART_LATE = 'The server did not answer again within 60 s: check `docker compose logs`, or start it with `docker compose up`.'
+export const RESTART_LATE = 'The server did not answer again within 60 s: check docker compose logs, or start it with docker compose up.'
 export const RESTART_TEXT =
   'The server stops and Docker starts it again, usually within a few seconds, with the saved settings. The Workbench terminal session closes; this page stays signed in.'
 
@@ -130,7 +130,8 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 /** `GET /api/health` answered ok; refused, failed or hung (2 s) is false. */
 async function healthy(): Promise<boolean> {
   try {
-    return (await fetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(2000) })).ok
+    await apiFetch('/api/health', { cache: 'no-store', signal: AbortSignal.timeout(2000) })
+    return true
   } catch {
     return false
   }
@@ -149,10 +150,13 @@ export async function restartServer(wait = sleep, now = Date.now): Promise<void>
   }
 }
 
-/** "Apply and restart" in Docker once the secrets file changed; natively a line saying to restart the server. */
-function Restart({ server }: { server: Settings }) {
+/** "Apply and restart" in Docker once the secrets file changed, disabled while `unsaved` (edits or a save in flight);
+ * natively a line saying to restart the server. */
+export function Restart({ server, unsaved }: { server: Settings; unsaved: boolean }) {
   const qc = useQueryClient()
   const [done, setDone] = useState(false)
+  const status = useRef<HTMLParagraphElement>(null)
+  const confirmed = useRef(false)
   const restart = useMutation({
     mutationFn: () => restartServer(),
     // pending ("Restarting…") until the settings are read back, so the button never flashes back meanwhile
@@ -163,37 +167,46 @@ function Restart({ server }: { server: Settings }) {
     },
   })
   if (!server.can_restart) return server.restart_pending ? <p className="text-ink-2">Restart the server to apply the saved settings.</p> : null
-  if (restart.isPending)
-    return (
-      <p role="status" className="text-ink-2">
-        Restarting…
-      </p>
-    )
-  if (!server.restart_pending)
-    return done ? (
-      <p role="status" className="text-ink-2">
-        Restarted with the saved settings.
-      </p>
-    ) : null
+  const text = restart.isPending ? 'Restarting…' : done && !server.restart_pending ? 'Restarted with the saved settings.' : ''
   return (
     <>
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button>Apply and restart</Button>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Apply and restart</AlertDialogTitle>
-            <AlertDialogDescription>{RESTART_TEXT}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogAction variant="caution" onClick={() => restart.mutate()}>
-              Restart the server
-            </AlertDialogAction>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+      {(server.restart_pending || restart.isPending) && (
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button disabled={unsaved || restart.isPending}>Apply and restart</Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent
+            className="border-ember"
+            onCloseAutoFocus={(e) => {
+              if (!confirmed.current) return // Cancel: back to the trigger
+              confirmed.current = false
+              e.preventDefault()
+              status.current?.focus()
+            }}
+          >
+            <AlertDialogHeader>
+              <AlertDialogTitle>Apply and restart</AlertDialogTitle>
+              <AlertDialogDescription>{RESTART_TEXT}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogAction
+                variant="caution"
+                onClick={() => {
+                  confirmed.current = true
+                  restart.mutate()
+                }}
+              >
+                Restart the server
+              </AlertDialogAction>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+      {/* always there, so a screen reader announces each change of its text; focused after the confirm */}
+      <p ref={status} role="status" tabIndex={-1} className="text-ink-2 outline-none">
+        {text}
+      </p>
       {restart.error != null && (
         <p role="alert" className="basis-full text-red">
           {errorText(restart.error)}
@@ -248,7 +261,7 @@ function SettingsForm({ server }: { server: Settings }) {
         save={save}
         errors={errors}
         note={server.can_restart ? 'Saved to the secrets file; applies after Apply and restart.' : 'Saved to the secrets file; applies after a server restart.'}
-        action={<Restart server={server} />}
+        action={<Restart server={server} unsaved={draft !== null || save.isPending} />}
       />
       <Section legend="Connections">
         {text('nt_url', 'NinjaTrader address')}

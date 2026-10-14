@@ -101,7 +101,7 @@ def in_image() -> bool:
 
 def nested_git_in_image() -> list[str]:
     """`nested_git(/app)` in the image; `[]` natively, where the terminal is the user anyway."""
-    return nested_git(APP_ROOT) if os.environ.get("FENRIR_BIND_ALL") == "1" else []
+    return nested_git(APP_ROOT) if in_image() else []
 
 
 def as_user(user: str | None) -> tuple[dict[str, str], dict[str, Any]]:

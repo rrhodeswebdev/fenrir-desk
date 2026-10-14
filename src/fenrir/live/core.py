@@ -67,6 +67,13 @@ CONFIRM_GAP = GAP + (
     " a fill while the server was down); any position the app holds is flattened, and the whole"
     " account while NinjaTrader shows open P&L; re-arm with the confirmed balances"
 )
+# NinjaTrader's own equity at or below the floor from its peak a gap halt did not take (#239)
+NT_FLOOR = GAP + (
+    " halt journalled NinjaTrader's peak {peak:.2f}: NinjaTrader's equity {equity:.2f} is at or"
+    " below its own drawdown floor {floor:.2f} from that peak (its account is through the"
+    " drawdown limit there); any position the app holds is flattened, and the whole account while"
+    " NinjaTrader shows open P&L; re-arm with the confirmed balances"
+)
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
@@ -157,9 +164,11 @@ class RunnerState:
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
     # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
     warming: str | None = None
-    # NinjaTrader's intraday peak an intraday gap halt did not take, relative to phase start, as
-    # last journalled in a "peak" row's "nt_peak": a later-day restart takes it (#225)
+    # NinjaTrader's highest peak a gap halt did not take, relative to phase start, as journalled
+    # in "peak" rows' "nt_peak": a later-day restart takes it (#225); a same-day one restores it,
+    # and NinjaTrader's own equity is checked against the floor from it (#239)
     nt_peak: float | None = None
+    nt_floored: bool = False  # that check halted (or alerted) this run: once per run (#239)
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +289,10 @@ def start(
     s = RunnerState(
         setup, acct, FLAT, (), (), acct.day_start_balance, floor, now, unreconciled=waiting
     )
+    # NinjaTrader's own floor is checked on its own equity on every account message (#239), also
+    # after a same-day restart, which keeps the app's peak below it
+    if nt_peaks := [p["nt_peak"] for p in peaks if "nt_peak" in p] if begin else []:
+        s = replace(s, nt_peak=max(nt_peaks) - begin.phase_start)
     for h in halts:  # replayed in order, so open-ended halts and breaches win as they did live
         match h["kind"]:  # first the pauses that only `resolve` lifts
             case "reconcile":
@@ -484,8 +497,9 @@ def on_fill(s: RunnerState, fill: Mapping[str, Any]) -> Step:
 def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Step:
     """One add-on `account` message for this account (validated by fenrir.bridge.client); dry
     runs ignore them. A sim/live mismatch halts until disarmed; otherwise the figures feed the
-    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a). A
-    balance at or below 0 is not a figure yet: the last figures stand."""
+    stricter-of checks (DEC-4b), and an intraday peak follows NinjaTrader's equity (DEC-4a); then
+    NinjaTrader's own equity against its own floor (`_nt_floored`, #239). A balance at or below 0
+    is not a figure yet: the last figures stand."""
     mode = s.setup.armed.mode
     if mode == "dry":
         return s, ()
@@ -523,9 +537,42 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
                 # hold back; only on the message that raised it, so a refused send never storms
                 s, more = _flatten(s, now, f"g{now.timestamp()}", s.halted)
                 out += more
-            return s, out
+            return _nt_floored(s, now, out)
         s = replace(s, acct=raised)
-    return s, _peaked(was, s, now)
+    return _nt_floored(s, now, _peaked(was, s, now))
+
+
+def _nt_floor(s: RunnerState) -> tuple[float, float] | None:
+    """NinjaTrader's own equity (balance plus open P&L) and the floor from its peak a gap halt did
+    not take (`nt_peak`, a figure of NinjaTrader's, so never above its real peak), relative to
+    phase start, or None while either is unknown (#239): NinjaTrader's figures against its own
+    floor, never the app's figures against it (#221's M5, #222)."""
+    nt = s.nt
+    if nt is None or s.nt_peak is None:
+        return None
+    floor = _floor(s.setup.rules, s.acct.phase, s.nt_peak)
+    return nt.balance + nt.unrealized_pnl - s.setup.start.phase_start, floor
+
+
+def _nt_floored(s: RunnerState, now: datetime, out: tuple[Log | Send, ...]) -> Step:
+    """`out`, then, once per run, the halt when NinjaTrader's own equity is at or below its own
+    floor (`_nt_floor`; #239): a gap halt, never a breach (22.2), so the gap halt it comes under
+    holds and an alert says it; and the flatten on this message of a position the app holds or
+    NinjaTrader's open P&L, as the gap halt's (#235). Never on a refused start, whose rules may
+    not be the armed ones (#240)."""
+    figures = None if s.nt_floored or not s.started else _nt_floor(s)
+    if figures is None or not at_or_below(*figures):
+        return s, out
+    equity, floor = figures
+    base = s.setup.start.phase_start
+    reason = NT_FLOOR.format(peak=base + s.nt_peak, equity=base + equity, floor=base + floor)
+    s, more = halt(replace(s, nt_floored=True), reason)
+    if not more:  # another open-ended halt holds (the gap halt that journalled that peak)
+        more = (Log("alert", {"message": f"{reason} (still halted: {s.halted})"}),)
+    if (s.position.qty or round(s.nt.unrealized_pnl, 2) != 0) and not s.exiting:
+        s, sent = _flatten(s, now, f"n{now.timestamp()}", reason)
+        more += sent
+    return s, (*out, *more)
 
 
 def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
@@ -919,7 +966,10 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "nt_balance": None if s.nt is None else s.nt.balance,  # NinjaTrader's, absolute
         "today_pnl": v.today_pnl,
         "limits": {
-            "drawdown_remaining": v.drawdown_remaining,
+            # at most NinjaTrader's own room to its own floor, while that is known (#239)
+            "drawdown_remaining": v.drawdown_remaining
+            if (theirs := _nt_floor(s)) is None
+            else min(v.drawdown_remaining, theirs[0] - theirs[1]),
             "drawdown_max": p.max_drawdown.amount,
             "daily_loss_remaining": v.daily_loss_remaining,
             "daily_loss_max": p.daily_loss_limit,
@@ -1154,6 +1204,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 # by more than the gap: an open loss it holds still breaches (review of #221)
                 acct = _raised(s.setup, acct, base + acct.balance)
                 theirs = raised.peak  # journalled next to it: a later-day restart takes it (#225)
+                # kept, as the intraday one is: NinjaTrader's own floor is checked from it (#239)
+                s = replace(s, nt_peak=theirs if s.nt_peak is None else max(theirs, s.nt_peak))
             else:
                 acct, theirs = raised, None
             # every roll, raised or not: see _missed_close

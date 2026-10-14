@@ -478,6 +478,8 @@ async def test_an_intraday_gap_under_a_strategy_error_halts_alerts_and_flattens(
         assert s.halted.startswith("confirm balances: a gap on NinjaTrader's account figures: ")
         assert (s.halt_kind, s.acct.floor) == (None, -2000.0)
         assert [h["reason"] for h in halts(conn)] == [error, s.halted]
+        # NinjaTrader's raised peak is journalled on this path too (review of #238): 52,700 - 500
+        assert [r.payload.get("nt_peak") for r in journal.rows(conn, kind="peak")] == [52_200.0]
         alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
         assert f"{s.halted} (was halted: {error})" in alerts
         assert flattens(fake, sent) == [one]

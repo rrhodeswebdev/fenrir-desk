@@ -905,17 +905,24 @@ class LiveHub:
         before a re-arm subscribes again; it needs no hub lock to end, so a caller holding it
         never deadlocks), then show it down without an outage. `today` goes with it: a re-arm's
         feed replays the day from the open, so the bars missed meanwhile come back, and none of
-        a day gone by is kept while nothing is armed."""
+        a day gone by is kept while nothing is armed. The lock is held through the close
+        handshake (up to websockets' close timeout on a half-open link): nothing is armed."""
         feed, self._feed = self._feed, None
         feed.cancel()
         try:
             await asyncio.wait({feed})  # never raises the feed's CancelledError, only the caller's
-        finally:  # the caller cancelled too: the feed ends all the same
+        except asyncio.CancelledError:
+            # the caller was cancelled: still wait for the close, or the lock would be released
+            # with the old socket open and a re-arm's feed would open a second one
+            await asyncio.wait({feed})
+            raise
+        finally:
             self.lse_connected = False
             self.lse_error = self.lse_retry_at = None
             self.replaying = set()
             self.today = {}
-        self._tasks.remove(feed)  # after: a stop() cancelling this wait still gathers the feed
+            if feed.done():  # else (cancelled twice) a stop() still gathers it
+                self._tasks.remove(feed)
 
     async def _start(self, a: Armed, now: datetime) -> None:
         try:

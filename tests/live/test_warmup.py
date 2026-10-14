@@ -843,11 +843,15 @@ class FakeFeed:
     """A stand-in for `stream_bars` (no LSE): each subscription is counted, yields what `bars`
     is given, and records that it was closed (the socket released) in `closed`."""
 
-    def __init__(self, stopped: FeedStopped | None = None):
+    def __init__(self, stopped: FeedStopped | None = None, slow_close: bool = False):
         self.subscribed = 0
+        self.closing = 0
         self.closed = 0
         self.bars: asyncio.Queue[Bar] = asyncio.Queue()
         self.stopped = stopped
+        self.release = asyncio.Event()  # a slow close (the close handshake) ends on set()
+        if not slow_close:
+            self.release.set()
 
     async def __call__(self, settings, contracts, **kw):
         self.subscribed += 1
@@ -857,6 +861,8 @@ class FakeFeed:
             while True:
                 yield await self.bars.get()
         finally:
+            self.closing += 1
+            await self.release.wait()
             self.closed += 1
 
 
@@ -957,11 +963,31 @@ async def test_the_feed_waiting_for_the_hub_lock_stops(hub, conn, tmp_path, monk
     async with asyncio.timeout(5):
         async with hub._lock:  # as a tick holds it: the feed's bar waits on it
             feed.bars.put_nowait(live_bar(0))
-            await until(lambda: feed.bars.empty())
-            await asyncio.sleep(0.01)
+            await until(lambda: len(hub._lock._waiters or ()) == 1)  # the feed's handle_bar
             await hub._sync(T0)
     feed_stopped(hub, feed, task)
-    assert hub.today == {}  # the bar waiting on the lock never got in
+
+
+@pytest.mark.anyio
+async def test_a_stop_whose_caller_is_cancelled_still_waits_for_the_close(
+    hub, conn, tmp_path, monkeypatch
+):
+    # review of #256: released early, the lock would let a re-arm subscribe a second socket
+    feed = FakeFeed(slow_close=True)
+    await fed(hub, conn, tmp_path, monkeypatch, feed)
+    task = hub._feed
+    arming.disarm(conn, "Sim101", T0)
+    async with asyncio.timeout(5):
+        caller = asyncio.create_task(hub.tick(T0))
+        await until(lambda: feed.closing == 1)
+        caller.cancel()
+        await asyncio.sleep(0.05)
+        assert not caller.done() and hub._lock.locked()  # still waiting for the close
+        feed.release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+    feed_stopped(hub, feed, task)
+    assert not hub._lock.locked()
 
 
 @pytest.mark.anyio

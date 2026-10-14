@@ -310,8 +310,9 @@ def start(
                 if until is None or until >= acct.day:  # a day halt from an earlier day has lifted
                     s, _ = _halt(s, h["reason"], h["kind"], until)
     refused = changed_since_arming(setup)
-    if refused:  # its raise is not journalled either: no "peak" row from it (#241, `_peaked`)
-        return halt(replace(s, started=False), refused)
+    if refused:  # its raise only under the armed rules, as `_peaked` (#241)
+        s, more = halt(replace(s, started=False), refused)
+        return s, (out if _armed_rules(setup) else ()) + more
     if a.mode != "dry" and setup.start is None:
         reason = "sim and live need the NinjaTrader start and peak balances (DEC-4a)"
         return halt(replace(s, started=False), reason)
@@ -1251,14 +1252,21 @@ def _raised(setup: Setup, a: AccountState, top: float) -> AccountState:
 
 
 def _peaked(was: RunnerState, s: RunnerState, ts: datetime) -> tuple[Log, ...]:
-    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it. Never
-    on a refused start, whose figures are not the account's (#241): under an end_of_day arming a
-    row is read as a roll taken (`_missed_close`)."""
+    """A "peak" row when sim or live raised the peak (intraday): a restart starts from it. Only
+    under the armed rules (`_armed_rules`, #241)."""
     if s.setup.armed.mode == "dry" or s.setup.start is None or s.acct.peak <= was.acct.peak:
         return ()
-    if not s.started:
+    if not _armed_rules(s.setup):
         return ()
     return (_peak_log(s.setup, s.acct, ts),)
+
+
+def _armed_rules(setup: Setup) -> bool:
+    """Whether `setup.rules` are the rules file armed (pinned, unchanged): always for a start that
+    ran; for a refused one (#241) only when another pinned input caused it. A refused start with
+    other rules journals no "peak" row: their trailing rule may not be the armed one, and under an
+    end_of_day arming any row reads as a roll taken (`_missed_close`)."""
+    return setup.rules_hash == setup.armed.rules_hash
 
 
 def _gap_peaked(
@@ -1266,9 +1274,9 @@ def _gap_peaked(
 ) -> Step:
     """Under an intraday gap halt: `out`, then a "peak" row when the app's peak rose or
     NinjaTrader's `theirs` (relative), not taken, rose above the last one journalled, with it as
-    "nt_peak" (#225); a later message at or below it journals nothing. Never on a refused start
-    (#241), as `_peaked`."""
-    if not s.started:
+    "nt_peak" (#225); a later message at or below it journals nothing. Only under the armed
+    rules, as `_peaked` (#241)."""
+    if not _armed_rules(s.setup):
         return s, out
     if s.nt_peak is not None and theirs <= s.nt_peak:
         return s, out + _peaked(was, s, ts)

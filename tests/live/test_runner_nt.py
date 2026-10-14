@@ -1165,6 +1165,34 @@ def test_a_refused_start_flattens_the_position_it_holds_once(changed):
     assert (s.position.qty, sends(effects), s.halted) == (0, [], refused)
 
 
+def test_the_refusal_flattens_before_flat_by_does():
+    """Its reason and alert come first, also on a bar past flat-by (16:40 here)."""
+    s = refused_long(REFUSALS["rules"])
+    why = refused_why(s)
+    s, effects = core.on_bar(s, at("16:40"))
+    assert [a["reason"] for a in actions(effects)] == [why]
+    assert alerts(effects) == [f"flattening: {why}"]
+
+
+def test_a_start_below_the_liquidation_level_flattens_what_it_adopts():
+    """The other start that does not start (started false, its figures dropped) runs no
+    strategy either: the same flatten."""
+    s, _ = first_start(48_000.0, -2000.0)
+    s, _ = core.on_reconcile(s, INSTRUMENT, HELD, HELD_STOP, T.ts + timedelta(seconds=30))
+    why = refused_why(s)
+    assert not s.started and why.startswith("position 1 held by a refused start: confirm balances")
+    s, effects = core.on_bar(s, at("09:31"))
+    assert sends(effects) == [Flatten] and [a["reason"] for a in actions(effects)] == [why]
+
+
+def test_a_running_account_halted_on_a_changed_input_is_not_flattened():
+    """The hub halts a running account whose pinned input changed (`_pinned`): its strategy
+    still steps, so its exits still run, and nothing flattens it; a restart refuses it."""
+    s, _ = core.halt(held_long(), "rules file changed since arming; re-arm")
+    s, effects = core.on_bar(s, at("09:31"))
+    assert s.started and sends(effects) == []
+
+
 @pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
 def test_a_breach_never_replaces_a_refused_start(changed):
     """C2 of PR #240: a breach is read from the same figures as a gap, which are not the
@@ -1207,6 +1235,15 @@ def test_a_refused_start_journals_no_peak_row(changed):
     )
     assert peak_rows(up) == [[50_300.0], [50_600.0], [50_900.0]]
     assert peak_rows(replace(up, **changed)) == [[], [], []]
+
+
+@pytest.mark.parametrize("changed", REFUSALS.values(), ids=REFUSALS)
+def test_a_refused_start_journals_no_peak_row_on_a_gap_either(changed):
+    """An account message that would be a gap halt (which keeps the refusal, #240) journals no
+    row either, not of NinjaTrader's peak the gap did not take."""
+    s, _ = core.start(replace(sim(trailing="intraday"), **changed), T.ts)
+    _, effects = core.on_account(reconciled(s), account(balance=52_100.0, today=2100.0), T.ts)
+    assert kinds(effects) == []
 
 
 def test_a_refused_starts_raise_never_hides_a_missed_close():

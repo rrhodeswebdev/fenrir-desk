@@ -446,7 +446,8 @@ def test_a_first_balance_at_or_below_the_liquidation_level_cannot_start():
     assert kinds(effects) == ["halt"] and not s.started and s.halt_kind is None
     assert s.halted == (
         "confirm balances: NinjaTrader's balance 48000.00 is at or below the liquidation level"
-        " 48000.00 from the armed balances; re-arm with the confirmed balances"
+        " 48000.00 from the armed balances and the journalled peaks; re-arm with the confirmed"
+        " balances"
     )
     s, effects = core.on_bar(core.on_account(s, account(48_000.0), T.ts)[0], T)
     assert s.halt_kind is None and "halt" not in kinds(effects)  # never a breach
@@ -483,11 +484,280 @@ def test_a_balance_at_or_below_zero_is_not_a_figure(balance):
     figures stand, so no false safety-margin halt (review of #217, NB2)."""
     s = running(sim(), account(50_400.0))
     s2, effects = core.on_account(s, account(balance), T.ts)
-    assert effects == () and s2.nt == s.nt == core.NtAccount(50_400.0, 0.0, 0.0)
+    assert kinds(effects) == ["alert"]  # #220: no longer silent
+    assert s2.nt == s.nt == core.NtAccount(50_400.0, 0.0, 0.0)
     s2, effects = core.on_bar(s2, at("09:31"))
     assert s2.halted is None and "halt" not in kinds(effects)
     halted, _ = core.on_account(s, account(balance, is_sim=False), T.ts)
     assert halted.halted.startswith("mode mismatch: ")  # the mode is still checked
+
+
+def test_a_zero_balance_while_running_shows_a_condition_and_alerts_once_per_run():
+    """#220: an ignored balance at or below 0 is no longer silent. While it lasts the account has
+    a "figures" condition, a pause like the stale and drift ones (owner decision: no new entries),
+    and the run alerts once, however often it comes back."""
+    s = running(sim(), account(50_400.0))
+    figures = {"kind": "figures", "reason": core.NO_BALANCE}
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert [(e.kind, e.payload) for e in effects] == [("alert", {"message": core.NO_BALANCE})]
+    status = core.account_status(s)
+    assert status["conditions"] == [figures]
+    assert (status["halted"], status["halt_kind"], status["halt_reason"]) == (
+        True,
+        "figures",
+        core.NO_BALANCE,
+    )
+    assert status["nt_balance"] == 50_400.0
+    s, effects = core.on_account(s, account(-5.0), T.ts)
+    assert effects == () and core.conditions(s) == [figures]
+    s, _ = core.on_account(s, account(50_300.0), T.ts)
+    assert core.conditions(s) == [] and s.nt.balance == 50_300.0
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert effects == () and core.conditions(s) == [figures]  # one alert per run
+    s, _ = core.halt(s, "strategy error")
+    assert core.conditions(s) == [{"kind": None, "reason": "strategy error"}, figures]
+    again, effects = core.on_account(running(sim(), account(50_400.0)), account(0.0), T.ts)
+    assert kinds(effects) == ["alert"]  # a new run alerts again
+
+
+def test_a_zero_balance_alerts_once_per_run_across_the_day_roll():
+    """#220 review (C): the day roll keeps the run's alert flag, so a zero on a later day of the
+    same run shows the condition again without a second alert."""
+    s = running(sim(trailing="intraday"), account(50_400.0))
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert kinds(effects) == ["alert"]
+    s, _ = core.on_account(s, account(50_400.0), T.ts)
+    s, _ = core.on_bar(s, at("09:30", D2))
+    assert s.acct.day == D2 and s.halted is None
+    s, effects = core.on_account(s, account(0.0), at("09:31", D2).ts)
+    assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
+
+
+def test_a_lost_link_clears_the_figures_condition():
+    """#220 review (B): a lost link drops NinjaTrader's figures as stale, and its zero with them,
+    so the unreconciled pause alone shows. Once relinked, a zero shows the condition again,
+    without a second alert in the run."""
+    s = running(sim(), account(50_400.0))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")
+    status = core.account_status(s)
+    assert status["conditions"] == [] and status["halt_reason"] == core.LINK_LOST
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert effects == () and core.conditions(s) == [{"kind": "figures", "reason": core.NO_BALANCE}]
+    assert core.account_status(s)["nt_balance"] is None  # no last figures: only the app's
+    s, _ = core.on_disconnect(s, "no heartbeat for 6 s")  # still unreconciled: the same outage
+    assert core.conditions(s) == []
+
+
+def test_an_end_of_day_roll_during_a_zero_balance_takes_no_close():
+    """#220 review: a balance at or below 0 at the session close is no close. The last figures
+    above 0 may be hours old, so the roll journals no "peak" row and halts with "confirm
+    balances", as with no figures at all. Its floor is never looser than main's, which raised it
+    from those last figures (51,000 here: above the app's own balance, so they set it)."""
+    s = running(sim(), account(51_000.0))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted == core.NO_CLOSE and peaks(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (1000.0, -1000.0)
+    assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}  # still 0
+
+
+def no_close_over_a_held_loss(lost, nt_balance=52_200.0):
+    """A long held unverified over the close at -1,500 open, the app at 52,200 and NinjaTrader's
+    last figure `nt_balance` (-1,500 open); then a zero (or the link drops again) before the
+    reconcile, and the roll. Returns the state, the roll's effects and the bar's close."""
+    s, close = held_over_the_close(2200.0, 1500.0, nt_balance, -1500.0)
+    if lost == "zero":
+        s, _ = core.on_account(s, account(0.0), T.ts)
+    else:
+        s, _ = core.on_disconnect(s, "stream closed")
+    s, effects = core.on_bar(s, bar("09:30", close, close, close, close, D2))
+    return s, effects, close
+
+
+@pytest.mark.parametrize(
+    ("lost", "nt_balance"), [("zero", 52_200.0), ("zero", 51_000.0), ("lost link", 52_200.0)]
+)
+def test_an_open_loss_held_over_a_close_taken_from_no_figures_still_breaches(lost, nt_balance):
+    """#220 review (rounds 3 and 4, P5 and P4): the roll takes no close, but raises the floor
+    from the app's own closing balance (200, as the gap branch does) with no "peak" row, so the
+    loss running to equity 100 breaches and is flattened. With NinjaTrader's last figure 51,000,
+    below the app's balance, the raise from it gives only -1,000: the app's own balance sets 200.
+    Before, the lost link's floor stayed at the app's -1,300."""
+    s, effects, close = no_close_over_a_held_loss(lost, nt_balance)
+    assert s.halted == core.NO_CLOSE and peaks(effects) == [] and sends(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    low = close - 30.0  # equity 100
+    s, effects = core.on_bar(s, bar("09:31", close, close, low, low, D2))
+    assert s.halted == "breach max_drawdown: equity 100.00 at or below drawdown floor 200.00"
+    assert sends(effects) == [Flatten]
+
+
+def a_zero_over_the_close_flat(nt_balance):
+    """The app flat at 0, NinjaTrader's last figure `nt_balance`, then a zero, then the roll."""
+    s = running(sim(), account(nt_balance))
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    return s, effects, 20000.0
+
+
+@pytest.mark.parametrize(
+    ("roll", "floor"),
+    [
+        (lambda: no_close_over_a_held_loss("zero"), 200.0),
+        (lambda: no_close_over_a_held_loss("lost link"), 200.0),
+        (lambda: no_close_over_a_held_loss("zero", 53_000.0), 200.0),  # a stale gap: gap halt
+        (lambda: a_zero_over_the_close_flat(51_000.0), -1000.0),  # raised from the last figure
+    ],
+    ids=["zero", "lost link", "zero, stale gap", "zero, stale figure above the app"],
+)
+def test_a_restart_after_a_no_close_roll_keeps_its_floor(roll, floor):
+    """#220 review (round 4, P12/P13): a roll that takes no close journals no "peak" row, so a
+    restart later that day rebuilt its peak from the pins and the earlier rows (floor -2,000;
+    main, from a stale "peak" row, 200). Today's journalled open, which the roll wrote with the
+    peak it raised to, is a lower bound on an end_of_day restart's peak: the restart keeps the
+    running floor and halt, still with no "peak" row, so a later restart asks again. That holds
+    under a gap halt from stale figures too (no "confirm balances" row then), and for a raise
+    from NinjaTrader's last figure above the app's balance (the open's peak, not its balance)."""
+    s, effects, close = roll()
+    assert s.halted.startswith("confirm balances: ") and s.acct.floor == floor
+    rows = [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    halts, opens = ([p for k, p in rows if k == kind] for kind in ("halt", "day_start"))
+    assert peaks(effects) == [] and len(opens) == 1
+    balance = START.phase_start + s.acct.balance
+    setup = replace(sim(), start=Start(50_000.0, 50_000.0, balance), day_start=None)
+    now = bar("10:00", close, close, close, close, D2).ts
+    r, out = core.start(setup, now, halts, [], opens)
+    assert (r.halted, r.acct.peak, r.acct.floor) == (s.halted, s.acct.peak, floor)
+    assert r.session_floor == floor and peaks(out) == []
+
+
+NO_CLOSE_ROLLS = {
+    "zero": lambda: no_close_over_a_held_loss("zero"),
+    "lost link": lambda: no_close_over_a_held_loss("lost link"),
+    "zero, stale gap": lambda: no_close_over_a_held_loss("zero", 53_000.0),
+    "zero, stale 50,700": lambda: no_close_over_a_held_loss("zero", 50_700.0),
+}
+
+
+def restart_after(roll, now, nt_balance):
+    """`start` from the roll's own journalled rows, armed before D1, NinjaTrader at
+    `nt_balance`."""
+    s, effects, close = roll()
+    rows = [(e.kind, e.payload) for e in effects if isinstance(e, Log)]
+    halts, opens = ([p for k, p in rows if k == kind] for kind in ("halt", "day_start"))
+    setup = replace(sim(), start=Start(50_000.0, 50_000.0, nt_balance), day_start=None)
+    setup = armed_at(setup, at("08:00").ts)
+    r, out = core.start(setup, now, halts, [], opens)
+    return s, r, out, close
+
+
+@pytest.mark.parametrize("nt_balance", [50_150.0, 50_200.0])
+@pytest.mark.parametrize("roll", NO_CLOSE_ROLLS.values(), ids=NO_CLOSE_ROLLS.keys())
+def test_a_restart_at_or_below_a_no_close_floor_cannot_start(roll, nt_balance):
+    """#220 review (round 5, blocking): the start's liquidation check counts today's open's peak,
+    so a same-day restart with NinjaTrader at or below the running floor (200) cannot start,
+    never breaching (or flattening) on NinjaTrader's figure alone."""
+    s, r, _, close = restart_after(roll, bar("10:00", 0, 0, 0, 0, D2).ts, nt_balance)
+    assert s.acct.floor == 200.0
+    assert not r.started and r.halt_kind is None
+    r, effects = core.on_bar(r, bar("10:01", close, close, close, close, D2))
+    assert r.halt_kind != "breach" and sends(effects) == []
+
+
+@pytest.mark.parametrize(
+    ("roll", "peak"),
+    [
+        (NO_CLOSE_ROLLS["zero"], 2200.0),
+        (NO_CLOSE_ROLLS["lost link"], 2200.0),
+        (NO_CLOSE_ROLLS["zero, stale gap"], 3000.0),  # NinjaTrader's raised peak, as on main
+        (NO_CLOSE_ROLLS["zero, stale 50,700"], 2200.0),
+    ],
+    ids=NO_CLOSE_ROLLS.keys(),
+)
+def test_a_later_day_restart_keeps_a_no_close_floor(roll, peak):
+    """#220 review (round 5, NB1): down over the next roll too, so no open journalled for today:
+    the highest open journalled since arming bounds the peak, so a D3 restart keeps the floor the
+    D2 no-close roll raised (main, from that roll's stale "peak" row, 200), with no "peak" row.
+    Under a gap from the stale figures, the open carries NinjaTrader's raised peak as its
+    "nt_peak", which a later-day restart takes as it takes a "peak" row's (#225), as on main."""
+    s, r, out, _ = restart_after(roll, bar("10:00", 0, 0, 0, 0, D3).ts, 52_200.0)
+    assert (s.acct.peak, s.acct.floor) == (2200.0, 200.0)
+    assert (r.acct.peak, r.acct.floor) == (peak, peak - 2000.0)
+    assert r.halted.startswith("confirm balances: ") and peaks(out) == []
+
+
+def test_a_restart_takes_ninjatraders_peak_for_its_own_floor_from_an_open_too():
+    """#220 x #239: a roll during a zero under a stale gap journals no "peak" row; its open carries
+    NinjaTrader's raised peak (53,000). A same-day restart takes it back for NinjaTrader's own
+    floor (51,000), so NinjaTrader at 51,000 is at it: the halt."""
+    s, r, _, _ = restart_after(NO_CLOSE_ROLLS["zero, stale gap"], at("10:00", D2).ts, 52_200.0)
+    assert r.started and r.halted == s.halted and r.nt_peak == 3000.0
+    r, effects = core.on_account(reconciled(r), account(51_000.0), at("10:01", D2).ts)
+    caught = nt_floor(51_000.0, floor=51_000.0, peak=53_000.0)
+    assert alerts(effects) == [f"{caught} (still halted: {s.halted})"]
+
+
+def test_the_no_close_floor_trails_the_apps_balance_under_a_gap_halt_too():
+    """#220 review (round 4, M12): a gap halt at the D2 roll with a long of 2 held, whose Flatten
+    fills only 1 (at +600) before the link drops again over the next close. The D3 roll's
+    "confirm balances" is a no-op under the gap halt, but its floor still trails the app's own
+    balance, 600 (floor -1,400), above the close's equity, 400, which the rules' own trail takes."""
+    s = reconciled(core.start(sim(), T.ts)[0])
+    s, _ = core.on_fill(s, fill_at(T.ts + timedelta(seconds=5), qty=2))
+    s, _ = core.on_bar(s, bar("09:31", 20000.0, 20000.0, 19990.0, 19990.0))
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, _ = core.on_account(s, account(balance=52_000.0, unrealized=-400.0), T.ts)
+    s, effects = core.on_bar(s, bar("09:30", 19990.0, 19990.0, 19990.0, 19990.0, D2))
+    assert s.halted.startswith(core.GAP) and sends(effects) == [Flatten]
+    gap = s.halted
+    part = {**fill_at(at("09:30", D2).ts + timedelta(seconds=5), qty=-1), "price": 20030.0}
+    s, _ = core.on_fill(s, part)
+    assert (s.acct.balance, s.position.qty) == (600.0, 1)
+    s, _ = core.on_disconnect(s, "stream closed")
+    s, effects = core.on_bar(s, bar("09:30", 19990.0, 19990.0, 19990.0, 19990.0, D3))
+    assert s.halted == gap and peaks(effects) == []
+    assert (s.acct.peak, s.acct.floor) == (600.0, -1400.0)
+
+
+def test_a_zero_at_the_roll_replaces_a_day_halt_with_confirm_balances():
+    """#220 review (round 3, mutant D): under a safety day halt (lifted by this very roll), a
+    zero at the close is still no close: the new day must not trade on it."""
+    s = running(sim(daily_loss=1000.0), account(today=-850.0))
+    assert s.halt_kind == "safety" and s.halt_day is not None
+    s, _ = core.on_account(s, account(0.0), T.ts)
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert (s.halted, s.halt_kind, s.halt_day) == (core.NO_CLOSE, None, None)
+    assert peaks(effects) == []
+
+
+def test_a_zero_balance_is_listed_with_the_pauses_before_warming_up():
+    """#220 review (M8), owner decision: `figures` is a pause, listed after the drift pause and
+    before a `warming` condition (#79), as `halt_reason` takes them; under a stale pause the
+    stale one is the account's `halt_kind`."""
+    s = running(sim(), account(50_400.0))
+    s, _ = core.on_account(replace(s, warming="warming up: replaying"), account(0.0), T.ts)
+    assert [c["kind"] for c in core.conditions(s)] == ["figures", "warming"]
+    status = core.account_status(replace(s, stale="no NQ bar"))
+    assert [c["kind"] for c in status["conditions"]] == ["stale", "figures", "warming"]
+    assert (status["halt_kind"], status["halt_reason"]) == ("stale", "no NQ bar")
+
+
+def test_a_zero_balance_under_a_gap_halt_keeps_the_halt_and_its_flatten():
+    """#220 with #229: the app flat, NinjaTrader with open P&L, the gap halt's account-wide
+    Flatten out. A zero balance is no figure, so it never ends that Flatten (its 0 open P&L is
+    not NinjaTrader holding nothing) and nothing more is sent. The next roll during it takes no
+    close, and its "confirm balances" never replaces the open-ended gap halt."""
+    s = running(sim(), account(balance=52_200.0, today=2200.0, unrealized=-1900.0))
+    s, effects = core.on_bar(s, at("09:30", D2))
+    assert s.halted.startswith(core.GAP) and sends(effects) == [Flatten]
+    gap = s.halted
+    s, effects = core.on_account(s, account(0.0), T.ts)
+    assert kinds(effects) == ["alert"] and s.exiting is not None
+    assert core.conditions(s)[-1] == {"kind": "figures", "reason": core.NO_BALANCE}
+    assert sends(core.on_bar(s, at("09:31", D2))[1]) == []
+    s, effects = core.on_bar(s, at("09:30", D3))
+    assert s.halted == gap and peaks(effects) == [] and "halt" not in kinds(effects)
 
 
 # #219: at an end_of_day roll, a floor from NinjaTrader's balance that alone breaches the app's
@@ -627,8 +897,8 @@ def test_a_later_day_restart_at_ninjatraders_floor_cannot_start():
     assert kinds(effects) == ["alert"]
     assert alerts(effects) == [
         "cannot start: confirm balances: NinjaTrader's balance 50200.00 is at or below the"
-        " liquidation level 50200.00 from the armed balances; re-arm with the confirmed balances"
-        f" (still halted: {halts[0]['reason']})"
+        " liquidation level 50200.00 from the armed balances and the journalled peaks; re-arm with"
+        f" the confirmed balances (still halted: {halts[0]['reason']})"
     ]
     assert restart(50_200.01, halts, kept)[0].started
 

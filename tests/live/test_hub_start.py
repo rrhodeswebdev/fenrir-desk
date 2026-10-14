@@ -374,7 +374,8 @@ async def test_a_restart_the_same_day_after_a_morning_gain_keeps_it_in_the_balan
 
 async def test_a_running_account_ignores_a_balance_at_or_below_zero(hub, conn, armed, fake):
     """NinjaTrader before its account data loads again (e.g. after it restarts) reports 0: not a
-    figure, so no false safety-margin halt; the last figures stand (review of #217, NB2)."""
+    figure, so no false safety-margin halt; the last figures stand (review of #217, NB2). Owner
+    decision on #220: no new entries while it lasts, so the bar's Bracket is rejected."""
     await hub.handle_stream({"type": "connected"})
     await hub.tick(T0)
     await hub.handle_stream(account(50_300.0))
@@ -384,7 +385,14 @@ async def test_a_running_account_ignores_a_balance_at_or_below_zero(hub, conn, a
     await hub.handle_bar(bar(T0))
     s = hub.states["Sim101"]
     assert s.halted is None and s.nt == core.NtAccount(50_300.0, 0.0, 0.0)
-    assert [path for path, _ in fake.requests] == ["/bracket"]
+    assert [path for path, _ in fake.requests] == []
+    [rejected] = journal.rows(conn, account="Sim101", kind="rejection")
+    assert rejected.payload["reason"] == f"paused: {core.NO_BALANCE}"
+    # #220: shown while it lasts and journalled once, however many such messages came
+    [acc] = hub.status()["accounts"]
+    assert acc["conditions"] == [{"kind": "figures", "reason": core.NO_BALANCE}]
+    alerts = [r.payload["message"] for r in journal.rows(conn, account="Sim101", kind="alert")]
+    assert alerts.count(core.NO_BALANCE) == 1
 
 
 async def test_the_liquidation_level_comes_from_the_journalled_peak_not_the_pin(hub, conn, armed):
@@ -397,6 +405,6 @@ async def test_the_liquidation_level_comes_from_the_journalled_peak_not_the_pin(
     s = hub.states["Sim101"]
     assert s.halted.startswith(
         "confirm balances: NinjaTrader's balance 48800.00 is at or below the liquidation level"
-        " 49000.00"
+        " 49000.00 from the armed balances and the journalled peaks;"
     )
     assert not s.started and hub.children == {}

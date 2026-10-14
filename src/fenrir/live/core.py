@@ -58,7 +58,8 @@ NO_CLOSE = (
 )
 CONFIRM_LIQUIDATED = (
     "confirm balances: NinjaTrader's balance {balance:.2f} is at or below the liquidation level"
-    " {level:.2f} from the armed balances; re-arm with the confirmed balances"
+    " {level:.2f} from the armed balances and the journalled peaks; re-arm with the confirmed"
+    " balances"
 )
 GAP = "confirm balances: a gap"  # every balance-gap halt (#219, #222): `_exit` flattens under it
 CONFIRM_GAP = GAP + (
@@ -75,6 +76,10 @@ NT_FLOOR = GAP + (
     " NinjaTrader shows open P&L; re-arm with the confirmed balances"
 )
 UNRECONCILED = "not reconciled with NinjaTrader yet: no new entries"
+NO_BALANCE = (
+    "NinjaTrader reports a balance at or below 0, which is not a figure (its account data may not"
+    " have loaded): ignored, and no new entries until one above 0"
+)
 LINK_LOST = "NinjaTrader link lost: no new entries until reconciled"
 
 
@@ -164,6 +169,9 @@ class RunnerState:
     read_at: datetime | None = None  # the last reconcile's read: fills up to it are in its book
     # no new entries until warmed up (#79): today's bars replayed through step; the shell sets it
     warming: str | None = None
+    # NinjaTrader's last balance was at or below 0 (#220): no new entries while it lasts (a pause)
+    no_balance: str | None = None
+    no_balance_alerted: bool = False  # one alert per run
     # NinjaTrader's highest peak a gap halt did not take, relative to phase start, as journalled
     # in "peak" rows' "nt_peak": a later-day restart takes it (#225); a same-day one restores it,
     # and NinjaTrader's own equity is checked against the floor from it (#239)
@@ -234,8 +242,10 @@ def start(
     """`halts`: the "halt" payloads journalled since `armed.armed_at`, oldest first; the ones
     still in force are restored (already journalled, so not again). `peaks`: the "peak" payloads
     journalled since then; the highest of them and `start.peak` is the peak (DEC-4a), with their
-    "nt_peak"s when today's open is not journalled, else with that open's peak (#225). `opens`: the
-    "day_start" payloads journalled since then. Without `setup.day_start`, today's open is the
+    "nt_peak"s (and their opens', #220) when today's open is not journalled, else with that
+    open's peak (#225), and for
+    `end_of_day` with every journalled open's (#220). `opens`: the "day_start" payloads
+    journalled since then. Without `setup.day_start`, today's open is the
     last of them for today, so a restart mid-day never opens the day at the balance now; with
     none, NinjaTrader's balance less its realized loss today (`start.realized_today` when below
     0; a gain stays in the open, so it gives no extra daily room and `replay` never cuts it from
@@ -247,6 +257,7 @@ def start(
     replays = (
         False  # today's open is journalled: `replay` sets the app's balance, not NinjaTrader's
     )
+    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
     if begin is not None:
         today = trading_day(now).isoformat()
         rows = [DayStart(o["balance"], o["peak"]) for o in opens if o["day"] == today]
@@ -255,8 +266,14 @@ def start(
         # NinjaTrader's balance, which holds the gap, takes it too, so its floor is never looser
         # than NinjaTrader's; one that replays the app's own balance keeps the app's peak (theirs
         # would breach it), and at least today's open's, which a start may have set from theirs
-        theirs = [rows[-1].peak] if replays else [p["nt_peak"] for p in peaks if "nt_peak" in p]
-        begin = replace(begin, peak=max([begin.peak, *(p["peak"] for p in peaks), *theirs]))
+        noted = [*peaks, *opens]  # a roll during a zero notes it on its open (#220)
+        theirs = [rows[-1].peak] if replays else [p["nt_peak"] for p in noted if "nt_peak" in p]
+        # end_of_day: each roll journals its open with the peak it raised to, even a roll that
+        # took no close and so journalled no "peak" row (#220); within an arming the peak never
+        # falls, so the highest open since arming bounds it too, on a later day as well
+        open_peaks = [o["peak"] for o in opens] if trailing == "end_of_day" else []
+        peak = max([begin.peak, *(p["peak"] for p in peaks), *theirs, *open_peaks])
+        begin = replace(begin, peak=peak)  # before the liquidation check, which so counts it
         if setup.day_start is None:
             if rows:
                 setup = replace(setup, day_start=rows[-1])  # the latest: one per arming and day
@@ -290,8 +307,9 @@ def start(
         setup, acct, FLAT, (), (), acct.day_start_balance, floor, now, unreconciled=waiting
     )
     # NinjaTrader's own floor is checked on its own equity on every account message (#239), also
-    # after a same-day restart, which keeps the app's peak below it
-    if nt_peaks := [p["nt_peak"] for p in peaks if "nt_peak" in p] if begin else []:
+    # after a same-day restart, which keeps the app's peak below it; an open may carry one (#220)
+    noted = [p["nt_peak"] for p in (*peaks, *opens) if "nt_peak" in p]
+    if nt_peaks := noted if begin else []:
         s = replace(s, nt_peak=max(nt_peaks) - begin.phase_start)
     for h in halts:  # replayed in order, so open-ended halts and breaches win as they did live
         match h["kind"]:  # first the pauses that only `resolve` lifts
@@ -325,7 +343,6 @@ def start(
         return s, out
     if opened:  # so a later restart today opens the day at the same figures
         out += (*opened, _open_log(acct.day, setup.day_start, now))
-    trailing = phase_rules(setup.rules, a.phase).max_drawdown.trailing
     if begin and trailing == "end_of_day" and _missed_close(a.armed_at, peaks, acct.day):
         s, more = halt(s, CONFIRM_BALANCES)
         return s, out + more
@@ -509,9 +526,9 @@ def on_account(s: RunnerState, account: Mapping[str, Any], now: datetime) -> Ste
     if s.setup.start is None:  # could not start: no phase start to set its figures against
         return s, ()
     if account["balance"] <= 0:  # not a figure yet (NinjaTrader before its account data loads)
-        return s, ()
+        return _no_balance(s)
     nt = NtAccount(account["balance"], account["realized_pnl_today"], account["unrealized_pnl"])
-    was, s = s, replace(s, nt=nt)
+    was, s = s, replace(s, nt=nt, no_balance=None)
     if s.exiting and s.position.qty == 0 and round(nt.unrealized_pnl, 2) == 0:
         s = replace(s, exiting=None)  # NinjaTrader holds nothing: the gap's flatten is done (#229)
     if phase_rules(s.setup.rules, s.acct.phase).max_drawdown.trailing == "intraday":
@@ -575,6 +592,13 @@ def _nt_floored(s: RunnerState, now: datetime, out: tuple[Log | Send, ...]) -> S
     return s, (*out, *more)
 
 
+def _no_balance(s: RunnerState) -> Step:
+    """A balance at or below 0 (#220): NinjaTrader's last figures above 0, if any, stand, shown
+    as a condition until a balance above 0, with one alert per run however often it comes back."""
+    out = () if s.no_balance_alerted else (Log("alert", {"message": NO_BALANCE}),)
+    return replace(s, no_balance=NO_BALANCE, no_balance_alerted=True), out
+
+
 def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
     """The add-on answered a `Send` with `accepted: false` (not `duplicate`): nothing landed.
 
@@ -591,13 +615,14 @@ def send_failed(s: RunnerState, client_id: str, error: str) -> Step:
 def on_disconnect(s: RunnerState, error: str) -> Step:
     """The add-on stream dropped or missed its heartbeats: no new entries until reconciled, with
     one "alert" per outage, and NinjaTrader's figures are dropped as stale until its next account
-    message. Positions keep their broker-side stop and target (the add-on's
-    `flatten_on_disconnect_seconds` may flatten them: DEC-5). Dry runs ignore it."""
+    message, a zero balance's `figures` condition with them (#220). Positions keep their
+    broker-side stop and target (the add-on's `flatten_on_disconnect_seconds` may flatten them:
+    DEC-5). Dry runs ignore it."""
     if s.setup.armed.mode == "dry":
         return s, ()
     if s.unreconciled == LINK_LOST:  # still the same outage: no second alert, figures dropped
-        return replace(s, nt=None), ()
-    return replace(s, unreconciled=LINK_LOST, nt=None), (
+        return replace(s, nt=None, no_balance=None), ()
+    return replace(s, unreconciled=LINK_LOST, nt=None, no_balance=None), (
         Log("alert", {"message": f"{LINK_LOST} ({error})"}),
     )
 
@@ -928,13 +953,15 @@ def safety_level(s: RunnerState) -> float:
 def conditions(s: RunnerState) -> list[dict[str, Any]]:
     """Every condition holding new entries back, each reported even under another (#212): the
     halt (its kind; None for a halt no strip cell names), then a reconcile mismatch, a stale-data
-    pause, a drift pause and warming up (#79; not a halt: `halted` stays false for it alone). The
-    brief unreconciled pause is not one (only `halt_reason`)."""
+    pause, a drift pause, NinjaTrader's balance at or below 0 ("figures", #220: a pause too) and
+    warming up (#79; not a halt: `halted` stays false for it alone). The brief unreconciled pause
+    is not one (only `halt_reason`)."""
     held = (
         (s.halt_kind, s.halted),
         ("reconcile", s.mismatch),
         ("stale", s.stale),
         ("drift", s.drift),
+        ("figures", s.no_balance),
         ("warming", s.warming),
     )
     return [{"kind": kind, "reason": reason} for kind, reason in held if reason]
@@ -944,7 +971,17 @@ def account_status(s: RunnerState) -> dict[str, Any]:
     """One AccountStatus (Plans 21–24)."""
     a, rules, acct = s.setup.armed, s.setup.rules, s.acct
     p, v = phase_rules(rules, acct.phase), view(_strict(s), rules)
-    pause = "reconcile" if s.mismatch else "stale" if s.stale else "drift" if s.drift else None
+    pause = (
+        "reconcile"
+        if s.mismatch
+        else "stale"
+        if s.stale
+        else "drift"
+        if s.drift
+        else "figures"
+        if s.no_balance
+        else None
+    )
     head = {
         "account": a.account,
         "mode": a.mode,
@@ -952,10 +989,16 @@ def account_status(s: RunnerState) -> dict[str, Any]:
         "strategy": Path(a.strategy_path).stem,
         "rules_account": a.rules_account,
         "contract": a.contract,
-        "halted": bool(s.halted or s.mismatch or s.stale or s.drift),
+        "halted": bool(s.halted or s.mismatch or s.stale or s.drift or s.no_balance),
         "halt_kind": s.halt_kind if s.halted else pause,
         # the unreconciled and warming-up pauses show only here
-        "halt_reason": s.halted or s.mismatch or s.stale or s.drift or s.warming or s.unreconciled,
+        "halt_reason": s.halted
+        or s.mismatch
+        or s.stale
+        or s.drift
+        or s.no_balance
+        or s.warming
+        or s.unreconciled,
         "conditions": conditions(s),  # each one; halt_kind and halt_reason show the first
     }
     if not s.started:
@@ -1177,13 +1220,17 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
         return s, ()
     acct, unverified = _rules(s, DayClosed(s.acct.day, ts))
     s, out = _mismatched(s, unverified)
+    untaken = None  # NinjaTrader's raised peak under a gap at a close not taken (#220, #225)
     if isinstance(acct, Breach):
         s, out = _halt(s, f"breach {acct.rule}: {acct.reason}", "breach", None)
         acct = s.acct  # failed until disarmed: its figures stay as they were
     elif s.setup.armed.mode != "dry" and (
         phase_rules(s.setup.rules, acct.phase).max_drawdown.trailing == "end_of_day"
     ):
-        if s.nt:  # NinjaTrader's balance at the close (DEC-4a)
+        # NinjaTrader's balance at the close (DEC-4a); during a balance at or below 0 (#220), its
+        # last one above 0, so the floor is never looser than from those figures, though they
+        # may be hours old: that close is not taken (below)
+        if s.nt:
             raised = _raised(s.setup, acct, s.nt.balance)
             equity = raised.balance + raised.open_pnl
             base = s.setup.start.phase_start
@@ -1208,11 +1255,16 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
                 s = replace(s, nt_peak=theirs if s.nt_peak is None else max(theirs, s.nt_peak))
             else:
                 acct, theirs = raised, None
+        if s.nt and not s.no_balance:
             # every roll, raised or not: see _missed_close
             out += (_peak_log(s.setup, acct, ts, theirs),)
-        elif s.setup.start:  # none yet, or lost with the link: this close is never taken
+        elif s.setup.start:  # none yet, lost with the link, or 0: this close is never taken
+            untaken = theirs if s.nt else None  # during a 0, a gap's: the open carries it
             s, more = halt(s, NO_CLOSE)
             out += more
+            # the floor still trails the app's own closing balance, as under the gap, so an open
+            # loss held over the close still breaches; no "peak" row: a restart asks again
+            acct = _raised(s.setup, acct, s.setup.start.phase_start + acct.balance)
     acct = replace(acct, day=day)
     # the new day opens where the last closed: nothing trades in the 17:00–18:00 ET break, and
     # the add-on cancelled working orders at 16:40
@@ -1229,7 +1281,8 @@ def _roll_day(s: RunnerState, ts: datetime) -> Step:
     )
     if s.setup.armed.mode != "dry" and (start := s.setup.start) and s.halt_kind != "breach":
         opens = DayStart(start.phase_start + acct.day_start_balance, start.phase_start + acct.peak)
-        out += (_open_log(day, opens, ts),)  # a restart today opens the day as this roll did
+        # a restart today opens the day as this roll did
+        out += (_open_log(day, opens, ts, s.setup.start.phase_start, untaken),)
     if s.halt_day is not None and day > s.halt_day:
         out += (Log("alert", {"message": f"halt lifted: {s.halted}"}),)
         s = replace(s, halted=None, halt_kind=None, halt_day=None)
@@ -1274,13 +1327,17 @@ def _peak_log(setup: Setup, a: AccountState, ts: datetime, theirs: float | None 
     return Log("peak", payload)
 
 
-def _open_log(day: date, opens: DayStart, ts: datetime) -> Log:
-    """Trading day `day`'s open as a "day_start" row, which `start` reads back on a restart."""
+def _open_log(
+    day: date, opens: DayStart, ts: datetime, base: float = 0.0, theirs: float | None = None
+) -> Log:
+    """Trading day `day`'s open as a "day_start" row, which `start` reads back on a restart; after
+    a roll during a zero under a gap (#220), also NinjaTrader's raised peak `theirs` (relative to
+    `base`, the phase start) as "nt_peak", which no "peak" row then holds (#225)."""
     stamp = ts.astimezone(UTC).isoformat()  # journal.iso's format
-    return Log(
-        "day_start",
-        {"day": day.isoformat(), "balance": opens.balance, "peak": opens.peak, "ts": stamp},
-    )
+    payload = {"day": day.isoformat(), "balance": opens.balance, "peak": opens.peak, "ts": stamp}
+    if theirs is not None:
+        payload["nt_peak"] = base + theirs
+    return Log("day_start", payload)
 
 
 def _strict(s: RunnerState) -> AccountState:
@@ -1315,7 +1372,7 @@ def _block(s: RunnerState, a: Action, pending: bool, old: str | None) -> str | N
         return f"side must be long or short, got {a.side!r}"
     if s.halted:
         return f"halted: {s.halted}"
-    if paused := s.mismatch or s.unreconciled or s.stale or s.drift or s.warming:
+    if paused := s.mismatch or s.unreconciled or s.stale or s.drift or s.no_balance or s.warming:
         return f"paused: {paused}"
     if old:  # a late or replayed bar: never trade at its old close
         return old

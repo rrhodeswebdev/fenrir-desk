@@ -507,3 +507,50 @@ def test_entry_fill_drift_past_4_ticks_pauses_entries(price, paused):
         s, _ = core.on_fill(s, fill(-1, 20000.0, at("09:32").ts))
         s, _ = core.on_bar(s, at("09:33"))
         assert decide_now(s, [LONG])[1][1].payload["reason"].startswith("paused: entry fill")
+
+
+# #220, owner decision: while NinjaTrader reports a balance at or below 0, no new entries;
+# exits, stops and the runner's own Flattens still go out
+
+
+def nt_account(balance):
+    """An add-on "account" stream message for Sim101 (absolute $), no P&L today."""
+    return {
+        "type": "account",
+        "id": "Sim101",
+        "name": "Sim101",
+        "is_sim": True,
+        "balance": balance,
+        "realized_pnl_today": 0.0,
+        "unrealized_pnl": 0.0,
+    }
+
+
+def test_a_zero_balance_pauses_entries_until_one_above_0():
+    s = started(sim(), at("09:30"))
+    s, _ = core.on_account(s, nt_account(50_000.0), at("09:30").ts)
+    s, _ = core.on_account(s, nt_account(0.0), at("09:30").ts)
+    s, _ = core.on_bar(s, at("09:31"))
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "rejection"]
+    assert effects[1].payload["reason"] == f"paused: {core.NO_BALANCE}"
+    st = core.account_status(s)
+    assert (st["halted"], st["halt_kind"], st["halt_reason"]) == (True, "figures", core.NO_BALANCE)
+    s, _ = core.on_account(s, nt_account(50_000.0), at("09:31").ts)
+    s, _ = core.on_bar(s, at("09:32"))
+    assert core.account_status(s)["halted"] is False
+    _, effects = decide_now(s, [LONG])
+    assert kinds(effects) == ["bar", "action", "send"]
+
+
+def test_a_zero_balance_never_holds_back_an_exit():
+    s = entered(sim())
+    s, _ = core.on_account(s, nt_account(0.0), at("09:31").ts)
+    s, _ = core.on_bar(s, at("09:32"))
+    _, effects = decide_now(s, [Flatten()])
+    assert [type(e.action) for e in sends(effects)] == [Flatten]
+    late = at("16:39")  # flat-by: the runner's own Flatten
+    s = entered(sim(), b=at("16:30"))
+    s, _ = core.on_account(s, nt_account(0.0), late.ts)
+    s, effects = core.on_bar(s, late)
+    assert sends(effects) == [Send(Flatten(), core.client_id("Sim101", late.ts, "x", Flatten()))]

@@ -50,7 +50,7 @@ Day to day, `docker compose up` (or `up -d`) is the command you run; data pulls,
 
 Fenrir trades through a C# add-on inside NinjaTrader 8 on Windows: the same machine as Docker, or a Windows VM when Fenrir runs on a Mac or Linux host. Full steps and config: [addon/INSTALL.md](addon/INSTALL.md). Checks on Sim101: [addon/CHECKLIST.md](addon/CHECKLIST.md).
 
-1. **Import.** `python3 addon/build.py` writes `addon/dist/FenrirAddOn.zip`. In NinjaTrader: **Tools → Import → NinjaScript Add-On…**, pick the zip; NinjaTrader compiles it. The zip layout is not yet confirmed on a clean NinjaTrader ([CHECKLIST](addon/CHECKLIST.md) A2, A3); if the import fails, install from source ([addon/INSTALL.md](addon/INSTALL.md), section 1).
+1. **Import.** `python3 addon/build.py` writes `addon/dist/FenrirAddOn.zip`. In NinjaTrader: **Tools → Import → NinjaScript Add-On…**, pick the zip; NinjaTrader compiles it. The zip layout is not yet confirmed on a clean NinjaTrader; if the import fails, install from source ([addon/INSTALL.md](addon/INSTALL.md), section 1).
 2. **Token.** Generate one with `openssl rand -hex 32`. Copy `addon/fenrir-addon.example.json` to `Documents\NinjaTrader 8\fenrir-addon.json`, put the token there and list the accounts Fenrir may trade in `managed_accounts`. Enter the same token on Fenrir's Settings page.
 3. **Windows Firewall.** The add-on listens on port 8123. In PowerShell as Administrator on the NinjaTrader machine, allow it from your local network only, then restart NinjaTrader (**New → NinjaScript Output** shows `Fenrir: listening on port 8123`):
 

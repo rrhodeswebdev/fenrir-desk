@@ -664,7 +664,7 @@ class LiveHub:
             ts = datetime.fromisoformat(fill["ts"])
             if s is None or s.setup.armed.mode == "dry":
                 return
-            if fill["instrument"] != (nt := self._nt(s, ts)):  # said, never silent (#267)
+            if fill["instrument"] != (nt := self._nt(s, ts)):  # logged, never silent (#267)
                 log.warning(
                     "live account %s: fill on %s not booked: the runner trades %s",
                     account,

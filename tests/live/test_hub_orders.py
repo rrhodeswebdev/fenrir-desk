@@ -471,11 +471,14 @@ async def test_a_fill_is_matched_on_its_accounts_own_instruments(
         await hub.stop()
 
 
-async def test_dry_runs_take_no_fills(hub, conn, armed):
+async def test_dry_runs_take_no_fills(hub, conn, armed, caplog):
     arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
     await hub.tick(T0)
-    await hub.handle_fill({**FOREIGN, "account": "Dry1"})
+    with caplog.at_level(logging.WARNING, logger="fenrir.live.service"):
+        await hub.handle_fill({**FOREIGN, "account": "Dry1"})
+        await hub.handle_fill({**FOREIGN, "account": "Dry1", "instrument": "MES 12-26"})
     assert [r.kind for r in journal.rows(conn, account="Dry1")] == []
+    assert "not booked" not in caplog.text  # #267's warning is for sim and live accounts only
     assert hub.states["Dry1"].position.qty == 0
 
 

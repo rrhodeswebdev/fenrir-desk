@@ -1,6 +1,6 @@
 import pytest
 
-from fenrir.bridge.names import nt_instrument
+from fenrir.bridge.names import canonical, nt_instrument
 
 
 @pytest.mark.parametrize(
@@ -26,3 +26,21 @@ def test_bad_code_raises(code):
 def test_unknown_symbol_raises(symbol):
     with pytest.raises(ValueError):
         nt_instrument(symbol, "NQZ26")
+
+
+@pytest.mark.parametrize(
+    ("reported", "name"),
+    [
+        ("MNQ DEC26", "MNQ 12-26"),  # NinjaTrader's FullName on some installs (#265)
+        ("ES MAR27", "ES 03-27"),
+        ("NQ JAN30", "NQ 01-30"),
+        ("MNQ 12-26", "MNQ 12-26"),
+        ("AAPL", "AAPL"),  # not a futures name: left as it is
+        ("MNQ DEC2026", "MNQ DEC2026"),
+        ("MNQ dec26", "MNQ dec26"),
+        ("MNQ XYZ26", "MNQ XYZ26"),
+        ("", ""),
+    ],
+)
+def test_canonical(reported, name):
+    assert canonical(reported) == name

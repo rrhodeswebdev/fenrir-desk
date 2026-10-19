@@ -6,6 +6,7 @@ test_hub_start.py); `figures` supplies the start figures and reconciles with a f
 `connected`."""
 
 import asyncio
+import logging
 import shutil
 import sqlite3
 from dataclasses import replace
@@ -429,12 +430,19 @@ async def test_a_manual_add_after_the_strategys_flatten_timed_out_is_flattened(
     assert [b["client_id"] for p, b in fake.requests if p == "/flatten"] == flattens
 
 
-async def test_only_this_accounts_instrument_reaches_on_fill(hub, conn, armed):
+async def test_only_this_accounts_instrument_reaches_on_fill(hub, conn, armed, caplog):
     await hub.tick(T0)
-    await hub.handle_fill({**FOREIGN, "instrument": "MES 12-26"})
-    await hub.handle_fill({**FOREIGN, "account": "Sim102"})
+    with caplog.at_level(logging.WARNING, logger="fenrir.live.service"):
+        await hub.handle_fill({**FOREIGN, "instrument": "MES 12-26"})
+        await hub.handle_fill({**FOREIGN, "account": "Sim102"})
     assert kinds(conn) == []
     assert hub.states["Sim101"].position.qty == 0
+    # #267: the armed account's own fill on another instrument is said, not dropped silently;
+    # a fill on an account that is not armed is not
+    dropped = [r.getMessage() for r in caplog.records if "not booked" in r.getMessage()]
+    assert dropped == [
+        "live account Sim101: fill on MES 12-26 not booked: the runner trades MNQ 12-26"
+    ]
 
 
 async def test_a_fill_is_matched_on_its_accounts_own_instruments(
@@ -463,11 +471,14 @@ async def test_a_fill_is_matched_on_its_accounts_own_instruments(
         await hub.stop()
 
 
-async def test_dry_runs_take_no_fills(hub, conn, armed):
+async def test_dry_runs_take_no_fills(hub, conn, armed, caplog):
     arming.insert_armed(conn, replace(armed, account="Dry1", mode="dry"))
     await hub.tick(T0)
-    await hub.handle_fill({**FOREIGN, "account": "Dry1"})
+    with caplog.at_level(logging.WARNING, logger="fenrir.live.service"):
+        await hub.handle_fill({**FOREIGN, "account": "Dry1"})
+        await hub.handle_fill({**FOREIGN, "account": "Dry1", "instrument": "MES 12-26"})
     assert [r.kind for r in journal.rows(conn, account="Dry1")] == []
+    assert "not booked" not in caplog.text  # #267's warning is for sim and live accounts only
     assert hub.states["Dry1"].position.qty == 0
 
 

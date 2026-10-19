@@ -656,13 +656,21 @@ class LiveHub:
 
     async def handle_fill(self, fill: Mapping[str, Any]) -> None:
         """One validated add-on `fill` message (22.5 routes the stream here): booked only by the
-        sim or live account it names, and only on that account's armed instrument. Raises the
-        journal's error, as `_apply` does."""
+        sim or live account it names, and only on that account's armed instrument (one on another
+        instrument is logged, not journalled). Raises the journal's error, as `_apply` does."""
         async with self._lock:
             account = fill["account"]
             s = self.states.get(account)
             ts = datetime.fromisoformat(fill["ts"])
-            if s is None or s.setup.armed.mode == "dry" or fill["instrument"] != self._nt(s, ts):
+            if s is None or s.setup.armed.mode == "dry":
+                return
+            if fill["instrument"] != (nt := self._nt(s, ts)):  # logged, never silent (#267)
+                log.warning(
+                    "live account %s: fill on %s not booked: the runner trades %s",
+                    account,
+                    fill["instrument"],
+                    nt,
+                )
                 return
             w = s.working
             if w and s.position.qty == 0 and fill["client_id"] == w.client_id:  # its entry fill

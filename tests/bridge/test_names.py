@@ -38,6 +38,8 @@ def test_unknown_symbol_raises(symbol):
         ("AAPL", "AAPL"),  # not a futures name: left as it is
         ("MNQ DEC2026", "MNQ DEC2026"),
         ("MNQ dec26", "MNQ dec26"),
+        ("MNQ Dec26", "MNQ Dec26"),
+        ("MNQ DEC 26", "MNQ DEC 26"),
         ("MNQ XYZ26", "MNQ XYZ26"),
         ("", ""),
     ],

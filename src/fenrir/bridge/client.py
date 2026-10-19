@@ -13,14 +13,25 @@ from typing import Annotated, Any, Literal, TypedDict
 from urllib.parse import quote
 
 import httpx
-from pydantic import ConfigDict, Field, StringConstraints, TypeAdapter, ValidationError
+from pydantic import (
+    AfterValidator,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    ValidationError,
+)
 from pydantic.dataclasses import dataclass
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
+from fenrir.bridge.names import canonical
+
 _STRICT = ConfigDict(strict=True, allow_inf_nan=False)
 # UTC ISO 8601 with milliseconds and Z, e.g. "2026-10-12T13:31:00.250Z"
 Ts = Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")]
+# "MNQ DEC26" is read as "MNQ 12-26", the name the runner builds (#265)
+Instrument = Annotated[str, AfterValidator(canonical)]
 
 _WS_LOG = logging.getLogger("fenrir.bridge.client.ws")
 # websockets logs the handshake request line, token included, at DEBUG; an explicit level outlives
@@ -46,7 +57,7 @@ class Account(TypedDict):
 
 class Position(TypedDict):
     account: str
-    instrument: str
+    instrument: Instrument
     qty: int  # signed
     avg_price: float
 
@@ -55,7 +66,7 @@ class Order(TypedDict):
     account: str
     order_id: str
     client_id: str
-    instrument: str
+    instrument: Instrument
     role: Literal["entry", "stop", "target", "other"]
     action: Literal["buy", "sell"]
     qty: int
@@ -85,7 +96,7 @@ class Fill(TypedDict):
     account: str
     client_id: str
     order_id: str
-    instrument: str
+    instrument: Instrument
     qty: int  # signed: + buy, - sell
     price: float
     commission: float

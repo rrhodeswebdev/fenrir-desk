@@ -14,7 +14,7 @@ Install and config are in [INSTALL.md](INSTALL.md); this file only checks them.
 
 - **Sim101 only.** `managed_accounts` is `["Sim101"]` for the whole checklist; never list a live account here.
 - **Fills.** Connect NinjaTrader to **Connections → Simulated Data Feed** (any time), or a live data connection while the market is open, so Sim101 market orders fill.
-- **Instrument.** The examples use `MNQ 12-26`; use the current front month. `P` is its last price rounded to a whole point; write the prices out by hand (`<P-20>` means P minus 20).
+- **Instrument.** The examples use `MNQ 12-26`; use the current front month. `P` is its last price rounded to a whole point; write the prices out by hand (`<P-20>` means P minus 20). NinjaTrader may name it `MNQ DEC26` (its `FullName`) in Output, the Log tab and the raw `curl` replies below: that is the same contract, and Fenrir's client (so the helper scripts) reads it as `MNQ 12-26` (#265).
 - **Logs.** Open **New → NinjaScript Output**. Every add-on line starts with `Fenrir: `. Alerts also go to the Control Center **Log** tab, with a time.
 - **Config changes** are read only at start: after each edit of `Documents\NinjaTrader 8\fenrir-addon.json`, restart NinjaTrader.
 - **Shell** (bash on the Fenrir machine, from the repo root after `uv sync`; on Windows, Git Bash). `H` is the NinjaTrader address as seen from that machine (`http://localhost:8123` on the NinjaTrader machine itself, `http://<VM IP>:8123` from the VM's host):

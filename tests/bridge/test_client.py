@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import re
 import time
@@ -8,7 +9,7 @@ import time
 import httpx
 import pytest
 
-from fenrir.bridge.client import ACK, EVENT, POSITIONS, Ack, AddonClient, parse
+from fenrir.bridge.client import ACK, EVENT, ORDERS, POSITIONS, Ack, AddonClient, parse
 from fenrir.bridge.fake_addon import FakeAddon, now_ts, running
 
 pytestmark = pytest.mark.anyio
@@ -275,3 +276,27 @@ async def test_silent_peer_is_reported_within_heartbeat_timeout():
     await gen.aclose()
     await client.aclose()
     server.close()
+
+
+def test_month_names_are_read_as_contract_names():
+    # an add-on whose NinjaTrader reports FullName as "MNQ DEC26" (#265)
+    row = POSITION | {"instrument": "MNQ DEC26"}
+    assert parse(POSITIONS, json.dumps([row]), "p")[0]["instrument"] == "MNQ 12-26"
+    order = ORDER | {"instrument": "MNQ DEC26"}
+    assert parse(ORDERS, json.dumps([order]), "o")[0]["instrument"] == "MNQ 12-26"
+    for event in (
+        POSITION | {"type": "position", "instrument": "MNQ DEC26"},
+        ORDER | {"type": "order", "instrument": "MNQ DEC26"},
+        {
+            "type": "fill",
+            "account": "Sim101",
+            "client_id": "c1",
+            "order_id": "o1",
+            "instrument": "MNQ DEC26",
+            "qty": 1,
+            "price": 20000.0,
+            "commission": 0.5,
+            "ts": "2026-10-19T15:20:00.250Z",
+        },
+    ):
+        assert parse(EVENT, json.dumps(event), "e")["instrument"] == "MNQ 12-26"

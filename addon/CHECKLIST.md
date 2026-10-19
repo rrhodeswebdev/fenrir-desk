@@ -4,7 +4,7 @@ The manual check of the add-on (SPEC Success Criterion 6 and the add-on line of 
 
 Install and config are in [INSTALL.md](INSTALL.md); this file only checks them.
 
-Trimmed on 2026-10-19 (owner, #68) to the lines that check safety: only managed accounts are touched, the token is required, every position has a stop and losing it flattens, no duplicate orders, flatten never over-closes, the kill switch, the balances risk limits use, reconcile, and the 16:40 flatten. Line ids are kept, so gaps are lines removed: install messages, refusal and error paths, stream message shapes, and the disconnect flatten. The full list is `addon/CHECKLIST.md` at `b3824c2`; run its H2–H7 there before setting `flatten_on_disconnect_seconds`.
+Trimmed on 2026-10-19 (owner, #68) to the lines that check safety: only managed accounts are touched, the token is required, every position has a stop and losing it flattens, no duplicate orders, flatten never over-closes, the kill switch, the balances risk limits use, reconcile, and the 16:40 flatten. Line ids are kept, so gaps are lines removed: install and config messages, HTTP error replies, stream message shapes, late and partial entries (C16, C17: not checked by hand), and the disconnect flatten. The full list is `addon/CHECKLIST.md` at `b3824c2`; run its H2–H7 there before setting `flatten_on_disconnect_seconds`.
 
 ## Run
 
@@ -38,12 +38,14 @@ import os
 
 from fenrir.bridge.client import AddonClient
 
+
 async def main():
     every = os.environ.get("ALL") == "1"
     client = AddonClient(os.environ["H"], os.environ["T"])
     async for msg in client.stream():
         if every or msg["type"] not in ("heartbeat", "account"):
             print(msg, flush=True)
+
 
 asyncio.run(main())
 EOF
@@ -54,6 +56,7 @@ import os
 
 from fenrir.bridge.client import AddonClient
 from fenrir.bridge.reconcile import ExpectedBook, NtOrder, NtPosition, reconcile
+
 
 async def main():
     client = AddonClient(os.environ["H"], os.environ["T"])
@@ -68,6 +71,7 @@ async def main():
         print(m.kind, "-", m.detail)
     print(f"{len(positions)} positions, {len(orders)} orders:", "mismatch" if found else "matches")
 
+
 asyncio.run(main())
 EOF
 ```
@@ -76,7 +80,7 @@ Watch the stream with `uv run python /tmp/fenrir-watch.py` (Ctrl+C stops it; `AL
 
 - Use a new `client_id` for every request unless the line says to resend one. The ids below (`ck-c2` …) are examples; after 7 days they may be reused.
 
-## A. Install and import
+## A. Config
 
 - [ ] **A5.** Config as INSTALL.md 2 (token from `openssl rand -hex 32`, `managed_accounts: ["Sim101"]`, `flatten_at: "16:40"`, `flatten_on_disconnect_seconds: null`), the two `netsh` lines of INSTALL.md 3 as Administrator, restart NinjaTrader. **Expect:** `Fenrir: flattening managed accounts daily at 16:40 New York time` and `Fenrir: listening on port 8123`, no alert in the Log tab. — Date: ______ NT: ______ Result: ______
 - [ ] **A7.** Short token: `"token": "abcd"`, restart. **Expect:** alert `Fenrir: set a token of at least 16 characters in fenrir-addon.json; server not started`; `get accounts` cannot connect. (I4 checks the flatten still runs.) — Date: ______ NT: ______ Result: ______
@@ -86,6 +90,7 @@ Watch the stream with `uv run python /tmp/fenrir-watch.py` (Ctrl+C stops it; `AL
 - [ ] **B1.** `curl -s -w "  [%{http_code}]\n" "$H/accounts"` (no token). **Expect:** `{"error":"unauthorized"}  [401]`. — Date: ______ NT: ______ Result: ______
 - [ ] **B2.** `curl -s -w "  [%{http_code}]\n" -H "X-Fenrir-Token: wrong" "$H/accounts"`. **Expect:** `{"error":"unauthorized"}  [401]`. — Date: ______ NT: ______ Result: ______
 - [ ] **B3.** `get accounts`. **Expect:** `[{"id":"Sim101","name":"Sim101","is_sim":true,"balance":…,"realized_pnl_today":…,"unrealized_pnl":…}]  [200]`, and no other account (Playback101 or any other sim account is left out). — Date: ______ NT: ______ Result: ______
+- [ ] **B7.** `uv run --with websockets python -m websockets "${H/http/ws}/stream?token=wrong"`. **Expect:** the connection is refused with HTTP 401 before the WebSocket upgrade. — Date: ______ NT: ______ Result: ______
 - [ ] **B8.** Fenrir itself: enter the NinjaTrader address and token on the Settings page, `docker compose restart`, open the Live page. **Expect:** the NinjaTrader field shows a heartbeat age of a few seconds (not `no heartbeat yet`). Record the address used. — Date: ______ NT: ______ Result: ______
 
 ## C. Orders and brackets
@@ -120,7 +125,7 @@ Start flat with no working orders on Sim101.
 ## G. Kill switch and flatten-all
 
 - [ ] **G1.** Open a long bracket on MNQ and a manual buy limit on `MES 12-26` far from its market (no MES position), then `post flatten-all '{"client_id":"ck-g1"}'`. **Expect:** `{"accepted":true,"duplicate":false,"error":null}`; Output `Fenrir: flatten-all ck-g1: flattening Sim101` and `… flat on Sim101` per instrument; Sim101 flat and **every** working order cancelled, the MES limit included. — Date: ______ NT: ______ Result: ______
-- [ ] **G3.** If a sim account outside `managed_accounts` exists (e.g. Sim102), give it a position before G1. **Expect:** G1 leaves it untouched. — Date: ______ NT: ______ Result: ______
+- [ ] **G3.** A sim account outside `managed_accounts` (e.g. Sim102; add one in NinjaTrader if there is none): give it a position before G1. **Expect:** G1 leaves it untouched. — Date: ______ NT: ______ Result: ______
 - [ ] **G4.** From Fenrir (B8 set up, nothing armed, so the app opens no LSE connection): open a bracket with `post bracket`, then the Live page's **Kill all** → **Flatten and disarm all**. **Expect:** Output `Fenrir: flatten-all kill-<16 hex digits>: flattening Sim101`; Sim101 flat, no working orders. — Date: ______ NT: ______ Result: ______
 
 ## H. Lost link
@@ -142,7 +147,7 @@ Keep a test time before 23:40 New York: the 20-minute window does not run past m
 - [ ] **I1.** PC time zone set to anything but Eastern (Windows Settings → Time & language; record it). `flatten_at` = NY now + 5 min, restart (Output: `… daily at HH:MM New York time`). Open a Fenrir bracket on MNQ (`post bracket`), a manual 1-lot on `MES 12-26` with no stop, and a manual buy limit far below the market. **Expect:** within 15 s after HH:MM New York, alert `Fenrir: HH:MM New York flatten: flattening and cancelling on Sim101`, then `… flat on Sim101` per instrument; Sim101 flat with no working orders. — Date: ______ NT: ______ Result: ______
 - [ ] **I2.** Inside the 20 minutes after I1's flatten, open a manual 1-lot. **Expect:** flattened again within 15 s, with the I1 alert again. — Date: ______ NT: ______ Result: ______
 - [ ] **I4.** Short token: `"token": "abcd"`, `flatten_at` = NY now + 5 min, restart (A7's alert), open a manual 1-lot. **Expect:** flattened within 15 s after HH:MM, as in I1, though the server never started. — Date: ______ NT: ______ Result: ______
-- [ ] **I6.** If a sim account outside `managed_accounts` exists, give it a position before I1. **Expect:** I1 leaves it untouched. — Date: ______ NT: ______ Result: ______
+- [ ] **I6.** The G3 account outside `managed_accounts`: give it a position before I1. **Expect:** I1 leaves it untouched. — Date: ______ NT: ______ Result: ______
 - [ ] **I7. The real 16:40, default config.** Restore exactly the A5 config (`"flatten_at": "16:40"`, valid token, `flatten_on_disconnect_seconds: null`) and restart. Before 16:40 New York, open a Sim101 position (a Fenrir bracket via `post bracket`, plus a manual 1-lot on another instrument with no stop), then stop Fenrir (`docker compose stop`) and every stream client. Market data running (Simulated Data Feed, or the live feed: CME index futures trade until 17:00 ET). **Expect:** between 16:40:00 and 16:40:15 New York, alert `Fenrir: 16:40 New York flatten: flattening and cancelling on Sim101`, then `… flat on Sim101` per instrument; Sim101 flat, no working orders. Record the PC time zone and the alert and fill times. — Date: ______ NT: ______ Result: ______
 
 ## Sign-off
